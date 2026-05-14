@@ -13,7 +13,7 @@ Chat with local coding agents through White Noise.
 agentnoise exists because the available agent-chat bridges were too heavy,
 too slow-moving, or too awkward for the simple workflow this project needs: a
 native desktop helper, a phone chat UI, strong first-pairing, and local coding
-agents launched through a constrained policy boundary.
+agents launched through a [local policy boundary](https://agentbondage.org/).
 
 The less polite design brief: I had to build it because everything else sucks
 and Jeff moves too slow.
@@ -22,7 +22,7 @@ such alpha, much wow.
 
 ## What It Does
 
-agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through `bondage`, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
+agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through [`bondage`](https://agentbondage.org/), stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The first supported target is macOS.
 
@@ -34,6 +34,26 @@ The first supported target is macOS.
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
 - OS keychain access if using automatic White Noise login repair
 - a dedicated White Noise group for agent control
+
+## Security Stack
+
+agentnoise is the phone and White Noise control plane. It does not try to make
+remote chat messages safe by itself; it keeps command parsing small, requires a
+first-pairing PIN before trusting a sender, and hands local execution to the
+agent security stack.
+
+The intended stack is:
+
+- [White Noise](https://www.whitenoise.chat/) carries the phone chat and desktop identity discovery.
+- The OS keychain stores the dedicated desktop helper `nsec`; `config.toml` stores only public identity and runtime configuration.
+- [`bondage`](https://agentbondage.org/) is the local launcher/policy boundary for Codex, Claude, and other agent profiles. It keeps launch decisions explicit: pinned target, expected hash, configured args, and selected sandbox profile.
+- [`envchain-xtra`](https://envchain-xtra.org/) can be used under bondage when an agent profile needs explicit secret release instead of ambient shell environment.
+- [`nono`](https://nono.sh/) can provide the OS sandbox layer used by bondage profiles.
+- [Learn to Prompt](https://learntoprompt.org/guides/agent-stack.html) is the living operator guide for the larger local agent stack, sandbox profiles, prompt/workflow conventions, and vendor-independent setup notes.
+
+In short: the phone can ask for work, agentnoise authenticates and routes the
+request, and the local stack decides what the agent process is actually allowed
+to touch.
 
 ## First Run
 
@@ -188,7 +208,7 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 - Put only trusted devices/users in agentnoise control chats.
 - Keep first pairing local: the sender must prove they can see the desktop PIN.
 - Keep repos as configured aliases.
-- Keep agent execution behind `bondage`.
+- Keep agent execution behind [`bondage`](https://agentbondage.org/).
 - Store the bot `nsec` in the OS keychain, not in `config.toml`.
 
 ## More
@@ -198,6 +218,8 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)
 - [Homebrew packaging](docs/homebrew.md)
+- [Learn to Prompt agent stack](https://learntoprompt.org/guides/agent-stack.html)
+- [Bondage local launcher](https://agentbondage.org/)
 
 ## License
 
