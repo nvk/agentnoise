@@ -32,6 +32,7 @@ struct PairingRuntime {
 #[derive(Debug, Parser)]
 #[command(name = "agentnoise")]
 #[command(about = "Chat with local coding agents through White Noise")]
+#[command(version)]
 struct Cli {
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
