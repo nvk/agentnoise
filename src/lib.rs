@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod launchd;
 pub mod paths;
 pub mod runner;
+pub mod runtime;
 pub mod secrets;
 pub mod service;
 pub mod session;

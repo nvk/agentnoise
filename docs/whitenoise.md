@@ -61,7 +61,7 @@ agentnoise up
 ```
 
 `up` creates or reuses the default `desktop` identity, stores the `nsec` in
-the OS keychain, writes the desktop `npub` into `config.toml`, starts White
+the OS keychain by default, writes the desktop `npub` into `config.toml`, starts White
 Noise, logs in, publishes the desktop profile/key package, enables startup login
 repair, prints a phone pairing QR when pairing is still needed, discovers
 visible control chats when possible, waits for the first chat when needed, and
@@ -148,6 +148,28 @@ agentnoise doctor
 ```
 
 agentnoise checks `wn whoami --json` at startup. If the configured White Noise account is already logged in, it does not read the keychain. If the account is missing and `use_keychain_nsec = true`, it reads the `nsec` once, feeds it to `wn login`, then zeroizes the in-process copy. The long-running message loop does not poll the keychain.
+
+## Development Burner Identity
+
+For disposable development runs, use a plaintext burner identity instead of the
+OS keychain:
+
+```sh
+agentnoise up --dev-burner-nsec
+```
+
+This creates `dev-burner.nsec` under the agentnoise data dir, writes:
+
+```toml
+[whitenoise]
+dev_burner_nsec = true
+dev_burner_nsec_file = "/path/to/dev-burner.nsec"
+use_keychain_nsec = false
+```
+
+Later `agentnoise up` and Homebrew service starts reuse that file, so keychain
+prompts stay out of the development loop. Treat this as public-testnet-grade
+only: the file is plaintext and should never hold a real identity.
 
 Remove the stored bootstrap secret:
 

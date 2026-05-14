@@ -74,7 +74,13 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
         });
     }
 
-    if config.whitenoise.use_keychain_nsec {
+    if config.whitenoise.dev_burner_nsec {
+        checks.push(Check {
+            level: Level::Warn,
+            name: "dev burner nsec".to_string(),
+            detail: identity_dev_burner_status(config),
+        });
+    } else if config.whitenoise.use_keychain_nsec {
         let store = config.secret_store();
         match store.nsec_status() {
             Ok(true) => checks.push(Check {
@@ -117,6 +123,27 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
         output.push_str(&format!("[{marker}] {}: {}\n", check.name, check.detail));
     }
     output
+}
+
+fn identity_dev_burner_status(config: &Config) -> String {
+    let Some(path) = crate::identity::dev_burner_nsec_path(
+        &config.whitenoise,
+        crate::identity::DEFAULT_IDENTITY_NAME,
+    ) else {
+        return "enabled but no file path configured".to_string();
+    };
+
+    if path.is_file() {
+        format!(
+            "development-only plaintext secret present: {}",
+            path.display()
+        )
+    } else {
+        format!(
+            "development-only plaintext secret missing: {}",
+            path.display()
+        )
+    }
 }
 
 fn command_check(name: &str, command: &str) -> Check {

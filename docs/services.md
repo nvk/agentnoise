@@ -1,8 +1,17 @@
 # Supervisor Services
 
-agentnoise does not daemonize itself. `agentnoise up` is a foreground process:
-it starts or repairs White Noise, listens, logs to stdout/stderr, and exits on a
-fatal error. The host supervisor owns boot, restart, stop, and logs.
+agentnoise does not daemonize itself. The engine is a foreground process owned
+by either a supervisor or the terminal. The host supervisor owns boot, restart,
+stop, and logs.
+
+`agentnoise up` is the human-facing entry point:
+
+- If a supervisor already owns the engine, interactive `agentnoise up` attaches
+  as a local UI and follows logs.
+- If no engine is running, interactive `agentnoise up` takes the engine lock and
+  runs in the foreground.
+- Non-interactive `agentnoise up` waits for the engine lock, which lets a
+  service take over after a foreground troubleshooting run exits.
 
 ## macOS
 
@@ -97,15 +106,18 @@ tail -f "$(brew --prefix)/var/log/agentnoise.log"
 ```
 
 For foreground troubleshooting, run `agentnoise up`. If `allowed_senders` is
-empty, agentnoise prints the QR and rotating PIN. On macOS it also shows the
-desktop identity QR, current PIN, and live countdown while the PIN is valid.
-The process keeps running before the first control chat exists and discovers the
-phone-created chat automatically.
+empty and no service owns the engine, agentnoise prints the QR and rotating PIN.
+On macOS it also shows the desktop identity QR, current PIN, and live countdown
+while the PIN is valid. If the service is already running, the same command
+attaches to the service instead of starting another listener. The process keeps
+running before the first control chat exists and discovers the phone-created
+chat automatically.
 
 ## Secret Storage
 
 agentnoise stores the desktop White Noise `nsec` through the platform credential
-store selected at build time:
+store selected at build time, unless `--dev-burner-nsec` has explicitly enabled
+a plaintext development burner file:
 
 - macOS: Apple Keychain.
 - Windows: Windows Credential Manager.

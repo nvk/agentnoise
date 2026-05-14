@@ -32,7 +32,7 @@ The first supported target is macOS.
 - `bondage` with `codex` and `claude` profiles
 - Codex CLI and Claude Code CLI
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
-- OS keychain access if using automatic White Noise login repair
+- OS keychain access if using automatic White Noise login repair with a real identity
 - a dedicated White Noise group for agent control
 
 ## Security Stack
@@ -45,7 +45,7 @@ agent security stack.
 The intended stack is:
 
 - [White Noise](https://www.whitenoise.chat/) carries the phone chat and desktop identity discovery.
-- The OS keychain stores the dedicated desktop helper `nsec`; `config.toml` stores only public identity and runtime configuration.
+- The OS keychain stores the dedicated desktop helper `nsec` for normal use; `config.toml` stores only public identity and runtime configuration.
 - [`bondage`](https://agentbondage.org/) is the local launcher/policy boundary for Codex, Claude, and other agent profiles. It keeps launch decisions explicit: pinned target, expected hash, configured args, and selected sandbox profile.
 - [`envchain-xtra`](https://envchain-xtra.org/) can be used under bondage when an agent profile needs explicit secret release instead of ambient shell environment.
 - [`nono`](https://nono.sh/) can provide the OS sandbox layer used by bondage profiles.
@@ -69,15 +69,21 @@ Then start it. For normal desktop use, run it as a Homebrew service:
 brew services start nvk/tap/agentnoise
 ```
 
-For a foreground test run, use:
+Then open the local console:
 
 ```sh
 agentnoise up
 ```
 
-Both paths run the same listener. On first run, agentnoise creates the desktop
-identity, stores its `nsec` in the OS keychain, starts White Noise, publishes
-the profile/key package, and opens the pairing window.
+`agentnoise up` is safe to run while the Homebrew service is enabled. If the
+service already owns the listener, `up` attaches as the terminal UI and follows
+the service logs. If no listener is running, `up` takes the foreground lock and
+runs the same engine itself. Non-interactive service starts wait for that lock,
+so the service can take over after a foreground troubleshooting run exits.
+
+On first run, agentnoise creates the desktop identity, stores its `nsec` in the
+OS keychain, starts White Noise, publishes the profile/key package, and opens
+the pairing window.
 
 Pair the phone:
 
@@ -111,6 +117,21 @@ target/release/agentnoise up
 The QR contains the desktop `nprofile`/`npub` plus relay hints. It never exposes
 the desktop `nsec`.
 
+### Development Burner Identity
+
+For local development and throwaway relay testing, skip OS keychain prompts:
+
+```sh
+agentnoise up --dev-burner-nsec
+```
+
+That creates a burner `nsec` at
+`~/Library/Application Support/agentnoise/dev-burner.nsec`, sets
+`whitenoise.dev_burner_nsec = true`, and makes future `agentnoise up` or
+Homebrew service runs use that file instead of the OS keychain. This is
+plaintext by design. Do not use it for a real phone identity or a production
+desktop helper.
+
 If you already have the phone identity `npub`, agentnoise can create the White
 Noise control chat too:
 
@@ -119,8 +140,8 @@ target/release/agentnoise up --phone npub...
 ```
 
 Otherwise scan the QR, create a White Noise chat/group with the desktop
-identity, and leave `agentnoise up` running. If you used `--no-listen` or
-stopped the process, start it again:
+identity, and leave the listener running. If you used `--no-listen` or stopped
+the process, start or attach again:
 
 ```sh
 target/release/agentnoise up
@@ -209,7 +230,8 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 - Keep first pairing local: the sender must prove they can see the desktop PIN.
 - Keep repos as configured aliases.
 - Keep agent execution behind [`bondage`](https://agentbondage.org/).
-- Store the bot `nsec` in the OS keychain, not in `config.toml`.
+- Store the bot `nsec` in the OS keychain for normal use, not in `config.toml`.
+- Use `--dev-burner-nsec` only for throwaway development identities.
 
 ## More
 
