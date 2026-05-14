@@ -28,6 +28,8 @@ pub struct WhitenoiseConfig {
     #[serde(default)]
     pub socket: Option<String>,
     #[serde(default)]
+    pub transport: WhitenoiseTransport,
+    #[serde(default)]
     pub use_keychain_nsec: bool,
     #[serde(default)]
     pub dev_burner_nsec: bool,
@@ -73,6 +75,20 @@ pub struct RunnerConfig {
     pub max_prompt_chars: usize,
     #[serde(default = "default_max_output_chars")]
     pub max_output_chars: usize,
+    #[serde(default = "default_progress_interval_seconds")]
+    pub progress_interval_seconds: u64,
+    #[serde(default = "default_approval_ttl_seconds")]
+    pub approval_ttl_seconds: u64,
+    #[serde(default = "default_worktree_dir_string")]
+    pub worktree_dir: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhitenoiseTransport {
+    #[default]
+    Cli,
+    Socket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +179,7 @@ impl Config {
                 account: None,
                 wn_bin: default_wn_bin(),
                 socket: None,
+                transport: WhitenoiseTransport::Cli,
                 use_keychain_nsec: false,
                 dev_burner_nsec: false,
                 dev_burner_nsec_file: None,
@@ -186,6 +203,9 @@ impl Config {
                 log_dir: default_log_dir_string(),
                 max_prompt_chars: default_max_prompt_chars(),
                 max_output_chars: default_max_output_chars(),
+                progress_interval_seconds: default_progress_interval_seconds(),
+                approval_ttl_seconds: default_approval_ttl_seconds(),
+                worktree_dir: default_worktree_dir_string(),
             },
             agents: AgentsConfig {
                 codex: AgentConfig {
@@ -216,8 +236,19 @@ impl Config {
         if self.runner.max_output_chars == 0 {
             bail!("runner.max_output_chars must be greater than zero");
         }
+        if self.runner.progress_interval_seconds == 0 {
+            bail!("runner.progress_interval_seconds must be greater than zero");
+        }
+        if self.runner.approval_ttl_seconds < 30 {
+            bail!("runner.approval_ttl_seconds must be at least 30");
+        }
         if self.whitenoise.pairing_pin_seconds < 10 {
             bail!("whitenoise.pairing_pin_seconds must be at least 10");
+        }
+        if self.whitenoise.transport == WhitenoiseTransport::Socket
+            && self.whitenoise.resolved_socket().is_none()
+        {
+            bail!("whitenoise.transport = \"socket\" requires whitenoise.socket");
         }
 
         let mut aliases = HashSet::new();
@@ -260,6 +291,26 @@ impl Config {
 
     pub fn resolved_jobs_path(&self) -> PathBuf {
         self.resolved_data_dir().join("jobs.json")
+    }
+
+    pub fn resolved_event_log_path(&self) -> PathBuf {
+        self.resolved_data_dir().join("runtime-events.jsonl")
+    }
+
+    pub fn resolved_approvals_path(&self) -> PathBuf {
+        self.resolved_data_dir().join("approvals.json")
+    }
+
+    pub fn resolved_attachments_path(&self) -> PathBuf {
+        self.resolved_data_dir().join("attachments.json")
+    }
+
+    pub fn resolved_worktree_db_path(&self) -> PathBuf {
+        self.resolved_data_dir().join("worktrees.json")
+    }
+
+    pub fn resolved_worktree_dir(&self) -> PathBuf {
+        expand_tilde(&self.runner.worktree_dir)
     }
 
     pub fn resolved_chat_state_path(&self) -> PathBuf {
@@ -377,12 +428,24 @@ fn default_log_dir_string() -> String {
     default_log_dir().display().to_string()
 }
 
+fn default_worktree_dir_string() -> String {
+    default_data_dir().join("worktrees").display().to_string()
+}
+
 fn default_max_prompt_chars() -> usize {
     8_000
 }
 
 fn default_max_output_chars() -> usize {
     2_400
+}
+
+fn default_progress_interval_seconds() -> u64 {
+    15
+}
+
+fn default_approval_ttl_seconds() -> u64 {
+    600
 }
 
 fn default_hermes_agent_config() -> AgentConfig {

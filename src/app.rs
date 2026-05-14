@@ -5,13 +5,19 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
+use crate::approvals::{self, ApprovalStore};
+use crate::attachments::{self, AttachmentStore};
 use crate::auth::{PairingGate, is_pairing_pin_message};
-use crate::chat::{ChatCommand, parse_chat_command};
+use crate::capabilities;
+use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
 use crate::config::{Config, RepoConfig};
 use crate::jobs::JobStore;
+use crate::progress::{ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
+use crate::wn::MessageEvent;
 use crate::workspace;
+use crate::worktrees::{self, WorktreeStore};
 
 #[derive(Debug)]
 pub enum RouteAction {
@@ -64,6 +70,9 @@ pub struct AgentApp {
     jobs: JobStore,
     runner: Runner,
     sessions: ChatStateStore,
+    approvals: ApprovalStore,
+    attachments: AttachmentStore,
+    worktrees: WorktreeStore,
     auth: AuthState,
 }
 
@@ -94,6 +103,12 @@ impl AgentApp {
             .context("opening job store")?;
         let sessions = ChatStateStore::open(&config.resolved_chat_state_path())
             .context("opening chat state")?;
+        let approvals =
+            ApprovalStore::open(&config.resolved_approvals_path()).context("opening approvals")?;
+        let attachments = AttachmentStore::open(&config.resolved_attachments_path())
+            .context("opening attachment store")?;
+        let worktrees = WorktreeStore::open(&config.resolved_worktree_db_path())
+            .context("opening worktrees")?;
         let runner = Runner::new(config.clone(), jobs.clone());
         let auth = AuthState::new(&config, pairing_gate);
         Ok(Self {
@@ -102,6 +117,9 @@ impl AgentApp {
             jobs,
             runner,
             sessions,
+            approvals,
+            attachments,
+            worktrees,
             auth,
         })
     }
@@ -139,6 +157,9 @@ impl AgentApp {
         match command {
             ChatCommand::Help => Ok(RouteAction::Reply(help_text())),
             ChatCommand::Status => Ok(RouteAction::Reply(self.status_text(&session_key))),
+            ChatCommand::Agents => Ok(RouteAction::Reply(capabilities::render_capabilities(
+                &self.config,
+            ))),
             ChatCommand::New { name } => self.new_session_action(&session_key, sender, name),
             ChatCommand::Rename { name } => Ok(RouteAction::Reply(self.rename_text(
                 &session_key,
@@ -162,8 +183,49 @@ impl AgentApp {
             ChatCommand::Jobs => Ok(RouteAction::Reply(self.jobs_text())),
             ChatCommand::Tail { job_id } => Ok(RouteAction::Reply(self.tail_text(&job_id))),
             ChatCommand::Cancel { job_id } => Ok(RouteAction::Reply(self.cancel_text(&job_id))),
+            ChatCommand::Approvals => Ok(RouteAction::Reply(approvals::render_pending(
+                &self.approvals.pending(),
+            ))),
+            ChatCommand::Approve { approval_id } => {
+                match self.approvals.approve(&approval_id, &session_key) {
+                    Ok(request) => Ok(RouteAction::Run(request)),
+                    Err(error) => Ok(RouteAction::Reply(format!(
+                        "Error: approval failed: {error:#}"
+                    ))),
+                }
+            }
+            ChatCommand::Deny { approval_id } => {
+                match self.approvals.deny(&approval_id, &session_key) {
+                    Ok(()) => Ok(RouteAction::Reply(format!(
+                        "Denied approval: {approval_id}"
+                    ))),
+                    Err(error) => Ok(RouteAction::Reply(format!("Error: deny failed: {error:#}"))),
+                }
+            }
+            ChatCommand::Attachments => Ok(RouteAction::Reply(self.attachments_text())),
+            ChatCommand::Attach { target } => {
+                Ok(RouteAction::Reply(self.attach_text(target.as_deref())))
+            }
+            ChatCommand::Worktrees => Ok(RouteAction::Reply(self.worktrees_text(&session_key))),
+            ChatCommand::Worktree(command) => Ok(RouteAction::Reply(
+                self.worktree_text(&session_key, command),
+            )),
             ChatCommand::Run(request) => match self.prepare_request(&session_key, request) {
-                Ok(request) => Ok(RouteAction::Run(request)),
+                Ok(request) => {
+                    if let Some(reason) = approvals::approval_reason(&self.config, &request) {
+                        let approval = self.approvals.create(
+                            &session_key,
+                            request,
+                            reason,
+                            self.config.runner.approval_ttl_seconds,
+                        )?;
+                        Ok(RouteAction::Reply(approvals::render_approval_request(
+                            &approval,
+                        )))
+                    } else {
+                        Ok(RouteAction::Run(request))
+                    }
+                }
                 Err(error) => Ok(RouteAction::Reply(format!("Error: {error:#}"))),
             },
         }
@@ -181,6 +243,34 @@ impl AgentApp {
         Ok(RouteAction::Reply(message.to_string()))
     }
 
+    pub fn route_unsupported_event(&self, event: &MessageEvent) -> Result<RouteAction> {
+        if self.should_ignore_bot(event.sender.as_deref())
+            || self.should_ignore_sender(event.sender.as_deref())
+        {
+            return Ok(RouteAction::Ignore);
+        }
+
+        if event.attachments.is_empty() {
+            return Ok(RouteAction::Reply(
+                event.unsupported.clone().unwrap_or_else(|| {
+                    "Unsupported White Noise message. Send /help for commands.".to_string()
+                }),
+            ));
+        }
+
+        let record = self.attachments.add(
+            event.group_id.clone(),
+            event.sender.clone(),
+            event.id.clone(),
+            event.attachments.clone(),
+        )?;
+        Ok(RouteAction::Reply(format!(
+            "Attachment saved: {}\nSend /attach {} for details.",
+            attachments::render_record_summary(&record),
+            record.id
+        )))
+    }
+
     pub fn accepts_current_pairing_pin(&self, sender: Option<&str>, text: &str) -> bool {
         let Some(sender) = sender.map(str::trim).filter(|sender| !sender.is_empty()) else {
             return false;
@@ -190,6 +280,36 @@ impl AgentApp {
 
     pub fn run_request(&self, request: AgentRequest) -> Result<String> {
         let record = self.runner.run_blocking(request)?;
+        Ok(format!(
+            "Job {} {}\nDetails: /tail {}\n\n{}",
+            record.id,
+            record.status,
+            record.id,
+            record
+                .summary
+                .unwrap_or_else(|| "no output captured".to_string())
+        ))
+    }
+
+    pub fn run_request_with_progress(
+        &self,
+        request: AgentRequest,
+        send_progress: impl Fn(String) + Send + Sync + 'static,
+    ) -> Result<String> {
+        let mut limiter = ProgressRateLimiter::new(self.config.runner.progress_interval_seconds);
+        let callback = Arc::new(Mutex::new(move |event: crate::progress::ProgressEvent| {
+            if limiter.should_send(&event) {
+                send_progress(render_progress(&event));
+            }
+        }));
+        let record = self.runner.run_blocking_with_progress(
+            request,
+            Arc::new(move |event| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(event);
+                }
+            }),
+        )?;
         Ok(format!(
             "Job {} {}\nDetails: /tail {}\n\n{}",
             record.id,
@@ -522,6 +642,8 @@ impl AgentApp {
             .unwrap_or_else(|_| SessionState::new(None));
         session.repo_alias = Some(repo_alias.to_string());
         session.cwd = ".".to_string();
+        session.worktree = None;
+        session.worktree_path = None;
         match self.sessions.set(sender_key, session) {
             Ok(()) => format!("Workspace: {repo_alias}:/"),
             Err(error) => format!("Error: failed to save workspace: {error:#}"),
@@ -559,6 +681,7 @@ impl AgentApp {
                 let Some(root) = self.config.repo_path(&alias) else {
                     return format!("Error: unknown repo alias: {alias}");
                 };
+                let root = session.worktree_path.clone().unwrap_or(root);
                 match workspace::relative_cwd(&root, &path) {
                     Ok(cwd) => {
                         session.cwd = cwd;
@@ -597,6 +720,9 @@ impl AgentApp {
                 bail!("no repo selected; use /use <repo>");
             };
             request = request.with_workspace(repo_alias, session.cwd);
+            if let Some(root) = session.worktree_path {
+                request = request.with_workspace_root(root);
+            }
         }
 
         Ok(request)
@@ -619,6 +745,7 @@ impl AgentApp {
         let Some(root) = self.config.repo_path(&alias) else {
             bail!("unknown repo alias: {alias}");
         };
+        let root = session.worktree_path.clone().unwrap_or(root);
         let path = workspace::resolve_child(&root, &session.cwd, path)?;
         Ok((alias, session, path))
     }
@@ -673,6 +800,112 @@ impl AgentApp {
             Ok(true) => format!("Cancel requested: {job_id}"),
             Ok(false) => format!("No running job: {job_id}"),
             Err(error) => format!("Error: cancel failed: {error:#}"),
+        }
+    }
+
+    fn attachments_text(&self) -> String {
+        let records = self.attachments.list_recent(10);
+        if records.is_empty() {
+            return "No attachments saved yet.".to_string();
+        }
+        let lines = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                format!(
+                    "{}. {}",
+                    index + 1,
+                    attachments::render_record_summary(record)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Attachments\n{lines}")
+    }
+
+    fn attach_text(&self, target: Option<&str>) -> String {
+        let Some(target) = target.map(str::trim).filter(|target| !target.is_empty()) else {
+            return "Usage: /attach <number|id>".to_string();
+        };
+        match self.attachments.get(target) {
+            Some(record) => attachments::render_record_details(&record),
+            None => format!("No matching attachment: {target}"),
+        }
+    }
+
+    fn worktrees_text(&self, sender_key: &str) -> String {
+        match self.session(sender_key) {
+            Ok(session) => {
+                let Some(alias) = session.repo_alias.as_deref() else {
+                    return "No repo selected. Send /use <repo>.".to_string();
+                };
+                let records = self.worktrees.list(Some(alias));
+                worktrees::render_worktrees(&records, session.worktree.as_deref())
+            }
+            Err(error) => format!("Error: workspace failed: {error:#}"),
+        }
+    }
+
+    fn worktree_text(&self, sender_key: &str, command: WorktreeCommand) -> String {
+        let session = match self.session(sender_key) {
+            Ok(session) => session,
+            Err(error) => return format!("Error: workspace failed: {error:#}"),
+        };
+        let Some(alias) = session.repo_alias.clone() else {
+            return "No repo selected. Send /use <repo>.".to_string();
+        };
+
+        match command {
+            WorktreeCommand::New { name } => {
+                match self.worktrees.create(&self.config, &alias, &name) {
+                    Ok(record) => self.switch_to_worktree(sender_key, session, &record),
+                    Err(error) => format!("Error: worktree create failed: {error:#}"),
+                }
+            }
+            WorktreeCommand::Use { name } => {
+                let Some(record) = self.worktrees.find(&alias, &name) else {
+                    return format!("Unknown worktree: {name}");
+                };
+                self.switch_to_worktree(sender_key, session, &record)
+            }
+            WorktreeCommand::Remove { name, confirm } => {
+                if !confirm {
+                    return format!("Send /worktree remove {name} confirm to remove it.");
+                }
+                match self.worktrees.remove(&self.config, &alias, &name) {
+                    Ok(record) => {
+                        if session.worktree.as_deref() == Some(record.name.as_str()) {
+                            let mut session = session;
+                            session.worktree = None;
+                            session.worktree_path = None;
+                            session.cwd = ".".to_string();
+                            self.sessions.set(sender_key, session).ok();
+                        }
+                        format!("Removed worktree: {}", record.name)
+                    }
+                    Err(error) => format!("Error: worktree remove failed: {error:#}"),
+                }
+            }
+        }
+    }
+
+    fn switch_to_worktree(
+        &self,
+        sender_key: &str,
+        mut session: SessionState,
+        record: &worktrees::WorktreeRecord,
+    ) -> String {
+        session.repo_alias = Some(record.repo_alias.clone());
+        session.cwd = ".".to_string();
+        session.worktree = Some(record.name.clone());
+        session.worktree_path = Some(record.path.clone());
+        match self.sessions.set(sender_key, session.clone()) {
+            Ok(()) => format!(
+                "Worktree: {}\nWorkspace: {}",
+                record.name,
+                workspace_text(&session)
+            ),
+            Err(error) => format!("Error: failed to save worktree: {error:#}"),
         }
     }
 }
@@ -815,11 +1048,20 @@ fn session_display_name(key: &str, session: &SessionState) -> String {
 }
 
 fn workspace_text(session: &SessionState) -> String {
-    session
-        .repo_alias
+    let Some(alias) = session.repo_alias.as_ref() else {
+        return "none".to_string();
+    };
+    let suffix = session
+        .worktree
         .as_ref()
-        .map(|alias| format!("{}:{}", alias, workspace::display_cwd(&session.cwd)))
-        .unwrap_or_else(|| "none".to_string())
+        .map(|name| format!(" [wt:{name}]"))
+        .unwrap_or_default();
+    format!(
+        "{}:{}{}",
+        alias,
+        workspace::display_cwd(&session.cwd),
+        suffix
+    )
 }
 
 fn render_ls(alias: &str, path: &Path) -> String {
@@ -879,6 +1121,7 @@ fn help_text() -> String {
         "",
         "Workspace",
         "/status",
+        "/agents",
         "/new [name]",
         "/rename [name]",
         "/list",
@@ -908,6 +1151,17 @@ fn help_text() -> String {
         "/jobs",
         "/tail <job>",
         "/cancel <job>",
+        "/approvals",
+        "/approve <approval>",
+        "/deny <approval>",
+        "/attachments",
+        "/attach <number|id>",
+        "",
+        "Worktrees",
+        "/worktrees",
+        "/worktree new <name>",
+        "/worktree use <name>",
+        "/worktree remove <name> confirm",
         "",
         "/help",
     ]

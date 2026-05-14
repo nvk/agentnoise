@@ -6,6 +6,7 @@ use crate::runner::{AgentKind, AgentRequest};
 pub enum ChatCommand {
     Help,
     Status,
+    Agents,
     New { name: Option<String> },
     Rename { name: Option<String> },
     Sessions,
@@ -19,7 +20,21 @@ pub enum ChatCommand {
     Jobs,
     Tail { job_id: String },
     Cancel { job_id: String },
+    Approvals,
+    Approve { approval_id: String },
+    Deny { approval_id: String },
+    Attachments,
+    Attach { target: Option<String> },
+    Worktrees,
+    Worktree(WorktreeCommand),
     Run(AgentRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeCommand {
+    New { name: String },
+    Use { name: String },
+    Remove { name: String, confirm: bool },
 }
 
 pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
@@ -34,6 +49,7 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
     match command.as_str() {
         "help" => Ok(ChatCommand::Help),
         "status" => Ok(ChatCommand::Status),
+        "agents" => Ok(ChatCommand::Agents),
         "new" => Ok(ChatCommand::New {
             name: optional(rest),
         }),
@@ -67,6 +83,21 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
             let job_id = required(rest, "usage: /cancel <job>")?;
             Ok(ChatCommand::Cancel { job_id })
         }
+        "approvals" => Ok(ChatCommand::Approvals),
+        "approve" => {
+            let approval_id = required(rest, "usage: /approve <approval>")?;
+            Ok(ChatCommand::Approve { approval_id })
+        }
+        "deny" => {
+            let approval_id = required(rest, "usage: /deny <approval>")?;
+            Ok(ChatCommand::Deny { approval_id })
+        }
+        "attachments" => Ok(ChatCommand::Attachments),
+        "attach" => Ok(ChatCommand::Attach {
+            target: optional(rest),
+        }),
+        "worktrees" => Ok(ChatCommand::Worktrees),
+        "worktree" => parse_worktree(rest),
         "codex" => parse_run(AgentKind::Codex, rest),
         "claude" => parse_run(AgentKind::Claude, rest),
         "hermes" => parse_run(AgentKind::Hermes, rest),
@@ -76,6 +107,29 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
         "claude-resume" => parse_resume(AgentKind::Claude, rest),
         "hermes-resume" => parse_resume(AgentKind::Hermes, rest),
         _ => bail!("unknown command: /{command}"),
+    }
+}
+
+fn parse_worktree(rest: &str) -> Result<ChatCommand> {
+    let (subcommand, rest) = split_first(rest);
+    match subcommand.to_ascii_lowercase().as_str() {
+        "new" => Ok(ChatCommand::Worktree(WorktreeCommand::New {
+            name: required(rest, "usage: /worktree new <name>")?,
+        })),
+        "use" => Ok(ChatCommand::Worktree(WorktreeCommand::Use {
+            name: required(rest, "usage: /worktree use <name>")?,
+        })),
+        "remove" => {
+            let (name, maybe_confirm) = split_first(rest);
+            if name.is_empty() {
+                bail!("usage: /worktree remove <name> confirm");
+            }
+            Ok(ChatCommand::Worktree(WorktreeCommand::Remove {
+                name: name.to_string(),
+                confirm: maybe_confirm.eq_ignore_ascii_case("confirm"),
+            }))
+        }
+        _ => bail!("usage: /worktree <new|use|remove> ..."),
     }
 }
 
@@ -154,6 +208,7 @@ mod tests {
     #[test]
     fn parses_status() {
         assert_eq!(parse_chat_command("/status").unwrap(), ChatCommand::Status);
+        assert_eq!(parse_chat_command("/agents").unwrap(), ChatCommand::Agents);
     }
 
     #[test]
@@ -259,6 +314,39 @@ mod tests {
                 "h123",
                 "keep going"
             ))
+        );
+    }
+
+    #[test]
+    fn parses_approval_attachment_and_worktree_commands() {
+        assert_eq!(
+            parse_chat_command("/approvals").unwrap(),
+            ChatCommand::Approvals
+        );
+        assert_eq!(
+            parse_chat_command("/approve apr-123").unwrap(),
+            ChatCommand::Approve {
+                approval_id: "apr-123".to_string()
+            }
+        );
+        assert_eq!(
+            parse_chat_command("/attach 1").unwrap(),
+            ChatCommand::Attach {
+                target: Some("1".to_string())
+            }
+        );
+        assert_eq!(
+            parse_chat_command("/worktree new fix ui").unwrap(),
+            ChatCommand::Worktree(WorktreeCommand::New {
+                name: "fix ui".to_string()
+            })
+        );
+        assert_eq!(
+            parse_chat_command("/worktree remove fix-ui confirm").unwrap(),
+            ChatCommand::Worktree(WorktreeCommand::Remove {
+                name: "fix-ui".to_string(),
+                confirm: true
+            })
         );
     }
 

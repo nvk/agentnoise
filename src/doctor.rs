@@ -35,6 +35,15 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
     ]);
 
     let group_count = config.whitenoise.control_group_ids().len();
+    checks.push(Check {
+        level: Level::Ok,
+        name: "White Noise transport".to_string(),
+        detail: format!("{:?}", config.whitenoise.transport).to_ascii_lowercase(),
+    });
+    if let Some(socket) = config.whitenoise.resolved_socket() {
+        checks.push(path_check("White Noise socket", &socket));
+    }
+
     if group_count == 0 {
         checks.push(Check {
             level: Level::Warn,
@@ -118,6 +127,16 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
             &expand_tilde(&repo.path),
         ));
     }
+
+    checks.push(path_check("event log", &config.resolved_event_log_path()));
+    checks.push(path_check(
+        "approvals db",
+        &config.resolved_approvals_path(),
+    ));
+    checks.push(path_check(
+        "attachments db",
+        &config.resolved_attachments_path(),
+    ));
 
     let mut output = String::from("agentnoise doctor\n\n");
     for check in checks {

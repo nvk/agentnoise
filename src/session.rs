@@ -16,6 +16,10 @@ pub struct SessionState {
     pub name: Option<String>,
     #[serde(default)]
     pub closed: bool,
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<PathBuf>,
 }
 
 impl SessionState {
@@ -25,6 +29,8 @@ impl SessionState {
             cwd: default_cwd(),
             name: None,
             closed: false,
+            worktree: None,
+            worktree_path: None,
         }
     }
 
@@ -34,6 +40,12 @@ impl SessionState {
         }
         self.name = self
             .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+        self.worktree = self
+            .worktree
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())

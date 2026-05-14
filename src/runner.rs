@@ -16,8 +16,12 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::jobs::{JobRecord, JobStore};
+use crate::progress::{self, ProgressEvent};
 use crate::text::format_chat_text;
 use crate::workspace;
+
+type ProgressCallback = Arc<dyn Fn(ProgressEvent) + Send + Sync + 'static>;
+type LineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -37,11 +41,13 @@ impl fmt::Display for AgentKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRequest {
     pub agent: AgentKind,
     pub repo_alias: Option<String>,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
     pub prompt: String,
     pub resume_session: Option<String>,
 }
@@ -52,6 +58,7 @@ impl AgentRequest {
             agent,
             repo_alias: Some(repo_alias.into()),
             cwd: None,
+            workspace_root: None,
             prompt: prompt.into(),
             resume_session: None,
         }
@@ -62,6 +69,7 @@ impl AgentRequest {
             agent,
             repo_alias: None,
             cwd: None,
+            workspace_root: None,
             prompt: prompt.into(),
             resume_session: None,
         }
@@ -72,6 +80,7 @@ impl AgentRequest {
             agent,
             repo_alias: None,
             cwd: None,
+            workspace_root: None,
             prompt: prompt.into(),
             resume_session: Some(session.into()),
         }
@@ -80,6 +89,11 @@ impl AgentRequest {
     pub fn with_workspace(mut self, repo_alias: impl Into<String>, cwd: impl Into<String>) -> Self {
         self.repo_alias = Some(repo_alias.into());
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
         self
     }
 
@@ -108,6 +122,22 @@ impl Runner {
     }
 
     pub fn run_blocking(&self, request: AgentRequest) -> Result<JobRecord> {
+        self.run_blocking_inner(request, None)
+    }
+
+    pub fn run_blocking_with_progress(
+        &self,
+        request: AgentRequest,
+        progress: ProgressCallback,
+    ) -> Result<JobRecord> {
+        self.run_blocking_inner(request, Some(progress))
+    }
+
+    fn run_blocking_inner(
+        &self,
+        request: AgentRequest,
+        progress_callback: Option<ProgressCallback>,
+    ) -> Result<JobRecord> {
         if request.prompt.chars().count() > self.config.runner.max_prompt_chars {
             bail!(
                 "prompt is too long: max {} chars",
@@ -117,6 +147,9 @@ impl Runner {
 
         let plan = self.build_command(&request)?;
         let job = self.jobs.create(&request)?;
+        if let Some(progress_callback) = &progress_callback {
+            progress_callback(progress::started(request.agent, &job.id));
+        }
 
         let mut command = Command::new(&plan.program);
         command.args(&plan.args);
@@ -132,6 +165,16 @@ impl Runner {
             Err(error) => {
                 let summary = format!("failed to spawn {}: {error}", plan.program);
                 self.write_log(&job, &plan, "", &summary)?;
+                if let Some(progress_callback) = &progress_callback {
+                    progress_callback(ProgressEvent {
+                        kind: progress::ProgressKind::Error,
+                        agent: request.agent,
+                        job_id: Some(job.id.clone()),
+                        label: "spawn failed".to_string(),
+                        detail: Some(summary.clone()),
+                        final_event: true,
+                    });
+                }
                 return self.jobs.mark_failed(&job.id, summary);
             }
         };
@@ -141,6 +184,16 @@ impl Runner {
         let capture_limit = capture_max_bytes(self.config.runner.max_output_chars);
         let stdout_bytes = Arc::new(Mutex::new(CaptureBuffer::new(capture_limit)));
         let stderr_bytes = Arc::new(Mutex::new(CaptureBuffer::new(capture_limit)));
+        let progress_observer = progress_callback.clone().map(|progress_callback| {
+            let agent = request.agent;
+            let job_id = job.id.clone();
+            Arc::new(move |line: &str| {
+                if let Some(mut event) = progress::parse_progress_line(agent, line) {
+                    event.job_id = Some(job_id.clone());
+                    progress_callback(event);
+                }
+            }) as LineObserver
+        });
 
         let stdout_thread = child.stdout.take().map(|stdout| {
             copy_stream_to_log(
@@ -148,6 +201,7 @@ impl Runner {
                 stdout,
                 Arc::clone(&log_file),
                 Arc::clone(&stdout_bytes),
+                progress_observer.clone(),
             )
         });
         let stderr_thread = child.stderr.take().map(|stderr| {
@@ -156,6 +210,7 @@ impl Runner {
                 stderr,
                 Arc::clone(&log_file),
                 Arc::clone(&stderr_bytes),
+                None,
             )
         });
 
@@ -180,7 +235,15 @@ impl Runner {
             status.success(),
             self.config.runner.max_output_chars,
         );
-        self.jobs.finish(&job.id, status.code(), summary)
+        let record = self.jobs.finish(&job.id, status.code(), summary)?;
+        if let Some(progress_callback) = &progress_callback {
+            progress_callback(progress::finished(
+                request.agent,
+                &job.id,
+                &record.status.to_string(),
+            ));
+        }
+        Ok(record)
     }
 
     pub fn cancel(&self, job_id: &str) -> Result<bool> {
@@ -319,6 +382,15 @@ impl Runner {
     }
 
     fn required_repo_root(&self, request: &AgentRequest) -> Result<PathBuf> {
+        if let Some(root) = &request.workspace_root {
+            if !root.is_dir() {
+                bail!("workspace root is not a directory: {}", root.display());
+            }
+            return root
+                .canonicalize()
+                .with_context(|| format!("canonicalizing {}", root.display()));
+        }
+
         let Some(alias) = &request.repo_alias else {
             bail!("repo alias is required");
         };
@@ -393,9 +465,11 @@ fn copy_stream_to_log(
     mut reader: impl Read + Send + 'static,
     log_file: Arc<Mutex<File>>,
     captured: Arc<Mutex<CaptureBuffer>>,
+    line_observer: Option<LineObserver>,
 ) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
+        let mut line_buffer = String::new();
         loop {
             let n = reader
                 .read(&mut buffer)
@@ -420,9 +494,35 @@ fn copy_stream_to_log(
                     .with_context(|| format!("writing {label} to log"))?;
                 log_file.flush().ok();
             }
+            if let Some(observer) = &line_observer {
+                observe_lines(
+                    &mut line_buffer,
+                    &String::from_utf8_lossy(&buffer[..n]),
+                    observer,
+                );
+            }
+        }
+        if let Some(observer) = &line_observer
+            && !line_buffer.trim().is_empty()
+        {
+            observer(line_buffer.trim());
         }
         Ok(())
     })
+}
+
+fn observe_lines(line_buffer: &mut String, chunk: &str, observer: &LineObserver) {
+    line_buffer.push_str(chunk);
+    while let Some(index) = line_buffer.find('\n') {
+        let line = line_buffer[..index].trim().to_string();
+        line_buffer.drain(..=index);
+        if !line.is_empty() {
+            observer(&line);
+        }
+    }
+    if line_buffer.len() > 16 * 1024 {
+        line_buffer.clear();
+    }
 }
 
 fn join_log_thread(handle: Option<thread::JoinHandle<Result<()>>>) -> Result<()> {

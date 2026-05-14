@@ -171,6 +171,11 @@ Later `agentnoise up` and Homebrew service starts reuse that file, so keychain
 prompts stay out of the development loop. Treat this as public-testnet-grade
 only: the file is plaintext and should never hold a real identity.
 
+This disables agentnoise's own OS keychain dependency for the desktop helper
+identity. White Noise still controls daemon account persistence after `wn
+login`; if that upstream store is unavailable, agentnoise reports the White
+Noise login failure instead of falling back to the agentnoise keychain.
+
 Remove the stored bootstrap secret:
 
 ```sh

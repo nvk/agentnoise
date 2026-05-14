@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.8** - **Parity hardening pass.** Added a fake phone harness for
+isolated White Noise testing, durable runtime event journaling, `agentnoise
+status`, progress messages from Codex/Claude JSON streams, approval replay for
+risky local profiles, attachment metadata capture, a direct `wnd` socket probe,
+`/agents`, opt-in git worktree sessions, and local release smoke checks.
+
 **v0.1.7** - **Optional Hermes backend.** Added `/hermes` and
 `/hermes-resume` as disabled-by-default commands that route Hermes through the
 same `bondage` local policy boundary used for Codex and Claude. Command
@@ -117,6 +123,15 @@ tail -f "$(brew --prefix)/var/log/agentnoise.log"
 tail -f "$(brew --prefix)/var/log/agentnoise.err.log"
 ```
 
+Useful local diagnostics:
+
+```sh
+agentnoise status
+agentnoise doctor
+agentnoise agents
+agentnoise fake-phone plan
+```
+
 The service is expected to start even before the White Noise chat exists. It
 waits, keeps showing a rotating PIN while pairing is required, and discovers
 the phone-created chat automatically. During first pairing it also reads a small
@@ -147,6 +162,11 @@ That creates a burner `nsec` at
 Homebrew service runs use that file instead of the OS keychain. This is
 plaintext by design. Do not use it for a real phone identity or a production
 desktop helper.
+
+This flag bypasses the agentnoise keychain store. White Noise still owns its
+own daemon account store after `wn login`; on platforms where that store is
+unavailable, `agentnoise doctor` or startup will show the upstream White Noise
+login error explicitly.
 
 If you already have the phone identity `npub`, agentnoise can create the White
 Noise control chat too:
@@ -276,6 +296,7 @@ plaintext burner identity and avoids Secret Service setup.
 ## Chat Commands
 
 - `/status`
+- `/agents`
 - `/new [name]`
 - `/rename [name]`
 - `/list`
@@ -301,6 +322,15 @@ plaintext burner identity and avoids Secret Service setup.
 - `/jobs`
 - `/tail <job>`
 - `/cancel <job>`
+- `/approvals`
+- `/approve <approval>`
+- `/deny <approval>`
+- `/attachments`
+- `/attach <number|id>`
+- `/worktrees`
+- `/worktree new <name>`
+- `/worktree use <name>`
+- `/worktree remove <name> confirm`
 - `/help`
 
 Each White Noise chat is one agentnoise session. `/new bugfix-ui` creates a new
@@ -316,6 +346,59 @@ for the session, `/cd ..` moves within that selected repo, and plain `/codex` or
 enabled. `/wiki` follows the local Codex `codex-wiki` convention by prefixing
 `@wiki`; `/claude-wiki` sends a `wiki ...` prompt for Claude installations with
 the LLM Wiki instructions/plugin available.
+
+Codex and Claude JSON streams are converted into occasional progress messages
+while a job runs. The default interval is conservative
+(`runner.progress_interval_seconds = 15`) so the phone chat does not become
+unreadable. Final job output still arrives as one normal reply, with `/tail
+<job>` for logs.
+
+If a configured agent profile looks intentionally elevated, for example a
+profile or permission mode containing `unsafe`, agentnoise creates an approval
+object instead of launching immediately. Approvals are bound to the same White
+Noise chat that requested them and expire after
+`runner.approval_ttl_seconds`.
+
+Images and files sent by the phone are not handed to coding agents yet.
+agentnoise saves the metadata it can see, replies with an attachment id, and
+lets the user inspect it with `/attachments` and `/attach <id>`.
+
+Git worktrees are opt-in per chat. `/worktree new fix-ui` creates a git
+worktree under the configured `runner.worktree_dir`, switches only that chat to
+the new path, and keeps other White Noise sessions on their existing
+workspaces. Removal requires the explicit `confirm` word.
+
+## Fake Phone Testing
+
+`agentnoise fake-phone` starts from a separate White Noise daemon data
+directory, keeps a throwaway phone `nsec` in the fake-phone test root, creates
+a chat with the desktop agentnoise identity, and sends test messages without
+touching the real phone identity or the normal agentnoise keychain.
+
+```sh
+agentnoise fake-phone plan
+agentnoise fake-phone roundtrip --pin 123456 /status
+agentnoise fake-phone roundtrip /help
+```
+
+For first-pairing tests, pass the current desktop PIN. After pairing, omit
+`--pin`. The harness resends the test message for the timeout window because a
+running agentnoise service may need one discovery cycle before subscribing to
+the newly-created chat.
+
+## Transport Notes
+
+The default White Noise transport remains the tested `wn` CLI path. Setting
+`whitenoise.socket` points `wn` at a specific `wnd` daemon socket. The
+experimental direct socket adapter is exposed as a probe only:
+
+```sh
+agentnoise whitenoise socket-probe --method ping
+```
+
+This keeps production message send/subscribe behavior on the stable upstream
+CLI while giving us a tested JSON-line Unix socket client for future direct
+`wnd` work.
 
 ### Maybe Later: Local Agent Session Visibility
 
@@ -395,10 +478,11 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 
 - [White Noise setup](docs/whitenoise.md)
 - [Local bring-up](docs/local-bringup.md)
+- [Fake phone testing](docs/fake-phone-testing.md)
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)
 - [Homebrew packaging](docs/homebrew.md)
-- [Release notes](#changelog)
+- [Release notes](docs/release-notes.md)
 - [Learn to Prompt agent stack](https://learntoprompt.org/guides/agent-stack.html)
 - [Bondage local launcher](https://agentbondage.org/)
 

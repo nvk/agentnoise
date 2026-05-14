@@ -362,7 +362,7 @@ pub fn publish_key_package(config: &WhitenoiseConfig) -> Result<String> {
     checked_output(command, &wn, "keys publish")
 }
 
-pub fn login_from_keychain(
+pub fn login_from_configured_nsec(
     config: &WhitenoiseConfig,
     relay_override: Option<&str>,
 ) -> Result<String> {
@@ -376,16 +376,43 @@ pub fn login_from_keychain(
     let output = run_login(&wn, config, relay_override, &nsec);
     nsec.zeroize();
 
-    let output = output?;
+    finish_login_output(&wn, output?, config.dev_burner_nsec)
+}
+
+pub fn login_from_keychain(
+    config: &WhitenoiseConfig,
+    relay_override: Option<&str>,
+) -> Result<String> {
+    login_from_configured_nsec(config, relay_override)
+}
+
+pub fn login_with_nsec(
+    config: &WhitenoiseConfig,
+    nsec: &str,
+    relay_override: Option<&str>,
+) -> Result<String> {
+    crate::secrets::validate_nsec(nsec)?;
+    let wn = resolve_wn(&config.wn_bin);
+    let output = run_login(&wn, config, relay_override, nsec)?;
+    finish_login_output(&wn, output, true)
+}
+
+fn finish_login_output(wn: &Path, output: Output, direct_nsec: bool) -> Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let text = if stdout.is_empty() { stderr } else { stdout };
 
     if !output.status.success() {
+        let direct_note = if direct_nsec {
+            " (agentnoise passed an nsec directly instead of using its OS keychain; current White Noise daemons may still use their own platform secret store for account login)"
+        } else {
+            ""
+        };
         bail!(
-            "{} login exited with {}: {}",
+            "{} login exited with {}{}: {}",
             wn.display(),
             output.status,
+            direct_note,
             text
         );
     }
@@ -393,7 +420,7 @@ pub fn login_from_keychain(
     Ok(text)
 }
 
-pub fn ensure_login_from_keychain(config: &WhitenoiseConfig) -> Result<bool> {
+pub fn ensure_login_from_configured_nsec(config: &WhitenoiseConfig) -> Result<bool> {
     if !config.use_keychain_nsec && !config.dev_burner_nsec {
         return Ok(false);
     }
@@ -401,8 +428,12 @@ pub fn ensure_login_from_keychain(config: &WhitenoiseConfig) -> Result<bool> {
         return Ok(false);
     }
 
-    login_from_keychain(config, None)?;
+    login_from_configured_nsec(config, None)?;
     Ok(true)
+}
+
+pub fn ensure_login_from_keychain(config: &WhitenoiseConfig) -> Result<bool> {
+    ensure_login_from_configured_nsec(config)
 }
 
 pub fn account_logged_in(config: &WhitenoiseConfig) -> Result<bool> {
@@ -547,7 +578,7 @@ fn json_has_account(value: &Value) -> bool {
     }
 }
 
-fn group_id_from_output(text: &str) -> Option<String> {
+pub fn group_id_from_output(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
         return None;

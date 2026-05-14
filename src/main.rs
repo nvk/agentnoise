@@ -11,6 +11,7 @@ use agentnoise::auth::PairingGate;
 use agentnoise::config::Config;
 use agentnoise::desktop_alert;
 use agentnoise::doctor::render_doctor;
+use agentnoise::events::EventJournal;
 use agentnoise::identity;
 use agentnoise::launchd;
 use agentnoise::runner::{AgentKind, AgentRequest};
@@ -60,7 +61,13 @@ enum Command {
     Up(UpArgs),
     #[command(about = "Show the phone pairing QR for the desktop identity")]
     Pair(PairArgs),
-    Doctor,
+    #[command(about = "Show runtime status and diagnostics")]
+    Status(StatusArgs),
+    Doctor(DoctorArgs),
+    #[command(about = "List configured coding-agent capabilities")]
+    Agents(AgentsArgs),
+    #[command(about = "Run an isolated fake White Noise phone for local testing")]
+    FakePhone(FakePhoneArgs),
     Config(ConfigArgs),
     Parse {
         message: String,
@@ -152,6 +159,30 @@ struct PairArgs {
 }
 
 #[derive(Debug, Args)]
+struct StatusArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct AgentsArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct FakePhoneArgs {
+    #[command(subcommand)]
+    command: FakePhoneCommand,
+}
+
+#[derive(Debug, Args)]
 struct StartArgs {
     #[arg(long, help = "Add a White Noise group id before starting")]
     group: Option<String>,
@@ -220,6 +251,35 @@ enum WhitenoiseCommand {
     LoginFromKeychain {
         #[arg(long)]
         relay: Option<String>,
+    },
+    #[command(about = "Send one raw JSON-line request to wnd's Unix socket")]
+    SocketProbe {
+        #[arg(long, default_value = "ping")]
+        method: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FakePhoneCommand {
+    #[command(about = "Print the isolated fake phone paths")]
+    Plan {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Create a fake phone identity, chat, and send a test message")]
+    Roundtrip {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        pin: Option<String>,
+        #[arg(long, default_value = "agentnoise fake phone")]
+        group_name: String,
+        #[arg(long, default_value_t = 60)]
+        timeout_seconds: u64,
+        #[arg(required = true, trailing_var_arg = true)]
+        message: Vec<String>,
     },
 }
 
@@ -327,6 +387,7 @@ fn main() -> Result<()> {
                     force_identity: args.force_identity,
                     relays: args.relays,
                     dev_burner_nsec: args.dev_burner_nsec,
+                    start_daemon: true,
                 },
             )?;
             print_setup_result(&result);
@@ -342,9 +403,48 @@ fn main() -> Result<()> {
             println!();
             println!("{}", identity::render_qr(&payload.nprofile)?);
         }
-        Command::Doctor => {
+        Command::Status(args) => {
             let config = Config::load_or_template(&config_path)?;
-            println!("{}", render_doctor(&config_path, &config));
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&agentnoise::diagnostics::status_report(
+                        &config
+                    )?)?
+                );
+            } else {
+                println!(
+                    "{}",
+                    agentnoise::diagnostics::render_status_report(&config_path, &config)
+                );
+            }
+        }
+        Command::Doctor(args) => {
+            let config = Config::load_or_template(&config_path)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&agentnoise::diagnostics::status_report(
+                        &config
+                    )?)?
+                );
+            } else {
+                println!("{}", render_doctor(&config_path, &config));
+            }
+        }
+        Command::Agents(args) => {
+            let config = Config::load_or_template(&config_path)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&agentnoise::capabilities::capabilities(&config))?
+                );
+            } else {
+                println!("{}", agentnoise::capabilities::render_capabilities(&config));
+            }
+        }
+        Command::FakePhone(args) => {
+            fake_phone_command(&config_path, args)?;
         }
         Command::Config(args) => match args.command {
             ConfigCommand::Path => println!("{}", config_path.display()),
@@ -400,7 +500,7 @@ fn main() -> Result<()> {
         }
         Command::Send { text } => {
             let config = Config::load(&config_path)?;
-            if whitenoise_cli::ensure_login_from_keychain(&config.whitenoise)? {
+            if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
                 eprintln!("agentnoise: restored White Noise login from configured nsec");
             }
             let wn = WnClient::new(config.whitenoise);
@@ -464,13 +564,24 @@ fn main() -> Result<()> {
                     );
                 }
                 WhitenoiseCommand::LoginFromKeychain { relay } => {
-                    let output =
-                        whitenoise_cli::login_from_keychain(&config.whitenoise, relay.as_deref())?;
+                    let output = whitenoise_cli::login_from_configured_nsec(
+                        &config.whitenoise,
+                        relay.as_deref(),
+                    )?;
                     if output.is_empty() {
                         println!("logged in from configured nsec");
                     } else {
                         println!("{output}");
                     }
+                }
+                WhitenoiseCommand::SocketProbe { method } => {
+                    let Some(socket) = config.whitenoise.resolved_socket() else {
+                        bail!("whitenoise.socket is not configured");
+                    };
+                    println!(
+                        "{}",
+                        agentnoise::wnd_socket::render_socket_probe(&socket, &method)
+                    );
                 }
             }
         }
@@ -664,6 +775,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             force_identity: false,
             relays: args.relays.clone(),
             dev_burner_nsec: args.dev_burner_nsec,
+            start_daemon: !args.no_daemon,
         },
     )?;
 
@@ -755,6 +867,59 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
 
     let config = Config::load(config_path)?;
     runtime::engine_is_running(&config)
+}
+
+fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
+    let config = Config::load(config_path)?;
+    match args.command {
+        FakePhoneCommand::Plan { root, json } => {
+            let plan = agentnoise::fake_phone::plan(&config, root.as_deref());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                println!("fake phone");
+                println!("root: {}", plan.root.display());
+                println!("data: {}", plan.data_dir.display());
+                println!("logs: {}", plan.logs_dir.display());
+                println!("socket: {}", plan.socket.display());
+                println!("nsec: {}", plan.nsec_file.display());
+            }
+        }
+        FakePhoneCommand::Roundtrip {
+            root,
+            pin,
+            group_name,
+            timeout_seconds,
+            message,
+        } => {
+            let message = message.join(" ");
+            if message.trim().is_empty() {
+                bail!("message cannot be empty");
+            }
+            let root = root.unwrap_or_else(|| config.resolved_data_dir().join("fake-phone"));
+            let result = agentnoise::fake_phone::roundtrip(
+                &config,
+                agentnoise::fake_phone::FakePhoneRoundtrip {
+                    root,
+                    pin,
+                    message,
+                    group_name,
+                    timeout: Duration::from_secs(timeout_seconds.max(1)),
+                },
+            )?;
+            println!("fake phone npub: {}", result.phone_npub);
+            println!("group: {}", result.group_id);
+            if result.replies.is_empty() {
+                println!("replies: none before timeout");
+            } else {
+                println!("replies:");
+                for reply in result.replies {
+                    println!("- {reply}");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> {
@@ -907,7 +1072,7 @@ fn run_listener(
     pairing: Option<PairingRuntime>,
     _guard: EngineGuard,
 ) -> Result<()> {
-    if whitenoise_cli::ensure_login_from_keychain(&config.whitenoise)? {
+    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
         eprintln!("agentnoise: restored White Noise login from configured nsec");
     }
     if let Some(pairing) = pairing.clone() {
@@ -1004,6 +1169,9 @@ enum StreamItem {
 fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let subscribed = Arc::new(Mutex::new(HashSet::new()));
+    let event_journal = Arc::new(Mutex::new(EventJournal::open(
+        &app.config().resolved_event_log_path(),
+    )?));
 
     let initial_groups = initial_group_ids(&wn);
     let subscribe_limit = listener_subscribe_limit(app.config());
@@ -1025,7 +1193,6 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
     println!("agentnoise listening");
 
     let ignore_initial = app.config().whitenoise.ignore_initial_messages;
-    let mut seen_ids = HashSet::new();
 
     for item in rx {
         match item {
@@ -1064,10 +1231,15 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                     eprintln!("agentnoise: ignored message without White Noise group id");
                     continue;
                 };
-                if let Some(id) = &event.id {
-                    let seen_key = format!("{group_id}:{id}");
-                    if !seen_ids.insert(seen_key) {
+                {
+                    let mut journal = event_journal
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("event journal lock poisoned"))?;
+                    if journal.already_seen(group_id, event.id.as_deref()) {
                         continue;
+                    }
+                    if let Err(error) = journal.record_inbound(&event) {
+                        eprintln!("agentnoise: failed to record inbound event: {error:#}");
                     }
                 }
                 let process_initial_pairing = event.unsupported.is_none()
@@ -1077,10 +1249,15 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                 }
 
                 if let Some(message) = event.unsupported.as_deref() {
-                    match app.route_unsupported_message(event.sender.as_deref(), message)? {
+                    let action = if event.attachments.is_empty() {
+                        app.route_unsupported_message(event.sender.as_deref(), message)?
+                    } else {
+                        app.route_unsupported_event(&event)?
+                    };
+                    match action {
                         RouteAction::Ignore => {}
                         RouteAction::Reply(reply) => {
-                            wn.send_reply_to(group_id, &reply)?;
+                            send_reply_recorded(&wn, &event_journal, group_id, &reply)?;
                         }
                         RouteAction::NewSession(_)
                         | RouteAction::ResumeSession(_)
@@ -1096,7 +1273,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                 )? {
                     RouteAction::Ignore => {}
                     RouteAction::Reply(reply) => {
-                        wn.send_reply_to(group_id, &reply)?;
+                        send_reply_recorded(&wn, &event_journal, group_id, &reply)?;
                     }
                     RouteAction::NewSession(request) => {
                         match create_parallel_session(
@@ -1109,12 +1286,22 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                             subscribe_limit,
                         ) {
                             Ok(new_group_id) => {
-                                match wn.send_reply_to(&new_group_id, &request.ready_text()) {
-                                    Ok(()) => {
-                                        wn.send_reply_to(group_id, &request.created_text())?
-                                    }
+                                match send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
+                                    &new_group_id,
+                                    &request.ready_text(),
+                                ) {
+                                    Ok(()) => send_reply_recorded(
+                                        &wn,
+                                        &event_journal,
+                                        group_id,
+                                        &request.created_text(),
+                                    )?,
                                     Err(error) => {
-                                        wn.send_reply_to(
+                                        send_reply_recorded(
+                                            &wn,
+                                            &event_journal,
                                             group_id,
                                             &format!(
                                                 "{}\nWarning: failed to send the ready message to the new chat: {error:#}",
@@ -1125,7 +1312,9 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                 }
                             }
                             Err(error) => {
-                                wn.send_reply_to(
+                                send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
                                     group_id,
                                     &format!("Error: failed to create session: {error:#}"),
                                 )?;
@@ -1143,15 +1332,29 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         ) {
                             Ok(()) => {
                                 if request.group_id == group_id {
-                                    wn.send_reply_to(group_id, &request.target_text)?;
+                                    send_reply_recorded(
+                                        &wn,
+                                        &event_journal,
+                                        group_id,
+                                        &request.target_text,
+                                    )?;
                                 } else {
-                                    match wn.send_reply_to(&request.group_id, &request.target_text)
-                                    {
-                                        Ok(()) => {
-                                            wn.send_reply_to(group_id, &request.reply_text)?
-                                        }
+                                    match send_reply_recorded(
+                                        &wn,
+                                        &event_journal,
+                                        &request.group_id,
+                                        &request.target_text,
+                                    ) {
+                                        Ok(()) => send_reply_recorded(
+                                            &wn,
+                                            &event_journal,
+                                            group_id,
+                                            &request.reply_text,
+                                        )?,
                                         Err(error) => {
-                                            wn.send_reply_to(
+                                            send_reply_recorded(
+                                                &wn,
+                                                &event_journal,
                                                 group_id,
                                                 &format!(
                                                     "Error: resumed session locally, but failed to message the target chat: {error:#}"
@@ -1162,7 +1365,9 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                 }
                             }
                             Err(error) => {
-                                wn.send_reply_to(
+                                send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
                                     group_id,
                                     &format!("Error: failed to resume session: {error:#}"),
                                 )?;
@@ -1170,18 +1375,35 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         }
                     }
                     RouteAction::Run(request) => {
-                        wn.send_reply_to(group_id, "Job accepted.")?;
+                        send_reply_recorded(&wn, &event_journal, group_id, "Job accepted.")?;
                         let app = Arc::clone(&app);
                         let wn = Arc::clone(&wn);
+                        let event_journal = Arc::clone(&event_journal);
                         let group_id = group_id.to_string();
                         std::thread::spawn(move || {
-                            let reply = match app.run_request(request) {
+                            let progress_wn = Arc::clone(&wn);
+                            let progress_journal = Arc::clone(&event_journal);
+                            let progress_group = group_id.clone();
+                            let reply = match app.run_request_with_progress(request, move |text| {
+                                if let Err(error) = send_reply_recorded(
+                                    &progress_wn,
+                                    &progress_journal,
+                                    &progress_group,
+                                    &text,
+                                ) {
+                                    eprintln!(
+                                        "agentnoise: failed to send progress reply: {error:#}"
+                                    );
+                                }
+                            }) {
                                 Ok(reply) => reply,
                                 Err(error) => {
                                     format!("Error: job failed to start: {error:#}")
                                 }
                             };
-                            if let Err(error) = wn.send_reply_to(&group_id, &reply) {
+                            if let Err(error) =
+                                send_reply_recorded(&wn, &event_journal, &group_id, &reply)
+                            {
                                 eprintln!("agentnoise: failed to send job reply: {error:#}");
                             }
                         });
@@ -1192,6 +1414,23 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
     }
 
     Ok(())
+}
+
+fn send_reply_recorded(
+    wn: &WnClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    text: &str,
+) -> Result<()> {
+    let result = wn.send_reply_to(group_id, text);
+    let ok = result.is_ok();
+    let detail = result.as_ref().err().map(|error| format!("{error:#}"));
+    if let Ok(mut journal) = event_journal.lock()
+        && let Err(error) = journal.record_outbound(group_id, text, ok, detail)
+    {
+        eprintln!("agentnoise: failed to record outbound event: {error:#}");
+    }
+    result
 }
 
 fn listener_subscribe_limit(config: &Config) -> u32 {

@@ -20,6 +20,7 @@ pub struct SetupOptions {
     pub force_identity: bool,
     pub relays: Vec<String>,
     pub dev_burner_nsec: bool,
+    pub start_daemon: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -82,9 +83,12 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     let mut group_id = None;
     let mut group_output = None;
 
-    let daemon = whitenoise_cli::ensure_daemon(&config.whitenoise)?;
-    let daemon_started = daemon.is_some();
-    let login_repaired = whitenoise_cli::ensure_login_from_keychain(&config.whitenoise)?;
+    let daemon_started = if options.start_daemon {
+        whitenoise_cli::ensure_daemon(&config.whitenoise)?.is_some()
+    } else {
+        false
+    };
+    let login_repaired = whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)?;
     whitenoise_cli::update_profile(
         &config.whitenoise,
         PROFILE_NAME,

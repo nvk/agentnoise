@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::attachments::{AttachmentInfo, extract_attachments};
 use crate::config::WhitenoiseConfig;
 use crate::text::format_chat_text;
 use crate::whitenoise_cli;
@@ -17,6 +18,7 @@ pub struct MessageEvent {
     pub id: Option<String>,
     pub trigger: Option<String>,
     pub is_initial: bool,
+    pub attachments: Vec<AttachmentInfo>,
 }
 
 #[derive(Clone)]
@@ -226,8 +228,9 @@ fn message_events(value: &Value, trigger: Option<String>, is_initial: bool) -> V
 
 fn message_event(value: &Value, trigger: Option<String>, is_initial: bool) -> Option<MessageEvent> {
     let text = find_string(value, &["content", "text", "body", "plaintext"]).unwrap_or_default();
-    let unsupported = unsupported_message(value, &text);
-    if text.trim().is_empty() && unsupported.is_none() {
+    let attachments = extract_attachments(value);
+    let unsupported = unsupported_message(&text, &attachments);
+    if text.trim().is_empty() && unsupported.is_none() && attachments.is_empty() {
         return None;
     }
 
@@ -242,43 +245,16 @@ fn message_event(value: &Value, trigger: Option<String>, is_initial: bool) -> Op
         unsupported,
         trigger,
         is_initial,
+        attachments,
     })
 }
 
-fn unsupported_message(value: &Value, text: &str) -> Option<String> {
-    if !text.trim().is_empty() || !contains_attachment_hint(value) {
+fn unsupported_message(text: &str, attachments: &[AttachmentInfo]) -> Option<String> {
+    if !text.trim().is_empty() || attachments.is_empty() {
         return None;
     }
 
-    Some(
-        "Attachment received, but agentnoise only supports text commands right now. Send /help for commands."
-            .to_string(),
-    )
-}
-
-fn contains_attachment_hint(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => object.iter().any(|(key, value)| {
-            let key = key.as_str();
-            matches!(
-                key,
-                "attachment"
-                    | "attachments"
-                    | "media"
-                    | "image"
-                    | "images"
-                    | "file"
-                    | "files"
-                    | "mime_type"
-                    | "mimeType"
-                    | "content_type"
-                    | "contentType"
-            ) || contains_attachment_hint(value)
-        }),
-        Value::Array(values) => values.iter().any(contains_attachment_hint),
-        Value::String(value) => value.starts_with("image/") || value.starts_with("video/"),
-        _ => false,
-    }
+    Some("Attachment received. Metadata was saved; send /attachments or /attach <id>.".to_string())
 }
 
 fn find_group_id(value: &Value) -> Option<String> {
