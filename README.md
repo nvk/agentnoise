@@ -9,6 +9,9 @@ too slow-moving, or too awkward for the simple workflow this project needs: a
 native desktop helper, a phone chat UI, strong first-pairing, and local coding
 agents launched through a constrained policy boundary.
 
+The less polite design brief: I had to build it because everything else sucks
+and Jeff moves too slow.
+
 ## What It Does
 
 AgentNoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through `bondage`, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent AgentNoise sessions open in separate chat windows.
@@ -25,6 +28,15 @@ The first supported target is macOS.
 - a dedicated White Noise group for agent control
 
 ## Quick Start
+
+Install from Homebrew:
+
+```sh
+brew install nvk/tap/agentnoise
+agentnoise up
+```
+
+Or build from source:
 
 ```sh
 cargo build --release
