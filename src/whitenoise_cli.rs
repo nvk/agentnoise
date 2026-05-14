@@ -46,7 +46,13 @@ impl Default for WhitenoiseInstall {
 }
 
 pub fn resolve_wn(configured: &str) -> PathBuf {
-    resolve_binary(configured, "wn")
+    let resolved = resolve_binary(configured, "wn");
+    if let Some(packaged) = executable_next_to_agentnoise("wn")
+        && should_prefer_packaged_wn(&resolved, &packaged)
+    {
+        return packaged;
+    }
+    resolved
 }
 
 pub fn resolve_wnd() -> PathBuf {
@@ -82,6 +88,52 @@ pub fn resolve_binary(configured: &str, name: &str) -> PathBuf {
         .or_else(|| local_checkout_whitenoise_bin(name))
         .or_else(|| find_on_path(name))
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+pub fn should_reset_wn_bin_to_default(configured: &str) -> bool {
+    executable_next_to_agentnoise("wn")
+        .is_some_and(|packaged| should_prefer_packaged_wn(&expand_tilde(configured), &packaged))
+}
+
+fn should_prefer_packaged_wn(configured: &Path, packaged: &Path) -> bool {
+    !same_path(configured, packaged) && is_agentnoise_managed_wn_path(configured)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn is_agentnoise_managed_wn_path(path: &Path) -> bool {
+    path == managed_wn_path()
+        || path_components_end_with(path, &[".local-whitenoise", "bin", "wn"])
+        || path_components_contain(path, &["Cellar", "agentnoise", "*", "bin", "wn"])
+}
+
+fn path_components_end_with(path: &Path, suffix: &[&str]) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components.ends_with(suffix)
+}
+
+fn path_components_contain(path: &Path, pattern: &[&str]) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components.windows(pattern.len()).any(|window| {
+        window
+            .iter()
+            .zip(pattern)
+            .all(|(component, expected)| *expected == "*" || component == expected)
+    })
 }
 
 pub fn install(options: &WhitenoiseInstall) -> Result<()> {
@@ -639,6 +691,22 @@ mod tests {
             resolve_binary("/tmp/custom/wn", "wn"),
             PathBuf::from("/tmp/custom/wn")
         );
+    }
+
+    #[test]
+    fn detects_agentnoise_managed_wn_paths() {
+        assert!(is_agentnoise_managed_wn_path(
+            &managed_whitenoise_root().join("bin/wn")
+        ));
+        assert!(is_agentnoise_managed_wn_path(&PathBuf::from(
+            "/tmp/agentnoise/.local-whitenoise/bin/wn"
+        )));
+        assert!(is_agentnoise_managed_wn_path(&PathBuf::from(
+            "/opt/homebrew/Cellar/agentnoise/0.1.2/bin/wn"
+        )));
+        assert!(!is_agentnoise_managed_wn_path(&PathBuf::from(
+            "/tmp/custom/bin/wn"
+        )));
     }
 
     #[test]

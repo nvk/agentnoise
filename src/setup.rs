@@ -46,9 +46,8 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     };
 
     config.whitenoise.use_keychain_nsec = true;
-    let resolved_wn = whitenoise_cli::resolve_wn(&config.whitenoise.wn_bin);
-    if resolved_wn.is_file() {
-        config.whitenoise.wn_bin = resolved_wn.display().to_string();
+    if whitenoise_cli::should_reset_wn_bin_to_default(&config.whitenoise.wn_bin) {
+        config.whitenoise.wn_bin = "wn".to_string();
     }
     if created_config {
         config.save(config_path)?;
