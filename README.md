@@ -38,7 +38,8 @@ starting a second listener, and disposable development identities can use
 
 agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through [`bondage`](https://agentbondage.org/), stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
-The first supported target is macOS.
+The most tested target is macOS. Linux and FreeBSD service templates are
+included and should be treated as newer paths.
 
 ## Requirements
 
@@ -181,6 +182,96 @@ target/release/agentnoise service install --target launchd --force --load
 If first pairing is still required, macOS shows a pairing window with the
 desktop identity QR, current PIN, and live countdown. The same PIN is also
 printed to the terminal or service log.
+
+## Linux Quick Start
+
+Build or install `agentnoise`, then put it on the user `PATH`:
+
+```sh
+cargo build --release
+install -Dm755 target/release/agentnoise ~/.local/bin/agentnoise
+```
+
+Install the bundled White Noise CLI tools if `wn` and `wnd` are not already on
+the service user's `PATH`:
+
+```sh
+agentnoise whitenoise install
+```
+
+Run the first pairing in the foreground. On Linux the QR and rotating PIN are
+printed to the terminal/logs:
+
+```sh
+agentnoise up
+```
+
+After the phone is paired, install a user systemd service:
+
+```sh
+agentnoise service install --target systemd-user --force --load
+systemctl --user status agentnoise.service
+journalctl --user -u agentnoise.service -f
+```
+
+For boot without an active login session, enable lingering:
+
+```sh
+loginctl enable-linger "$USER"
+```
+
+Secret storage on Linux uses keyutils plus Secret Service persistence. Headless
+servers need the same user service context to reach an unlocked Secret Service
+collection; test that before relying on unattended restart:
+
+```sh
+agentnoise keychain status
+```
+
+## FreeBSD Quick Start
+
+Build or install `agentnoise`, then install the binary somewhere in the service
+`PATH`:
+
+```sh
+cargo build --release
+sudo install -m 0755 target/release/agentnoise /usr/local/bin/agentnoise
+```
+
+Create the config and do first pairing as the user that should own the helper:
+
+```sh
+agentnoise whitenoise install
+agentnoise up
+```
+
+Then install the rc.d service using that user's config path:
+
+```sh
+CONFIG="$(agentnoise config path)"
+sudo agentnoise --config "$CONFIG" service install --target freebsd-rc --force
+sudo sysrc agentnoise_enable=YES
+sudo sysrc agentnoise_user="$USER"
+sudo sysrc agentnoise_config="$CONFIG"
+sudo service agentnoise start
+sudo service agentnoise status
+```
+
+For service logs, use the normal rc/daemon logs for the host, commonly:
+
+```sh
+tail -f /var/log/messages
+```
+
+FreeBSD uses DBus Secret Service for real `nsec` storage. Confirm the service
+account can read the stored secret before depending on restart repair:
+
+```sh
+agentnoise keychain status
+```
+
+For disposable relay testing only, `agentnoise up --dev-burner-nsec` uses a
+plaintext burner identity and avoids Secret Service setup.
 
 ## Chat Commands
 
