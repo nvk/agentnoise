@@ -311,10 +311,10 @@ fn homebrew_prefixes() -> Vec<PathBuf> {
     if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX") {
         push_unique(&mut prefixes, PathBuf::from(prefix));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(prefix) = homebrew_prefix_from_path(&exe) {
-            push_unique(&mut prefixes, prefix);
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(prefix) = homebrew_prefix_from_path(&exe)
+    {
+        push_unique(&mut prefixes, prefix);
     }
     push_unique(&mut prefixes, PathBuf::from("/opt/homebrew"));
     push_unique(&mut prefixes, PathBuf::from("/usr/local"));
