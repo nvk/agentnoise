@@ -17,15 +17,17 @@ agentnoise release tag and the pinned upstream `whitenoise-rs` revision.
 Local tap install shape:
 
 ```sh
-brew install agentnoise/tap/agentnoise
-agentnoise up
-brew services start agentnoise
+brew install nvk/tap/agentnoise
+brew services start nvk/tap/agentnoise
+tail -f "$(brew --prefix)/var/log/agentnoise.log"
 ```
 
 The formula builds and installs `agentnoise`, `wn`, and `wnd` under the same
 Homebrew prefix. The service uses `agentnoise up`, so setup repair, daemon
 startup, group discovery, first-pairing PIN auth, and keychain login repair stay
-in the agentnoise foreground path. Homebrew owns restart and boot through
+in one code path. On a fresh install the service starts before a control chat
+exists, shows the QR/PIN pairing flow, and keeps discovering White Noise chats
+until the phone-created chat appears. Homebrew owns restart and boot through
 `brew services`.
 
 ## Release Checklist

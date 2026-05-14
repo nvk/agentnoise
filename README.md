@@ -35,27 +35,57 @@ The first supported target is macOS.
 - OS keychain access if using automatic White Noise login repair
 - a dedicated White Noise group for agent control
 
-## Quick Start
+## First Run
 
 Install from Homebrew:
 
 ```sh
 brew install nvk/tap/agentnoise
+```
+
+Then start it. For normal desktop use, run it as a Homebrew service:
+
+```sh
+brew services start nvk/tap/agentnoise
+```
+
+For a foreground test run, use:
+
+```sh
 agentnoise up
 ```
 
-Or build from source:
+Both paths run the same listener. On first run, agentnoise creates the desktop
+identity, stores its `nsec` in the OS keychain, starts White Noise, publishes
+the profile/key package, and opens the pairing window.
+
+Pair the phone:
+
+1. Look for the macOS `agentnoise pairing` window.
+2. Scan the QR from White Noise on the phone.
+3. Create a White Noise chat/group with the agentnoise desktop identity.
+4. Type the 6-digit PIN shown on the desktop as the first phone message.
+5. Send `/status`, then `/help`.
+
+If the pairing window is hidden or blocked, the same QR/PIN is in the service
+logs:
+
+```sh
+tail -f "$(brew --prefix)/var/log/agentnoise.log"
+tail -f "$(brew --prefix)/var/log/agentnoise.err.log"
+```
+
+The service is expected to start even before the White Noise chat exists. It
+waits, keeps showing a rotating PIN while pairing is required, and discovers
+the phone-created chat automatically.
+
+Build from source:
 
 ```sh
 cargo build --release
 target/release/agentnoise up
 ```
 
-`up` writes the config, creates or reuses the desktop keypair in the OS
-keychain, starts White Noise, logs in, publishes the desktop profile/key package,
-enables keychain login repair, prints the phone pairing QR when pairing is still
-needed, discovers visible control chats when White Noise can see them, then
-listens.
 The QR contains the desktop `nprofile`/`npub` plus relay hints. It never exposes
 the desktop `nsec`.
 
@@ -67,7 +97,8 @@ target/release/agentnoise up --phone npub...
 ```
 
 Otherwise scan the QR, create a White Noise chat/group with the desktop
-identity, then rerun:
+identity, and leave `agentnoise up` running. If you used `--no-listen` or
+stopped the process, start it again:
 
 ```sh
 target/release/agentnoise up

@@ -576,8 +576,9 @@ fn print_setup_result(result: &SetupResult) {
         }
         println!();
         println!("{}", result.qr);
-        println!("next: create a White Noise group with this desktop identity, then run:");
-        println!("agentnoise up");
+        println!("next: create a White Noise group with this desktop identity.");
+        println!("If agentnoise is already running, it will discover the chat automatically.");
+        println!("Otherwise run: agentnoise up");
     }
 }
 
@@ -659,15 +660,25 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             Ok(GroupDiscovery::NeedsPairing) => {
                 print_setup_result(&result);
                 println!();
-                println!("next: scan the QR, create a White Noise chat with agentnoise, then run:");
-                println!("agentnoise up");
-                return Ok(());
+                if args.no_listen {
+                    println!(
+                        "next: scan the QR, create a White Noise chat with agentnoise, then run:"
+                    );
+                    println!("agentnoise up");
+                    return Ok(());
+                }
+                println!("agentnoise: waiting for a White Noise control chat");
+                println!("agentnoise: scan the QR, create the chat, then send the pairing PIN");
             }
         }
     }
 
     let groups = config.whitenoise.control_group_ids();
-    println!("agentnoise ready");
+    if groups.is_empty() {
+        println!("agentnoise ready for first pairing");
+    } else {
+        println!("agentnoise ready");
+    }
     println!("npub: {}", result.npub);
     println!("groups: {}", groups.len());
     for group_id in groups.iter().take(5) {
@@ -860,16 +871,17 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
 
     let initial_groups = initial_group_ids(&wn);
     if initial_groups.is_empty() {
-        bail!("no White Noise groups are configured or visible");
-    }
-
-    for group_id in initial_groups {
-        subscribe_group_if_needed(
-            Arc::clone(&wn),
-            Arc::clone(&subscribed),
-            tx.clone(),
-            &group_id,
-        )?;
+        println!("agentnoise waiting for White Noise control chat");
+        println!("agentnoise will keep discovering chats until the phone-created chat appears");
+    } else {
+        for group_id in initial_groups {
+            subscribe_group_if_needed(
+                Arc::clone(&wn),
+                Arc::clone(&subscribed),
+                tx.clone(),
+                &group_id,
+            )?;
+        }
     }
     spawn_group_discovery(Arc::clone(&wn), tx.clone());
     println!("agentnoise listening");
@@ -881,6 +893,11 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
         match item {
             StreamItem::Discovered(group_ids) => {
                 for group_id in group_ids {
+                    if let Err(error) = persist_control_group_id(config_path, &group_id) {
+                        eprintln!(
+                            "agentnoise: failed to persist discovered group {group_id}: {error:#}"
+                        );
+                    }
                     if let Err(error) = subscribe_group_if_needed(
                         Arc::clone(&wn),
                         Arc::clone(&subscribed),
@@ -1175,7 +1192,6 @@ fn spawn_group_subscription(
 fn spawn_group_discovery(wn: Arc<WnClient>, tx: mpsc::Sender<StreamItem>) {
     thread::spawn(move || {
         loop {
-            thread::sleep(Duration::from_secs(30));
             match wn.discover_group_ids() {
                 Ok(group_ids) => {
                     if !group_ids.is_empty() && tx.send(StreamItem::Discovered(group_ids)).is_err()
@@ -1192,6 +1208,7 @@ fn spawn_group_discovery(wn: Arc<WnClient>, tx: mpsc::Sender<StreamItem>) {
                     }
                 }
             }
+            thread::sleep(Duration::from_secs(30));
         }
     });
 }

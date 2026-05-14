@@ -9,8 +9,8 @@ fatal error. The host supervisor owns boot, restart, stop, and logs.
 Homebrew installs should use brew services:
 
 ```sh
-brew services start agentnoise
-brew services stop agentnoise
+brew services start nvk/tap/agentnoise
+brew services stop nvk/tap/agentnoise
 ```
 
 Development or non-Homebrew installs can use the native LaunchAgent wrapper:
@@ -89,17 +89,18 @@ agentnoise service print --target openbsd-rc
 
 ## First Pairing
 
-Run first pairing in the foreground when possible:
+For Homebrew installs, first pairing can run directly from the service:
 
 ```sh
-agentnoise up
+brew services start nvk/tap/agentnoise
+tail -f "$(brew --prefix)/var/log/agentnoise.log"
 ```
 
-If `allowed_senders` is empty, agentnoise prints the QR and rotating PIN there.
-On macOS it also shows the desktop identity QR, current PIN, and live countdown
-while the PIN is valid. After the phone sends the PIN and the sender is saved,
-start the service. If a service starts before pairing, the PIN is printed to
-that supervisor's log.
+For foreground troubleshooting, run `agentnoise up`. If `allowed_senders` is
+empty, agentnoise prints the QR and rotating PIN. On macOS it also shows the
+desktop identity QR, current PIN, and live countdown while the PIN is valid.
+The process keeps running before the first control chat exists and discovers the
+phone-created chat automatically.
 
 ## Secret Storage
 

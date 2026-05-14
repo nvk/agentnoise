@@ -31,15 +31,17 @@ If you do not know the phone `npub`:
 ```
 
 Scan the QR in White Noise, create a chat/group with the desktop identity, then
-run the same command again:
+leave the process running. It will keep discovering White Noise chats until the
+new chat appears. If you used `--no-listen` or stopped the process, run the same
+command again:
 
 ```sh
 "$AGENTNOISE" up
 ```
 
-If `allowed_senders` is still empty, the second run prints a QR and a 6-digit
-PIN. On macOS it also opens a pairing window with the QR, desktop `npub`, PIN,
-and live countdown. Send the PIN from the phone as the first message.
+If `allowed_senders` is still empty, `up` prints a QR and a 6-digit PIN. On
+macOS it also opens a pairing window with the QR, desktop `npub`, PIN, and live
+countdown. Send the PIN from the phone as the first message.
 agentnoise ignores every other message until the PIN succeeds, then saves that
 sender to `allowed_senders`.
 

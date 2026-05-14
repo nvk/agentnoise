@@ -55,6 +55,6 @@ agentnoise service uninstall --target launchd --unload
   `agentnoise up` enters PIN pairing mode. On macOS it shows the desktop
   identity QR, current PIN, and live countdown, and also prints the PIN to the
   launchd log.
-- `launchd install` runs `agentnoise up`, which starts `wnd`, repairs login from the OS keychain when needed, discovers the configured group when possible, enforces first-pairing PIN auth, then listens.
+- `launchd install` runs `agentnoise up`, which starts `wnd`, repairs login from the OS keychain when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens.
 - Restart the service after changing config.
 - If the process restarts, active jobs are marked `interrupted` in the local job store.

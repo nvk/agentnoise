@@ -64,8 +64,8 @@ agentnoise up
 the OS keychain, writes the desktop `npub` into `config.toml`, starts White
 Noise, logs in, publishes the desktop profile/key package, enables startup login
 repair, prints a phone pairing QR when pairing is still needed, discovers
-visible control chats when possible, and then listens. It never writes the
-`nsec` to `config.toml`.
+visible control chats when possible, waits for the first chat when needed, and
+then listens. It never writes the `nsec` to `config.toml`.
 
 The QR encodes a Nostr `nprofile`: the desktop `npub` plus relay hints. It is
 for phone discovery only and never contains the desktop `nsec`.
@@ -167,9 +167,9 @@ agentnoise up --phone npub...
 ```
 
 Otherwise scan the QR from `agentnoise up`, create the group from the phone,
-then rerun `up`. agentnoise asks `wn groups list --json`, saves visible group
-ids, and listens to them. It does not trust a peer just because a group is
-visible on the relay; command auth is still the sender allowlist.
+and leave the process running. agentnoise asks `wn groups list --json`, saves
+visible group ids, and listens to them. It does not trust a peer just because a
+group is visible on the relay; command auth is still the sender allowlist.
 
 ```sh
 agentnoise up
