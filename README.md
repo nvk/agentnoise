@@ -8,7 +8,7 @@
 
 Chat with local coding agents through White Noise.
 
-`agentnoise` is a native desktop helper for using a phone running White Noise as the control surface for local Codex and Claude sessions. It is intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
+`agentnoise` is a native desktop helper for using a phone running White Noise as the control surface for local Codex, Claude, and optional Hermes sessions. It is intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
 
 agentnoise exists because the available agent-chat bridges were too heavy,
 too slow-moving, or too awkward for the simple workflow this project needs: a
@@ -31,6 +31,7 @@ The first supported target is macOS.
 - Rust toolchain for building from source
 - `bondage` with `codex` and `claude` profiles
 - Codex CLI and Claude Code CLI
+- optional: Hermes Agent CLI plus a dedicated `bondage` profile
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
 - OS keychain access if using automatic White Noise login repair
 - a dedicated White Noise group for agent control
@@ -165,6 +166,9 @@ printed to the terminal or service log.
 - `/claude <prompt>`
 - `/claude <repo> <prompt>`
 - `/claude-resume <session> <prompt>`
+- `/hermes <prompt>`
+- `/hermes <repo> <prompt>`
+- `/hermes-resume <session> <prompt>`
 - `/wiki <prompt>`
 - `/codex-wiki <prompt>`
 - `/claude-wiki <prompt>`
@@ -182,9 +186,49 @@ for `/list`.
 
 Repos are aliases from the config, not arbitrary paths. `/use` selects a repo
 for the session, `/cd ..` moves within that selected repo, and plain `/codex` or
-`/claude` uses the selected workspace. `/wiki` follows the local Codex
-`codex-wiki` convention by prefixing `@wiki`; `/claude-wiki` sends a `wiki ...`
-prompt for Claude installations with the LLM Wiki instructions/plugin available.
+`/claude` uses the selected workspace. `/hermes` does the same when Hermes is
+enabled. `/wiki` follows the local Codex `codex-wiki` convention by prefixing
+`@wiki`; `/claude-wiki` sends a `wiki ...` prompt for Claude installations with
+the LLM Wiki instructions/plugin available.
+
+## Optional Hermes Support
+
+Hermes support is disabled by default. agentnoise does not run the Hermes Agent
+gateway and does not expose a second remote API. It launches the Hermes CLI as a
+local backend through `bondage`, the same way it launches Codex and Claude.
+
+Enable it in `~/.config/agentnoise/config.toml` after installing Hermes and
+creating a dedicated `bondage` profile:
+
+```toml
+[agents.hermes]
+enabled = true
+profile = "hermes"
+bin = "hermes"
+```
+
+Then restart the listener:
+
+```sh
+brew services restart nvk/tap/agentnoise
+```
+
+From White Noise:
+
+```text
+/hermes summarize this repo
+/hermes-resume <session> continue
+```
+
+The command shape is intentionally narrow:
+
+```sh
+bondage exec hermes ~/.config/bondage/bondage.conf -- hermes chat --quiet --source agentnoise --toolsets skills -q "<prompt>"
+```
+
+Use the `bondage` profile to set a dedicated `HERMES_HOME`, model endpoint
+environment, filesystem policy, and any local secrets release rules. Start with
+restricted toolsets and widen policy only after the local profile is behaving.
 
 ## First Pairing
 

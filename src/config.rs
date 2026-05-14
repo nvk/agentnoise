@@ -75,6 +75,8 @@ pub struct RunnerConfig {
 pub struct AgentsConfig {
     pub codex: AgentConfig,
     pub claude: AgentConfig,
+    #[serde(default = "default_hermes_agent_config")]
+    pub hermes: AgentConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +194,7 @@ impl Config {
                     bin: "claude".to_string(),
                     permission_mode: Some("auto".to_string()),
                 },
+                hermes: default_hermes_agent_config(),
             },
             repos: vec![RepoConfig {
                 alias: "sandbox".to_string(),
@@ -237,6 +240,7 @@ impl Config {
         match agent {
             AgentKind::Codex => &self.agents.codex,
             AgentKind::Claude => &self.agents.claude,
+            AgentKind::Hermes => &self.agents.hermes,
         }
     }
 
@@ -375,6 +379,15 @@ fn default_max_output_chars() -> usize {
     2_400
 }
 
+fn default_hermes_agent_config() -> AgentConfig {
+    AgentConfig {
+        enabled: false,
+        profile: "hermes".to_string(),
+        bin: "hermes".to_string(),
+        permission_mode: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +422,42 @@ mod tests {
             config.control_group_ids(),
             vec!["abc".to_string(), "def".to_string()]
         );
+    }
+
+    #[test]
+    fn missing_hermes_config_loads_disabled_default() {
+        let text = r#"
+[whitenoise]
+group_id = "group"
+
+[runner]
+bondage_bin = "bondage"
+bondage_conf = "/tmp/bondage.conf"
+data_dir = "/tmp/agentnoise"
+log_dir = "/tmp/agentnoise/logs"
+max_prompt_chars = 8000
+max_output_chars = 2400
+
+[agents.codex]
+enabled = true
+profile = "codex"
+bin = "codex"
+
+[agents.claude]
+enabled = true
+profile = "claude"
+bin = "claude"
+permission_mode = "auto"
+
+[[repos]]
+alias = "work"
+path = "/tmp"
+"#;
+
+        let config: Config = toml::from_str(text).unwrap();
+
+        assert!(!config.agents.hermes.enabled);
+        assert_eq!(config.agents.hermes.profile, "hermes");
+        assert_eq!(config.agents.hermes.bin, "hermes");
     }
 }
