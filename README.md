@@ -18,6 +18,8 @@ agents launched through a constrained policy boundary.
 The less polite design brief: I had to build it because everything else sucks
 and Jeff moves too slow.
 
+such alpha, much wow.
+
 ## What It Does
 
 agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through `bondage`, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
