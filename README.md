@@ -4,6 +4,11 @@ Chat with local coding agents through White Noise.
 
 `agentnoise` is a native desktop helper for using a phone running White Noise as the control surface for local Codex and Claude sessions. It is intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
 
+AgentNoise exists because the available agent-chat bridges were too heavy,
+too slow-moving, or too awkward for the simple workflow this project needs: a
+native desktop helper, a phone chat UI, strong first-pairing, and local coding
+agents launched through a constrained policy boundary.
+
 ## What It Does
 
 AgentNoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through `bondage`, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent AgentNoise sessions open in separate chat windows.
