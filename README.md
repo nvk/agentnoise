@@ -317,6 +317,15 @@ enabled. `/wiki` follows the local Codex `codex-wiki` convention by prefixing
 `@wiki`; `/claude-wiki` sends a `wiki ...` prompt for Claude installations with
 the LLM Wiki instructions/plugin available.
 
+### Maybe Later: Local Agent Session Visibility
+
+agentnoise currently shows only sessions and jobs it owns. A future opt-in
+local visibility mode could expose metadata for Codex, Claude, or Hermes
+sessions that were started elsewhere on the same machine, then let the phone
+explicitly import one into the current White Noise chat. The default should
+remain conservative: metadata first, no transcript scraping, no process/env
+inspection, and no silent exposure of unrelated local agent work.
+
 ## Optional Hermes Support
 
 Hermes support is disabled by default. agentnoise does not run the Hermes Agent
