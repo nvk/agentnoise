@@ -1,5 +1,12 @@
 # AgentNoise
 
+```text
+ ______   ______   ______  ______  _______  ______   ______  _____  ______   ______
+| |  | | | | ____ | |     | |  \ \   | |   | |  \ \ / |  | \  | |  / |      | |
+| |__| | | |  | | | |---- | |  | |   | |   | |  | | | |  | |  | |  '------. | |----
+|_|  |_| |_|__|_| |_|____ |_|  |_|   |_|   |_|  |_| \_|__|_/ _|_|_  ____|_/ |_|____
+```
+
 Chat with local coding agents through White Noise.
 
 `agentnoise` is a native desktop helper for using a phone running White Noise as the control surface for local Codex and Claude sessions. It is intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
@@ -157,3 +164,9 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)
 - [Homebrew packaging](docs/homebrew.md)
+
+## License
+
+MIT License. Copyright (c) 2026 nvk.
+
+This software is provided as-is, without warranty of any kind.
