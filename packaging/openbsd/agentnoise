@@ -1,0 +1,13 @@
+#!/bin/ksh
+
+daemon="/usr/local/bin/agentnoise"
+daemon_flags="--config /etc/agentnoise/config.toml up"
+daemon_user="_agentnoise"
+
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+
+. /etc/rc.d/rc.subr
+
+rc_reload=NO
+
+rc_cmd "$1"

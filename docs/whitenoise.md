@@ -1,0 +1,234 @@
+# White Noise Setup
+
+AgentNoise uses the upstream `wn` client and `wnd` daemon from `marmot-protocol/whitenoise-rs`. A packaged AgentNoise install should ship `wn` and `wnd` beside the `agentnoise` binary. If not, AgentNoise can install them into its managed data directory.
+
+## Managed Install
+
+```sh
+agentnoise whitenoise install
+agentnoise whitenoise status
+```
+
+This installs the upstream `whitenoise-cli` package under:
+
+```text
+~/Library/Application Support/agentnoise/whitenoise-cli/bin/
+```
+
+AgentNoise discovers `wn` in this order:
+
+1. explicit `whitenoise.wn_bin` path in `config.toml`
+2. `wn` beside the running `agentnoise` executable
+3. AgentNoise-managed install under Application Support
+4. repo-local development build under `.local-whitenoise/bin`
+5. `wn` on `PATH`
+
+## Manual Build
+
+```sh
+git clone https://github.com/marmot-protocol/whitenoise-rs.git
+cd whitenoise-rs
+cargo install --path crates/whitenoise-cli
+```
+
+The upstream README also supports:
+
+```sh
+just install-cli
+```
+
+For local development in this checkout, the CLI was built successfully into:
+
+```text
+.local-whitenoise/bin/wn
+.local-whitenoise/bin/wnd
+```
+
+Use that path in `config.toml` if you want to force the local dev build:
+
+```toml
+[whitenoise]
+wn_bin = ".local-whitenoise/bin/wn"
+```
+
+## Create the AgentNoise Keypair
+
+AgentNoise uses a dedicated White Noise/Nostr identity for the desktop helper.
+The normal path is:
+
+```sh
+agentnoise up
+```
+
+`up` creates or reuses the default `desktop` identity, stores the `nsec` in
+the OS keychain, writes the desktop `npub` into `config.toml`, starts White
+Noise, logs in, publishes the desktop profile/key package, enables startup login
+repair, prints a phone pairing QR when pairing is still needed, discovers
+visible control chats when possible, and then listens. It never writes the
+`nsec` to `config.toml`.
+
+The QR encodes a Nostr `nprofile`: the desktop `npub` plus relay hints. It is
+for phone discovery only and never contains the desktop `nsec`.
+
+Use a dedicated desktop identity. Do not reuse the phone identity secret.
+
+## OS Keychain Bootstrap
+
+For unattended or remote boxes, AgentNoise can store the dedicated bot `nsec` in the OS keychain and use it to repair the White Noise login at process startup.
+
+The simple command above is equivalent to the advanced identity flow:
+
+```sh
+agentnoise identity create
+agentnoise pair
+```
+
+For HA planning or staged rotation, create a small set explicitly:
+
+```sh
+agentnoise identity create --count 3
+```
+
+- `desktop` at `agentnoise / whitenoise-nsec`
+- `desktop-2` at `agentnoise / whitenoise-nsec/desktop-2`
+- `desktop-3` at `agentnoise / whitenoise-nsec/desktop-3`
+
+If you already created the identity with `wn`, export or copy the bot `nsec` once, then store it with AgentNoise instead:
+
+```sh
+wn export-nsec <bot-npub>
+```
+
+```sh
+agentnoise keychain store-nsec
+agentnoise keychain status
+```
+
+`store-nsec` prompts on a terminal and also accepts a single piped line:
+
+```sh
+printf '%s\n' 'nsec1...' | agentnoise keychain store-nsec
+```
+
+Render a pairing QR for the phone:
+
+```sh
+agentnoise pair
+```
+
+The QR encodes a standard Nostr `nprofile`, which contains the desktop bot `npub` plus relay hints. Override relays at render time when needed:
+
+```sh
+agentnoise pair --relay wss://relay.example
+```
+
+`up` enables startup repair automatically. The relevant config is:
+
+```toml
+[whitenoise]
+use_keychain_nsec = true
+pairing_relays = [
+    "wss://index.hzrd149.com",
+    "wss://indexer.coracle.social",
+    "wss://relay.primal.net",
+    "wss://relay.damus.io",
+    "wss://relay.ditto.pub",
+    "wss://nos.lol",
+]
+keychain_service = "agentnoise"
+keychain_item = "whitenoise-nsec"
+login_relay = "wss://relay.example" # optional
+```
+
+To test the path manually:
+
+```sh
+agentnoise whitenoise login-from-keychain
+agentnoise doctor
+```
+
+AgentNoise checks `wn whoami --json` at startup. If the configured White Noise account is already logged in, it does not read the keychain. If the account is missing and `use_keychain_nsec = true`, it reads the `nsec` once, feeds it to `wn login`, then zeroizes the in-process copy. The long-running message loop does not poll the keychain.
+
+Remove the stored bootstrap secret:
+
+```sh
+agentnoise keychain delete-nsec
+agentnoise identity delete --name desktop-2
+```
+
+High-availability note: the OS keychain must be available to the same service account that runs AgentNoise. A macOS per-user LaunchAgent can normally read the login keychain after the user session is unlocked. Headless Linux Secret Service setups often depend on a DBus/user session and should be tested from the exact supervisor context before relying on automatic restart repair.
+
+## Create Control Chats
+
+If you know the phone identity `npub`, let AgentNoise create the group:
+
+```sh
+agentnoise up --phone npub...
+```
+
+Otherwise scan the QR from `agentnoise up`, create the group from the phone,
+then rerun `up`. AgentNoise asks `wn groups list --json`, saves visible group
+ids, and listens to them. It does not trust a peer just because a group is
+visible on the relay; command auth is still the sender allowlist.
+
+```sh
+agentnoise up
+```
+
+To run multiple sessions from the same phone, send `/new <name>` from an
+existing AgentNoise chat. AgentNoise creates another White Noise chat with the
+same paired phone identity, clones the current workspace, saves the new MLS
+group id, subscribes immediately, and posts a ready message in the new chat.
+
+You can also create multiple White Noise chats with the AgentNoise desktop
+identity manually. White Noise gives each chat a different MLS group id, and
+AgentNoise keeps `/use`, `/cd`, and prompt context separate per group id. Use
+`/rename <name>` to name a manually-created chat, `/list` to list known
+sessions, and `/resume <number|name|id>` to ping a saved session from that list.
+`/sessions` and `/here <name>` remain accepted as compatibility aliases.
+
+## Sender Allowlist
+
+`allowed_senders` is filled by a first-run PIN handshake. When the allowlist is
+empty and `require_pairing_pin = true`, `agentnoise up` prints the QR and a
+6-digit PIN. On macOS it also opens a pairing window with the desktop identity
+QR, desktop `npub`, current PIN, and live countdown. The phone must send that
+PIN as the first message, either as a bare code or `/pair 123456`. AgentNoise
+stores that sender and ignores every other message until the PIN succeeds.
+
+The relevant config is:
+
+```toml
+[whitenoise]
+require_pairing_pin = true
+pairing_pin_seconds = 30
+allowed_senders = []
+```
+
+If you need to set `allowed_senders` manually, use the sender value emitted by
+`wn messages subscribe --json`. Current upstream formatted messages include an
+`author` hex pubkey inside the `message` object, so the manual setup is:
+
+1. Temporarily set `require_pairing_pin = false`.
+1. Run `agentnoise up` in the foreground with `allowed_senders = []`.
+1. Send `/status` from the phone.
+1. Copy the sender shown in the local stream/logs or inspect `wn messages subscribe --json`.
+1. Add it to `allowed_senders`.
+1. Restore `require_pairing_pin = true`.
+1. Restart AgentNoise.
+
+Foreground pairing is easiest to inspect. A macOS LaunchAgent can still enter
+pairing mode and show the same desktop window when the user GUI session is
+available; on headless or non-macOS services, use the supervisor log for the
+rotating PIN.
+
+## Initial Messages
+
+AgentNoise defaults to:
+
+```toml
+subscribe_limit = 0
+ignore_initial_messages = true
+```
+
+This avoids replaying old chat commands on startup.

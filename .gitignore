@@ -1,0 +1,7 @@
+/target
+/.cargo-home
+/.local-whitenoise
+/.runtime
+/tmp-agentnoise.toml
+/tmp-data
+/tmp-logs

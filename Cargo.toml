@@ -1,0 +1,43 @@
+[package]
+name = "agentnoise"
+version = "0.1.0"
+edition = "2024"
+description = "Chat with local coding agents through White Noise"
+homepage = "https://agentnoise.com"
+repository = "https://github.com/nvk/agentnoise"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.51", features = ["derive"] }
+dirs = "6.0.0"
+hmac = "0.12.1"
+nostr = "0.44.2"
+qrcode = "0.14.1"
+rpassword = "7.4.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+time = { version = "0.3.44", features = ["formatting", "macros", "serde"] }
+toml = "0.9.8"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+zeroize = "1.8.2"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", features = [
+    "linux-native-sync-persistent",
+    "crypto-rust",
+] }
+
+[target.'cfg(any(target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust"] }

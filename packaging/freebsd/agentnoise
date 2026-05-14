@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# PROVIDE: agentnoise
+# REQUIRE: NETWORKING LOGIN
+# KEYWORD: shutdown
+#
+# Add this to /etc/rc.conf:
+# agentnoise_enable="YES"
+# agentnoise_user="your-user"
+
+. /etc/rc.subr
+
+name="agentnoise"
+rcvar="agentnoise_enable"
+
+load_rc_config "$name"
+
+: ${agentnoise_enable:="NO"}
+: ${agentnoise_user:="agentnoise"}
+: ${agentnoise_command:="/usr/local/bin/agentnoise"}
+: ${agentnoise_config:="/usr/local/etc/agentnoise/config.toml"}
+: ${agentnoise_path:="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"}
+
+pidfile="/var/run/${name}.pid"
+procname="${agentnoise_command}"
+command="/usr/sbin/daemon"
+command_args="-f -p ${pidfile} -u ${agentnoise_user} /usr/bin/env PATH=${agentnoise_path} \"${agentnoise_command}\" --config \"${agentnoise_config}\" up"
+
+run_rc_command "$1"

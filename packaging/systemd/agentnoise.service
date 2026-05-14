@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentNoise White Noise coding-agent bridge
+Documentation=https://agentnoise.com
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agentnoise --config %h/.local/share/agentnoise/config.toml up
+Restart=on-failure
+RestartSec=5s
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+WorkingDirectory=%h/.local/share/agentnoise
+
+[Install]
+WantedBy=default.target
