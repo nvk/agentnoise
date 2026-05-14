@@ -1,7 +1,7 @@
 class Agentnoise < Formula
   desc "Chat with local coding agents through White Noise"
   homepage "https://agentnoise.com"
-  url "https://github.com/nvk/agentnoise.git", tag: "v0.1.0"
+  url "https://github.com/nvk/agentnoise.git", tag: "v0.1.7"
   license "MIT"
 
   depends_on "rust" => :build

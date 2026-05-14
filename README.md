@@ -20,6 +20,20 @@ and Jeff moves too slow.
 
 such alpha, much wow.
 
+## Changelog
+
+**v0.1.7** - **Optional Hermes backend.** Added `/hermes` and
+`/hermes-resume` as disabled-by-default commands that route Hermes through the
+same `bondage` local policy boundary used for Codex and Claude. Command
+parsing, config compatibility, command construction, doctor output, and
+packaging are tested; live Hermes CLI/runtime execution is still alpha and
+untested.
+
+**v0.1.6** - **Service console and dev burner identity.** `agentnoise up` can
+attach to an already-running Homebrew service as a local console instead of
+starting a second listener, and disposable development identities can use
+`--dev-burner-nsec` without repeated OS keychain prompts.
+
 ## What It Does
 
 agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through [`bondage`](https://agentbondage.org/), stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
@@ -284,6 +298,7 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)
 - [Homebrew packaging](docs/homebrew.md)
+- [Release notes](#changelog)
 - [Learn to Prompt agent stack](https://learntoprompt.org/guides/agent-stack.html)
 - [Bondage local launcher](https://agentbondage.org/)
 
