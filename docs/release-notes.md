@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.9
+
+- Added SSH pairing mode with terminal-only PIN display via `agentnoise up
+  --ssh --phone npub1...`.
+- Added `--name` for publishing a distinct White Noise/Nostr profile name per
+  machine.
+- Added a remote SSH pairing guide that keeps `nsec` off the wire and uses the
+  phone `npub` for remote chat creation.
+
 ## 0.1.8
 
 This pass focuses on parity and operability while keeping the trusted path

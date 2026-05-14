@@ -16,7 +16,7 @@ export AGENTNOISE="$PWD/target/release/agentnoise"
 If you know the phone White Noise `npub`:
 
 ```sh
-"$AGENTNOISE" up --phone npub...
+"$AGENTNOISE" up --phone npub... --name agentnoise-mbp
 ```
 
 That creates or reuses the desktop keypair in the OS keychain, writes the config,
@@ -44,6 +44,25 @@ macOS it also opens a pairing window with the QR, desktop `npub`, PIN, and live
 countdown. Send the PIN from the phone as the first message.
 agentnoise ignores every other message until the PIN succeeds, then saves that
 sender to `allowed_senders`.
+
+Use a distinct `--name` for every computer, for example `agentnoise-mbp` or
+`agentnoise-linuxbox`. The name is saved in config and published as the desktop
+White Noise/Nostr profile so the phone can tell multiple agentnoise identities
+apart.
+
+## Remote SSH Pairing
+
+When pairing over SSH, pass only the phone `npub` and keep the PIN in the SSH
+terminal:
+
+```sh
+brew services stop nvk/tap/agentnoise
+agentnoise up --ssh --phone npub1... --name agentnoise-linuxbox
+```
+
+`--ssh` disables the desktop GUI pairing alert and prints the rotating PIN in
+the terminal session. The remote box generates its own desktop keypair locally;
+no `nsec` crosses SSH for normal setup.
 
 ## Run
 

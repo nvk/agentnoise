@@ -38,6 +38,13 @@ enum ListenerMode {
 struct PairingRuntime {
     gate: PairingGate,
     payload: identity::PairingPayload,
+    display: PairingDisplay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairingDisplay {
+    Desktop,
+    TerminalOnly,
 }
 
 #[derive(Debug, Parser)]
@@ -115,6 +122,8 @@ struct SetupArgs {
         help = "Phone White Noise npub; creates a control chat when provided"
     )]
     phone: Option<String>,
+    #[arg(long, help = "Unique White Noise/Nostr profile name for this machine")]
+    name: Option<String>,
     #[arg(long, default_value = setup::DEFAULT_GROUP_NAME)]
     group_name: String,
     #[arg(long)]
@@ -135,6 +144,8 @@ struct UpArgs {
         help = "Phone White Noise npub; creates a control chat when provided"
     )]
     phone: Option<String>,
+    #[arg(long, help = "Unique White Noise/Nostr profile name for this machine")]
+    name: Option<String>,
     #[arg(long, default_value = setup::DEFAULT_GROUP_NAME)]
     group_name: String,
     #[arg(long, help = "Add a White Noise group id before starting")]
@@ -150,6 +161,11 @@ struct UpArgs {
         help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
     )]
     dev_burner_nsec: bool,
+    #[arg(
+        long,
+        help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
+    )]
+    ssh: bool,
 }
 
 #[derive(Debug, Args)]
@@ -188,6 +204,11 @@ struct StartArgs {
     group: Option<String>,
     #[arg(long, help = "Do not start wn daemon automatically")]
     no_daemon: bool,
+    #[arg(
+        long,
+        help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
+    )]
+    ssh: bool,
 }
 
 #[derive(Debug, Args)]
@@ -383,6 +404,7 @@ fn main() -> Result<()> {
                 &config_path,
                 SetupOptions {
                     phone_npub: args.phone,
+                    profile_name: args.name,
                     group_name: args.group_name,
                     force_identity: args.force_identity,
                     relays: args.relays,
@@ -495,7 +517,7 @@ fn main() -> Result<()> {
         }
         Command::Listen => {
             let config = Config::load(&config_path)?;
-            let pairing = pairing_for_listener(&config_path, &config)?;
+            let pairing = pairing_for_listener(&config_path, &config, PairingDisplay::Desktop)?;
             run_listener_with_mode(&config_path, config, pairing, ListenerMode::Try)?;
         }
         Command::Send { text } => {
@@ -675,6 +697,7 @@ fn print_setup_result(result: &SetupResult) {
     );
     println!("npub: {}", result.npub);
     println!("nprofile: {}", result.nprofile);
+    println!("profile: {}", result.profile_display_name);
     if result.created_config {
         println!("config file: created");
     }
@@ -771,6 +794,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
         config_path,
         SetupOptions {
             phone_npub: args.phone.clone(),
+            profile_name: args.name.clone(),
             group_name: args.group_name,
             force_identity: false,
             relays: args.relays.clone(),
@@ -848,8 +872,13 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
         StartArgs {
             group: None,
             no_daemon: args.no_daemon,
+            ssh: args.ssh,
         },
-        up_listener_mode(),
+        if args.ssh {
+            ListenerMode::Try
+        } else {
+            up_listener_mode()
+        },
     )
 }
 
@@ -858,8 +887,10 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
         || args.no_listen
         || args.phone.is_some()
         || args.group.is_some()
+        || args.name.is_some()
         || !args.relays.is_empty()
         || args.dev_burner_nsec
+        || args.ssh
         || !config_path.exists()
     {
         return Ok(false);
@@ -927,8 +958,10 @@ fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> 
         || args.no_listen
         || args.phone.is_some()
         || args.group.is_some()
+        || args.name.is_some()
         || !args.relays.is_empty()
         || args.dev_burner_nsec
+        || args.ssh
         || !config_path.exists()
     {
         return Ok(());
@@ -995,14 +1028,23 @@ fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Re
         daemon
     };
 
-    let pairing = pairing_for_listener(config_path, &config)?;
+    let pairing_display = if args.ssh {
+        PairingDisplay::TerminalOnly
+    } else {
+        PairingDisplay::Desktop
+    };
+    let pairing = pairing_for_listener(config_path, &config, pairing_display)?;
     if let Some(pairing) = pairing_runtime_info(&config, pairing.as_ref()) {
         guard.update_status(config_path, &config, Some(pairing))?;
     }
     run_listener(config_path, config, pairing, guard)
 }
 
-fn pairing_for_listener(config_path: &Path, config: &Config) -> Result<Option<PairingRuntime>> {
+fn pairing_for_listener(
+    config_path: &Path,
+    config: &Config,
+    display: PairingDisplay,
+) -> Result<Option<PairingRuntime>> {
     if !config.whitenoise.require_pairing_pin || !config.whitenoise.allowed_senders.is_empty() {
         return Ok(None);
     }
@@ -1016,7 +1058,11 @@ fn pairing_for_listener(config_path: &Path, config: &Config) -> Result<Option<Pa
     println!();
     println!("{}", identity::render_qr(&payload.nprofile)?);
     println!();
-    Ok(Some(PairingRuntime { gate, payload }))
+    Ok(Some(PairingRuntime {
+        gate,
+        payload,
+        display,
+    }))
 }
 
 fn run_listener_with_mode(
@@ -1095,19 +1141,30 @@ fn spawn_pairing_pin_display(pairing: PairingRuntime) {
     thread::spawn(move || {
         let pairing_gate = pairing.gate;
         let payload = pairing.payload;
+        let display = pairing.display;
+        if display == PairingDisplay::TerminalOnly {
+            println!("agentnoise SSH pairing mode");
+            println!("desktop alerts disabled; keep this terminal open until pairing completes");
+            std::io::stdout().flush().ok();
+        }
         while !pairing_gate.is_complete() {
             let pin = pairing_gate.current_pin();
             print_pairing_pin(pin.clone());
-            let mut alert = match desktop_alert::spawn_pairing_pin_alert(
-                &pin,
-                &payload.npub,
-                &payload.nprofile,
-            ) {
-                Ok(alert) => alert,
-                Err(error) => {
-                    eprintln!("agentnoise: failed to show pairing alert: {error:#}");
-                    None
+            let mut alert = match display {
+                PairingDisplay::Desktop => {
+                    match desktop_alert::spawn_pairing_pin_alert(
+                        &pin,
+                        &payload.npub,
+                        &payload.nprofile,
+                    ) {
+                        Ok(alert) => alert,
+                        Err(error) => {
+                            eprintln!("agentnoise: failed to show pairing alert: {error:#}");
+                            None
+                        }
+                    }
                 }
+                PairingDisplay::TerminalOnly => None,
             };
             let expires_after = Duration::from_secs(pin.expires_in_seconds.max(1));
             let started = Instant::now();
@@ -1116,7 +1173,7 @@ fn spawn_pairing_pin_display(pairing: PairingRuntime) {
                     if let Some(alert) = alert.as_mut() {
                         alert.close();
                     }
-                    show_pairing_success_alert();
+                    show_pairing_success(display);
                     return;
                 }
                 if alert
@@ -1131,8 +1188,18 @@ fn spawn_pairing_pin_display(pairing: PairingRuntime) {
                 alert.close();
             }
         }
-        show_pairing_success_alert();
+        show_pairing_success(display);
     });
+}
+
+fn show_pairing_success(display: PairingDisplay) {
+    match display {
+        PairingDisplay::Desktop => show_pairing_success_alert(),
+        PairingDisplay::TerminalOnly => {
+            println!("agentnoise pairing complete");
+            std::io::stdout().flush().ok();
+        }
+    }
 }
 
 fn show_pairing_success_alert() {

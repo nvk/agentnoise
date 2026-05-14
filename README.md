@@ -22,6 +22,11 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.9** - **Remote pairing polish.** Added SSH pairing mode with
+terminal-only PIN display, `--name` for per-machine White Noise/Nostr profile
+labels, and a remote SSH guide that passes the phone `npub` without moving any
+`nsec` over SSH.
+
 **v0.1.8** - **Parity hardening pass.** Added a fake phone harness for
 isolated White Noise testing, durable runtime event journaling, `agentnoise
 status`, progress messages from Codex/Claude JSON streams, approval replay for
@@ -132,6 +137,19 @@ agentnoise agents
 agentnoise fake-phone plan
 ```
 
+Remote SSH pairing:
+
+```sh
+brew services stop nvk/tap/agentnoise
+agentnoise up --ssh --phone npub1... --name agentnoise-mbp
+```
+
+In `--ssh` mode, agentnoise prints the pairing PIN in the SSH session and does
+not open a desktop GUI alert. Pass the phone `npub`, not an `nsec`; the remote
+machine creates and stores its own desktop identity locally. Use a distinct
+`--name` per machine so White Noise can show `agentnoise-mbp`,
+`agentnoise-linuxbox`, or whatever label makes sense.
+
 The service is expected to start even before the White Noise chat exists. It
 waits, keeps showing a rotating PIN while pairing is required, and discovers
 the phone-created chat automatically. During first pairing it also reads a small
@@ -172,7 +190,7 @@ If you already have the phone identity `npub`, agentnoise can create the White
 Noise control chat too:
 
 ```sh
-target/release/agentnoise up --phone npub...
+target/release/agentnoise up --phone npub... --name agentnoise-mbp
 ```
 
 Otherwise scan the QR, create a White Noise chat/group with the desktop
@@ -478,6 +496,7 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 
 - [White Noise setup](docs/whitenoise.md)
 - [Local bring-up](docs/local-bringup.md)
+- [Remote SSH pairing](docs/remote-ssh.md)
 - [Fake phone testing](docs/fake-phone-testing.md)
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)

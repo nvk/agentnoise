@@ -9,13 +9,11 @@ use crate::paths::expand_tilde;
 use crate::whitenoise_cli;
 
 pub const DEFAULT_GROUP_NAME: &str = "agentnoise";
-const PROFILE_NAME: &str = "agentnoise";
-const PROFILE_DISPLAY_NAME: &str = "agentnoise desktop";
-const PROFILE_ABOUT: &str = "Local agentnoise desktop helper.";
 
 #[derive(Debug, Clone)]
 pub struct SetupOptions {
     pub phone_npub: Option<String>,
+    pub profile_name: Option<String>,
     pub group_name: String,
     pub force_identity: bool,
     pub relays: Vec<String>,
@@ -30,6 +28,8 @@ pub struct SetupResult {
     pub identity_created: bool,
     pub npub: String,
     pub nprofile: String,
+    pub profile_name: String,
+    pub profile_display_name: String,
     pub relays: Vec<String>,
     pub qr: String,
     pub daemon_started: bool,
@@ -62,6 +62,15 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     } else if !config.whitenoise.dev_burner_nsec {
         config.whitenoise.use_keychain_nsec = true;
     }
+    if let Some(name) = options
+        .profile_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        config.whitenoise.profile_name = normalize_profile_name(name);
+        config.whitenoise.profile_display_name = name.to_string();
+    }
     if whitenoise_cli::should_reset_wn_bin_to_default(&config.whitenoise.wn_bin) {
         config.whitenoise.wn_bin = "wn".to_string();
     }
@@ -91,9 +100,9 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     let login_repaired = whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)?;
     whitenoise_cli::update_profile(
         &config.whitenoise,
-        PROFILE_NAME,
-        PROFILE_DISPLAY_NAME,
-        PROFILE_ABOUT,
+        &config.whitenoise.profile_name,
+        &config.whitenoise.profile_display_name,
+        &config.whitenoise.profile_about,
     )?;
     let profile_published = true;
     whitenoise_cli::publish_key_package(&config.whitenoise)?;
@@ -124,6 +133,8 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         identity_created,
         npub: identity.npub,
         nprofile: payload.nprofile,
+        profile_name: config.whitenoise.profile_name,
+        profile_display_name: config.whitenoise.profile_display_name,
         relays: payload.relays,
         qr,
         daemon_started,
@@ -138,6 +149,26 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
             .as_deref()
             .map(expand_tilde),
     })
+}
+
+pub fn normalize_profile_name(name: &str) -> String {
+    let mut output = String::new();
+    let mut last_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            output.push('-');
+            last_dash = true;
+        }
+    }
+    let output = output.trim_matches('-').to_string();
+    if output.is_empty() {
+        "agentnoise".to_string()
+    } else {
+        output
+    }
 }
 
 pub fn pairing(config_path: &Path, relays: &[String]) -> Result<PairingPayload> {
@@ -172,4 +203,19 @@ fn ensure_runtime_dirs(config: &Config) -> Result<()> {
 
     let log_dir = config.resolved_log_dir();
     fs::create_dir_all(&log_dir).with_context(|| format!("creating log dir {}", log_dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_profile_name_for_nostr_name_field() {
+        assert_eq!(
+            normalize_profile_name("agentnoise MBP M5"),
+            "agentnoise-mbp-m5"
+        );
+        assert_eq!(normalize_profile_name(" linux_box "), "linux-box");
+        assert_eq!(normalize_profile_name("!!!"), "agentnoise");
+    }
 }

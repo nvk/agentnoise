@@ -67,6 +67,16 @@ repair, prints a phone pairing QR when pairing is still needed, discovers
 visible control chats when possible, waits for the first chat when needed, and
 then listens. It never writes the `nsec` to `config.toml`.
 
+Give each computer a unique published profile name:
+
+```sh
+agentnoise up --name agentnoise-mbp
+agentnoise up --phone npub1... --name agentnoise-linuxbox
+```
+
+The display name is saved in `config.toml` and published through the White
+Noise/Nostr profile, so the phone can tell multiple agentnoise desktops apart.
+
 The QR encodes a Nostr `nprofile`: the desktop `npub` plus relay hints. It is
 for phone discovery only and never contains the desktop `nsec`.
 

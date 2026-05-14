@@ -59,6 +59,12 @@ pub struct WhitenoiseConfig {
     pub bot_sender: Option<String>,
     #[serde(default)]
     pub bot_npub: Option<String>,
+    #[serde(default = "default_profile_name")]
+    pub profile_name: String,
+    #[serde(default = "default_profile_display_name")]
+    pub profile_display_name: String,
+    #[serde(default = "default_profile_about")]
+    pub profile_about: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +201,9 @@ impl Config {
                 pairing_pin_seconds: default_pairing_pin_seconds(),
                 bot_sender: None,
                 bot_npub: None,
+                profile_name: default_profile_name(),
+                profile_display_name: default_profile_display_name(),
+                profile_about: default_profile_about(),
             },
             runner: RunnerConfig {
                 bondage_bin: default_bondage_bin(),
@@ -244,6 +253,12 @@ impl Config {
         }
         if self.whitenoise.pairing_pin_seconds < 10 {
             bail!("whitenoise.pairing_pin_seconds must be at least 10");
+        }
+        if self.whitenoise.profile_name.trim().is_empty() {
+            bail!("whitenoise.profile_name cannot be empty");
+        }
+        if self.whitenoise.profile_display_name.trim().is_empty() {
+            bail!("whitenoise.profile_display_name cannot be empty");
         }
         if self.whitenoise.transport == WhitenoiseTransport::Socket
             && self.whitenoise.resolved_socket().is_none()
@@ -412,6 +427,18 @@ fn default_pairing_pin_seconds() -> u64 {
     crate::auth::DEFAULT_PAIRING_PIN_SECONDS
 }
 
+fn default_profile_name() -> String {
+    "agentnoise".to_string()
+}
+
+fn default_profile_display_name() -> String {
+    "agentnoise desktop".to_string()
+}
+
+fn default_profile_about() -> String {
+    "Local agentnoise desktop helper.".to_string()
+}
+
 fn default_bondage_bin() -> String {
     "bondage".to_string()
 }
@@ -528,5 +555,7 @@ path = "/tmp"
         assert!(!config.agents.hermes.enabled);
         assert_eq!(config.agents.hermes.profile, "hermes");
         assert_eq!(config.agents.hermes.bin, "hermes");
+        assert_eq!(config.whitenoise.profile_name, "agentnoise");
+        assert_eq!(config.whitenoise.profile_display_name, "agentnoise desktop");
     }
 }
