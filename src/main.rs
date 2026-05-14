@@ -23,6 +23,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use zeroize::Zeroize;
 
+const FIRST_PAIRING_SUBSCRIBE_LIMIT: u32 = 20;
+
 #[derive(Clone)]
 struct PairingRuntime {
     gate: PairingGate,
@@ -870,6 +872,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
     let subscribed = Arc::new(Mutex::new(HashSet::new()));
 
     let initial_groups = initial_group_ids(&wn);
+    let subscribe_limit = listener_subscribe_limit(app.config());
     if initial_groups.is_empty() {
         println!("agentnoise waiting for White Noise control chat");
         println!("agentnoise will keep discovering chats until the phone-created chat appears");
@@ -880,6 +883,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                 Arc::clone(&subscribed),
                 tx.clone(),
                 &group_id,
+                subscribe_limit,
             )?;
         }
     }
@@ -903,6 +907,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         Arc::clone(&subscribed),
                         tx.clone(),
                         &group_id,
+                        subscribe_limit,
                     ) {
                         eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
                     }
@@ -967,6 +972,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                             Arc::clone(&subscribed),
                             tx.clone(),
                             &request,
+                            subscribe_limit,
                         ) {
                             Ok(new_group_id) => {
                                 match wn.send_reply_to(&new_group_id, &request.ready_text()) {
@@ -999,6 +1005,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                             Arc::clone(&subscribed),
                             tx.clone(),
                             &request,
+                            subscribe_limit,
                         ) {
                             Ok(()) => {
                                 if request.group_id == group_id {
@@ -1053,6 +1060,17 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
     Ok(())
 }
 
+fn listener_subscribe_limit(config: &Config) -> u32 {
+    if config.whitenoise.require_pairing_pin && config.whitenoise.allowed_senders.is_empty() {
+        config
+            .whitenoise
+            .subscribe_limit
+            .max(FIRST_PAIRING_SUBSCRIBE_LIMIT)
+    } else {
+        config.whitenoise.subscribe_limit
+    }
+}
+
 fn create_parallel_session(
     config_path: &Path,
     app: Arc<AgentApp>,
@@ -1060,6 +1078,7 @@ fn create_parallel_session(
     subscribed: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<StreamItem>,
     request: &NewSessionRequest,
+    subscribe_limit: u32,
 ) -> Result<String> {
     let created = whitenoise_cli::create_group(
         &app.config().whitenoise,
@@ -1072,7 +1091,7 @@ fn create_parallel_session(
 
     app.create_session_record(&group_id, request.state.clone())?;
     persist_control_group_id(config_path, &group_id)?;
-    subscribe_group_if_needed(wn, subscribed, tx, &group_id)?;
+    subscribe_group_if_needed(wn, subscribed, tx, &group_id, subscribe_limit)?;
 
     Ok(group_id)
 }
@@ -1083,9 +1102,10 @@ fn resume_parallel_session(
     subscribed: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<StreamItem>,
     request: &agentnoise::app::ResumeSessionRequest,
+    subscribe_limit: u32,
 ) -> Result<()> {
     persist_control_group_id(config_path, &request.group_id)?;
-    subscribe_group_if_needed(wn, subscribed, tx, &request.group_id)
+    subscribe_group_if_needed(wn, subscribed, tx, &request.group_id, subscribe_limit)
 }
 
 fn persist_control_group_id(config_path: &Path, group_id: &str) -> Result<()> {
@@ -1108,6 +1128,7 @@ fn subscribe_group_if_needed(
     subscribed: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<StreamItem>,
     group_id: &str,
+    subscribe_limit: u32,
 ) -> Result<()> {
     let group_id = group_id.trim();
     if group_id.is_empty() {
@@ -1125,7 +1146,7 @@ fn subscribe_group_if_needed(
 
     let group_id = group_id.to_string();
     let mut child = wn
-        .subscribe_group(&group_id)
+        .subscribe_group_with_limit(&group_id, subscribe_limit)
         .with_context(|| format!("starting White Noise subscription for {group_id}"))?;
     let stdout = child
         .stdout

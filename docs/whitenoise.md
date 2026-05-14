@@ -232,3 +232,7 @@ ignore_initial_messages = true
 ```
 
 This avoids replaying old chat commands on startup.
+
+During first pairing only, agentnoise raises the subscription limit to a small
+initial window so a PIN sent immediately after creating the White Noise chat can
+still be accepted. Non-PIN initial messages are still ignored.

@@ -77,7 +77,9 @@ tail -f "$(brew --prefix)/var/log/agentnoise.err.log"
 
 The service is expected to start even before the White Noise chat exists. It
 waits, keeps showing a rotating PIN while pairing is required, and discovers
-the phone-created chat automatically.
+the phone-created chat automatically. During first pairing it also reads a small
+initial message window, so a PIN sent right after chat creation can still be
+accepted.
 
 Build from source:
 

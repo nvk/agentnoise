@@ -49,6 +49,10 @@ impl WnClient {
     }
 
     pub fn subscribe_group(&self, group_id: &str) -> Result<Child> {
+        self.subscribe_group_with_limit(group_id, self.config.subscribe_limit)
+    }
+
+    pub fn subscribe_group_with_limit(&self, group_id: &str, limit: u32) -> Result<Child> {
         let group_id = group_id.trim();
         if group_id.is_empty() {
             bail!("White Noise group id is empty");
@@ -59,7 +63,7 @@ impl WnClient {
         self.add_account_arg(&mut command);
         command
             .arg("--limit")
-            .arg(self.config.subscribe_limit.to_string())
+            .arg(limit.to_string())
             .arg(group_id)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
