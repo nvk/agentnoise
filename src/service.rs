@@ -164,7 +164,7 @@ pub fn systemd_user_path() -> PathBuf {
 fn render_systemd_user(exe: &Path, config_path: &Path, config: &Config) -> String {
     format!(
         r#"[Unit]
-Description=AgentNoise White Noise coding-agent bridge
+Description=agentnoise White Noise coding-agent bridge
 Documentation=https://agentnoise.com
 Wants=network-online.target
 After=network-online.target

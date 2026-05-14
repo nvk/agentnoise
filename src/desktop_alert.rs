@@ -110,7 +110,7 @@ fn platform_spawn_pairing_pin_alert(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
-        .context("showing macOS AgentNoise pairing alert")?;
+        .context("showing macOS agentnoise pairing alert")?;
     Ok(Some(AlertHandle {
         child,
         qr_path,
@@ -130,8 +130,8 @@ fn platform_spawn_pairing_pin_alert(
 #[cfg(target_os = "macos")]
 fn platform_show_pairing_success_alert() -> Result<()> {
     let script = format!(
-        "display dialog {} buttons {{\"OK\"}} default button \"OK\" with title \"AgentNoise Pairing\"",
-        applescript_string("AgentNoise paired.\n\nSend /help from White Noise.")
+        "display dialog {} buttons {{\"OK\"}} default button \"OK\" with title \"agentnoise pairing\"",
+        applescript_string("agentnoise paired.\n\nSend /help from White Noise.")
     );
     let mut handle = spawn_osascript(script)?;
     handle.child.wait().ok();
@@ -152,7 +152,7 @@ fn spawn_osascript(script: String) -> Result<AlertHandle> {
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
-        .context("showing macOS AgentNoise pairing alert")?;
+        .context("showing macOS agentnoise pairing alert")?;
     Ok(AlertHandle {
         child,
         qr_path: PathBuf::new(),
@@ -200,7 +200,7 @@ const window = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
   $.NSBackingStoreBuffered,
   false
 );
-window.setTitle('AgentNoise Pairing');
+window.setTitle('agentnoise pairing');
 window.setReleasedWhenClosed(false);
 
 const content = window.contentView;
@@ -219,7 +219,7 @@ function label(text, x, y, width, height, size, bold) {
   return field;
 }
 
-label('Pair AgentNoise', 20, 516, 390, 28, 22, true);
+label('Pair agentnoise', 20, 516, 390, 28, 22, true);
 label('Scan this desktop identity in White Noise, then send the PIN.', 35, 486, 360, 24, 13, false);
 
 const image = $.NSImage.alloc.initWithContentsOfFile(qrPath);

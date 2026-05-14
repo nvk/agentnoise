@@ -31,7 +31,7 @@ pub struct NewSessionRequest {
 
 impl NewSessionRequest {
     pub fn group_name(&self) -> String {
-        format!("AgentNoise: {}", self.name)
+        format!("agentnoise: {}", self.name)
     }
 
     pub fn ready_text(&self) -> String {
@@ -44,7 +44,7 @@ impl NewSessionRequest {
 
     pub fn created_text(&self) -> String {
         format!(
-            "Created session: {}\nOpen the new AgentNoise chat in White Noise.",
+            "Created session: {}\nOpen the new agentnoise chat in White Noise.",
             self.name
         )
     }
@@ -58,7 +58,7 @@ pub struct ResumeSessionRequest {
 }
 
 #[derive(Clone)]
-pub struct AgentNoise {
+pub struct AgentApp {
     config: Config,
     config_path: Option<PathBuf>,
     jobs: JobStore,
@@ -67,7 +67,7 @@ pub struct AgentNoise {
     auth: AuthState,
 }
 
-impl AgentNoise {
+impl AgentApp {
     pub fn from_config_path(path: &Path) -> Result<Self> {
         let config = Config::load(path)?;
         Self::new_with_auth(path.to_path_buf(), config, None)
@@ -291,7 +291,7 @@ impl AgentNoise {
             .unwrap_or_else(|| "none".to_string());
 
         format!(
-            "AgentNoise\nStatus: OK\nSession: {session_name}\nChats: {groups}\nWorkspace: {workspace}\nJobs: {active} active\nRepos: {}",
+            "agentnoise\nStatus: OK\nSession: {session_name}\nChats: {groups}\nWorkspace: {workspace}\nJobs: {active} active\nRepos: {}",
             self.config.repos.len()
         )
     }
@@ -427,7 +427,7 @@ impl AgentNoise {
         Ok(RouteAction::ResumeSession(ResumeSessionRequest {
             group_id: entry.group_id.clone(),
             reply_text: format!(
-                "Resumed session: {}\nOpen the AgentNoise chat with id:{}.",
+                "Resumed session: {}\nOpen the agentnoise chat with id:{}.",
                 entry.name,
                 short_group_id(&entry.group_id)
             ),
@@ -875,7 +875,7 @@ fn split_first(input: &str) -> (&str, &str) {
 
 fn help_text() -> String {
     [
-        "AgentNoise commands",
+        "agentnoise commands",
         "",
         "Workspace",
         "/status",
@@ -929,8 +929,7 @@ mod tests {
 
         let pairing_gate = PairingGate::new(30);
         let pin = pairing_gate.current_pin().code;
-        let app =
-            AgentNoise::new_with_auth(config_path.clone(), config, Some(pairing_gate)).unwrap();
+        let app = AgentApp::new_with_auth(config_path.clone(), config, Some(pairing_gate)).unwrap();
 
         assert!(app.accepts_current_pairing_pin(Some("phone"), &pin));
         assert!(!app.accepts_current_pairing_pin(Some("phone"), "000000"));
@@ -966,7 +965,7 @@ mod tests {
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
         config.save(&config_path).unwrap();
-        let app = AgentNoise::new_with_auth(config_path, config, None).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
 
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/cd src")
@@ -998,7 +997,7 @@ mod tests {
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
         config.save(&config_path).unwrap();
-        let app = AgentNoise::new_with_auth(config_path, config, None).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
 
         app.route_message(Some("group-a"), Some("phone"), "/cd src")
             .unwrap();
@@ -1023,7 +1022,7 @@ mod tests {
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
         config.save(&config_path).unwrap();
-        let app = AgentNoise::new_with_auth(config_path, config, None).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
 
         assert!(matches!(
             app.route_unsupported_message(Some("phone"), "Attachment received")
@@ -1048,7 +1047,7 @@ mod tests {
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
         config.save(&config_path).unwrap();
-        let app = AgentNoise::new_with_auth(config_path, config, None).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
 
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/rename main")
@@ -1073,7 +1072,7 @@ mod tests {
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
         config.save(&config_path).unwrap();
-        let app = AgentNoise::new_with_auth(config_path, config, None).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
 
         app.route_message(Some("group-a"), Some("phone"), "/rename main")
             .unwrap();

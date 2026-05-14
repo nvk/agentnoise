@@ -1,6 +1,6 @@
 # Supervisor Services
 
-AgentNoise does not daemonize itself. `agentnoise up` is a foreground process:
+agentnoise does not daemonize itself. `agentnoise up` is a foreground process:
 it starts or repairs White Noise, listens, logs to stdout/stderr, and exits on a
 fatal error. The host supervisor owns boot, restart, stop, and logs.
 
@@ -95,7 +95,7 @@ Run first pairing in the foreground when possible:
 agentnoise up
 ```
 
-If `allowed_senders` is empty, AgentNoise prints the QR and rotating PIN there.
+If `allowed_senders` is empty, agentnoise prints the QR and rotating PIN there.
 On macOS it also shows the desktop identity QR, current PIN, and live countdown
 while the PIN is valid. After the phone sends the PIN and the sender is saved,
 start the service. If a service starts before pairing, the PIN is printed to
@@ -103,7 +103,7 @@ that supervisor's log.
 
 ## Secret Storage
 
-AgentNoise stores the desktop White Noise `nsec` through the platform credential
+agentnoise stores the desktop White Noise `nsec` through the platform credential
 store selected at build time:
 
 - macOS: Apple Keychain.

@@ -1,5 +1,5 @@
 [Unit]
-Description=AgentNoise White Noise coding-agent bridge
+Description=agentnoise White Noise coding-agent bridge
 Documentation=https://agentnoise.com
 Wants=network-online.target
 After=network-online.target

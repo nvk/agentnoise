@@ -1,6 +1,6 @@
 # Launchd Service
 
-AgentNoise can install itself as a per-user macOS LaunchAgent.
+agentnoise can install itself as a per-user macOS LaunchAgent.
 
 ## Install
 

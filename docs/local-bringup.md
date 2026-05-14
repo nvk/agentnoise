@@ -21,7 +21,7 @@ If you know the phone White Noise `npub`:
 
 That creates or reuses the desktop keypair in the OS keychain, writes the config,
 starts the White Noise daemon if needed, logs in from the keychain, publishes the
-desktop profile/key package, creates the `AgentNoise` control chat, and saves
+desktop profile/key package, creates the `agentnoise` control chat, and saves
 the group id when `wn` returns it.
 
 If you do not know the phone `npub`:
@@ -40,7 +40,7 @@ run the same command again:
 If `allowed_senders` is still empty, the second run prints a QR and a 6-digit
 PIN. On macOS it also opens a pairing window with the QR, desktop `npub`, PIN,
 and live countdown. Send the PIN from the phone as the first message.
-AgentNoise ignores every other message until the PIN succeeds, then saves that
+agentnoise ignores every other message until the PIN succeeds, then saves that
 sender to `allowed_senders`.
 
 ## Run
@@ -60,8 +60,8 @@ From the phone, send:
 /wiki research agent chat ux
 ```
 
-Each White Noise chat with the AgentNoise desktop identity is an independent
-AgentNoise session. You can create another chat from the same phone identity,
+Each White Noise chat with the agentnoise desktop identity is an independent
+agentnoise session. You can create another chat from the same phone identity,
 send `/use` or `/cd` there, and it will not disturb the workspace state in the
 first chat.
 
@@ -73,7 +73,7 @@ When the foreground test works:
 
 ## Permission Note
 
-`codex-fix` and `codex-unsafe` are enough for editing and testing AgentNoise.
+`codex-fix` and `codex-unsafe` are enough for editing and testing agentnoise.
 They are not enough for local bring-up, because those `nono` profiles still
 block the macOS keychain and default Application Support paths that White Noise
 uses. Use a normal terminal, or a no-`nono` profile such as `codex-rawdog`, for

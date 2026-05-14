@@ -1,4 +1,4 @@
-# AgentNoise
+# agentnoise
 
 This is a Rust CLI/daemon project.
 

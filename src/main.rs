@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentnoise::app::{AgentNoise, NewSessionRequest, RouteAction};
+use agentnoise::app::{AgentApp, NewSessionRequest, RouteAction};
 use agentnoise::auth::PairingGate;
 use agentnoise::config::Config;
 use agentnoise::desktop_alert;
@@ -45,7 +45,7 @@ enum Command {
     Init(InitArgs),
     #[command(about = "Create the desktop identity, write config, and show the phone QR")]
     Setup(SetupArgs),
-    #[command(about = "Set up AgentNoise, discover control chats, and listen")]
+    #[command(about = "Set up agentnoise, discover control chats, and listen")]
     Up(UpArgs),
     #[command(about = "Show the phone pairing QR for the desktop identity")]
     Pair(PairArgs),
@@ -78,9 +78,9 @@ enum Command {
     Service(ServiceArgs),
     Launchd(LaunchdArgs),
     Whitenoise(WhitenoiseArgs),
-    #[command(about = "Create and pair AgentNoise identities")]
+    #[command(about = "Create and pair agentnoise identities")]
     Identity(IdentityArgs),
-    #[command(about = "Manage the AgentNoise OS keychain bootstrap secret")]
+    #[command(about = "Manage the agentnoise OS keychain bootstrap secret")]
     Keychain(KeychainArgs),
 }
 
@@ -186,7 +186,7 @@ enum WhitenoiseCommand {
     Status,
     #[command(about = "Print the resolved wn path")]
     Path,
-    #[command(about = "Install wn and wnd under AgentNoise's managed data directory")]
+    #[command(about = "Install wn and wnd under agentnoise's managed data directory")]
     Install {
         #[arg(long)]
         force: bool,
@@ -251,7 +251,7 @@ enum IdentityCommand {
 enum KeychainCommand {
     #[command(about = "Store a White Noise nsec in the OS keychain")]
     StoreNsec,
-    #[command(about = "Check whether the OS keychain contains an AgentNoise nsec")]
+    #[command(about = "Check whether the OS keychain contains an agentnoise nsec")]
     Status,
     #[command(about = "Delete the stored White Noise nsec from the OS keychain")]
     DeleteNsec,
@@ -335,14 +335,14 @@ fn main() -> Result<()> {
             sender,
             message,
         } => {
-            let app = AgentNoise::from_config_path(&config_path)?;
+            let app = AgentApp::from_config_path(&config_path)?;
             match app.route_message(group.as_deref(), sender.as_deref(), &message)? {
                 RouteAction::Ignore => {}
                 RouteAction::Reply(reply) => println!("{reply}"),
                 RouteAction::NewSession(request) => {
                     println!("New session requested: {}", request.name);
                     println!(
-                        "Run this command from the live listener so AgentNoise can create the White Noise chat."
+                        "Run this command from the live listener so agentnoise can create the White Noise chat."
                     );
                 }
                 RouteAction::ResumeSession(request) => {
@@ -358,7 +358,7 @@ fn main() -> Result<()> {
             repo,
             prompt,
         } => {
-            let app = AgentNoise::from_config_path(&config_path)?;
+            let app = AgentApp::from_config_path(&config_path)?;
             let prompt = prompt.join(" ");
             if prompt.trim().is_empty() {
                 bail!("prompt cannot be empty");
@@ -456,7 +456,7 @@ fn main() -> Result<()> {
                 IdentityCommand::Create { name, count, force } => {
                     let identities =
                         identity::create_identities(&config.whitenoise, &name, count, force)?;
-                    println!("stored AgentNoise identity nsecs in OS keychain");
+                    println!("stored agentnoise identity nsecs in OS keychain");
                     for identity in identities {
                         println!();
                         println!("name: {}", identity.name);
@@ -493,7 +493,7 @@ fn main() -> Result<()> {
                     let store = identity::identity_store(&config.whitenoise, &name);
                     store.delete_nsec()?;
                     println!(
-                        "deleted AgentNoise identity nsec from OS keychain: {}",
+                        "deleted agentnoise identity nsec from OS keychain: {}",
                         store.label()
                     );
                 }
@@ -658,7 +658,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             Ok(GroupDiscovery::NeedsPairing) => {
                 print_setup_result(&result);
                 println!();
-                println!("next: scan the QR, create a White Noise chat with AgentNoise, then run:");
+                println!("next: scan the QR, create a White Noise chat with agentnoise, then run:");
                 println!("agentnoise up");
                 return Ok(());
             }
@@ -765,7 +765,7 @@ fn run_listener(config_path: &Path, config: Config, pairing: Option<PairingRunti
     if let Some(pairing) = pairing.clone() {
         spawn_pairing_pin_display(pairing);
     }
-    let app = Arc::new(AgentNoise::new_with_auth(
+    let app = Arc::new(AgentApp::new_with_auth(
         config_path.to_path_buf(),
         config,
         pairing.map(|pairing| pairing.gate),
@@ -853,7 +853,7 @@ enum StreamItem {
     DiscoveryError(String),
 }
 
-fn listen(config_path: &Path, app: Arc<AgentNoise>, wn: Arc<WnClient>) -> Result<()> {
+fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let subscribed = Arc::new(Mutex::new(HashSet::new()));
 
@@ -1037,7 +1037,7 @@ fn listen(config_path: &Path, app: Arc<AgentNoise>, wn: Arc<WnClient>) -> Result
 
 fn create_parallel_session(
     config_path: &Path,
-    app: Arc<AgentNoise>,
+    app: Arc<AgentApp>,
     wn: Arc<WnClient>,
     subscribed: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<StreamItem>,

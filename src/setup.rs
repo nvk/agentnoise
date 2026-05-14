@@ -7,10 +7,10 @@ use crate::config::{Config, WhitenoiseConfig};
 use crate::identity::{self, DEFAULT_IDENTITY_NAME, PairingPayload, PublicIdentity};
 use crate::whitenoise_cli;
 
-pub const DEFAULT_GROUP_NAME: &str = "AgentNoise";
+pub const DEFAULT_GROUP_NAME: &str = "agentnoise";
 const PROFILE_NAME: &str = "agentnoise";
-const PROFILE_DISPLAY_NAME: &str = "AgentNoise Desktop";
-const PROFILE_ABOUT: &str = "Local AgentNoise desktop helper.";
+const PROFILE_DISPLAY_NAME: &str = "agentnoise desktop";
+const PROFILE_ABOUT: &str = "Local agentnoise desktop helper.";
 
 #[derive(Debug, Clone)]
 pub struct SetupOptions {
@@ -128,7 +128,7 @@ fn load_or_create_identity(
 ) -> Result<(PublicIdentity, bool)> {
     if force {
         let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, true)
-            .context("creating AgentNoise desktop identity in OS keychain")?;
+            .context("creating agentnoise desktop identity in OS keychain")?;
         return Ok((identity, true));
     }
 
@@ -136,7 +136,7 @@ fn load_or_create_identity(
         Ok(identity) => Ok((identity, false)),
         Err(_) => {
             let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, false)
-                .context("creating AgentNoise desktop identity in OS keychain")?;
+                .context("creating agentnoise desktop identity in OS keychain")?;
             Ok((identity, true))
         }
     }

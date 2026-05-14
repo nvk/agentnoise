@@ -113,7 +113,7 @@ impl WnClient {
     pub fn send_reply_to(&self, group_id: &str, text: &str) -> Result<()> {
         let text = format_chat_text(text);
         let text = if text.is_empty() {
-            "AgentNoise returned no text.".to_string()
+            "agentnoise returned no text.".to_string()
         } else {
             text
         };
@@ -247,7 +247,7 @@ fn unsupported_message(value: &Value, text: &str) -> Option<String> {
     }
 
     Some(
-        "Attachment received, but AgentNoise only supports text commands right now. Send /help for commands."
+        "Attachment received, but agentnoise only supports text commands right now. Send /help for commands."
             .to_string(),
     )
 }

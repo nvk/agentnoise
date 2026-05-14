@@ -1,17 +1,16 @@
-# AgentNoise
+# agentnoise
 
 ```text
- ______   ______   ______  ______  _______  ______   ______  _____  ______   ______
-| |  | | | | ____ | |     | |  \ \   | |   | |  \ \ / |  | \  | |  / |      | |
-| |__| | | |  | | | |---- | |  | |   | |   | |  | | | |  | |  | |  '------. | |----
-|_|  |_| |_|__|_| |_|____ |_|  |_|   |_|   |_|  |_| \_|__|_/ _|_|_  ____|_/ |_|____
+░█▀█░█▀▀░█▀▀░█▀█░▀█▀░█▀█░█▀█░▀█▀░█▀▀░█▀▀
+░█▀█░█░█░█▀▀░█░█░░█░░█░█░█░█░░█░░▀▀█░█▀▀
+░▀░▀░▀▀▀░▀▀▀░▀░▀░░▀░░▀░▀░▀▀▀░▀▀▀░▀▀▀░▀▀▀
 ```
 
 Chat with local coding agents through White Noise.
 
 `agentnoise` is a native desktop helper for using a phone running White Noise as the control surface for local Codex and Claude sessions. It is intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
 
-AgentNoise exists because the available agent-chat bridges were too heavy,
+agentnoise exists because the available agent-chat bridges were too heavy,
 too slow-moving, or too awkward for the simple workflow this project needs: a
 native desktop helper, a phone chat UI, strong first-pairing, and local coding
 agents launched through a constrained policy boundary.
@@ -21,7 +20,7 @@ and Jeff moves too slow.
 
 ## What It Does
 
-AgentNoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through `bondage`, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent AgentNoise sessions open in separate chat windows.
+agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through `bondage`, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The first supported target is macOS.
 
@@ -58,7 +57,7 @@ listens.
 The QR contains the desktop `nprofile`/`npub` plus relay hints. It never exposes
 the desktop `nsec`.
 
-If you already have the phone identity `npub`, AgentNoise can create the White
+If you already have the phone identity `npub`, agentnoise can create the White
 Noise control chat too:
 
 ```sh
@@ -73,10 +72,10 @@ target/release/agentnoise up
 ```
 
 To open another independent session, create another White Noise chat with the
-same AgentNoise desktop identity. The running listener discovers visible chats
+same agentnoise desktop identity. The running listener discovers visible chats
 periodically; each chat has separate `/use`, `/cd`, and prompt context.
 
-If `wn`/`wnd` are not already packaged beside `agentnoise`, install them under AgentNoise's managed data directory:
+If `wn`/`wnd` are not already packaged beside `agentnoise`, install them under agentnoise's managed data directory:
 
 ```sh
 target/release/agentnoise whitenoise install
@@ -119,7 +118,7 @@ printed to the terminal or service log.
 - `/cancel <job>`
 - `/help`
 
-Each White Noise chat is one AgentNoise session. `/new bugfix-ui` creates a new
+Each White Noise chat is one agentnoise session. `/new bugfix-ui` creates a new
 parallel White Noise chat with the paired phone identity and clones the current
 workspace into it. `/rename main` names the current chat, `/list` shows known
 sessions, `/resume 2` resumes a session from that list, and `/close` marks the
@@ -134,15 +133,15 @@ prompt for Claude installations with the LLM Wiki instructions/plugin available.
 
 ## First Pairing
 
-The AgentNoise `npub` is public on relays, so first-run command authorization is
+The agentnoise `npub` is public on relays, so first-run command authorization is
 separate from discovery. When `allowed_senders` is empty, `agentnoise up` enters
 pairing mode:
 
-1. Desktop shows a QR for the AgentNoise `nprofile`.
-2. On macOS, AgentNoise opens a pairing window with the QR, the desktop `npub`,
+1. Desktop shows a QR for the agentnoise `nprofile`.
+2. On macOS, agentnoise opens a pairing window with the QR, the desktop `npub`,
    a live countdown, and the current 6-digit PIN.
 3. The phone sends the PIN as the first message, either `123456` or `/pair 123456`.
-4. AgentNoise stores that sender in `allowed_senders`.
+4. agentnoise stores that sender in `allowed_senders`.
 5. All other messages are ignored until this succeeds.
 
 The PIN also prints to stdout/stderr logs for headless and non-macOS setups. It
@@ -151,7 +150,7 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 ## Security Defaults
 
 - Use a dedicated White Noise bot identity for the desktop helper.
-- Put only trusted devices/users in AgentNoise control chats.
+- Put only trusted devices/users in agentnoise control chats.
 - Keep first pairing local: the sender must prove they can see the desktop PIN.
 - Keep repos as configured aliases.
 - Keep agent execution behind `bondage`.
