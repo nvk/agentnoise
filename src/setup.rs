@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::config::{Config, WhitenoiseConfig};
 use crate::identity::{self, DEFAULT_IDENTITY_NAME, PairingPayload, PublicIdentity};
+use crate::paths::expand_tilde;
 use crate::whitenoise_cli;
 
 pub const DEFAULT_GROUP_NAME: &str = "agentnoise";
@@ -18,6 +19,7 @@ pub struct SetupOptions {
     pub group_name: String,
     pub force_identity: bool,
     pub relays: Vec<String>,
+    pub dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ pub struct SetupResult {
     pub key_package_published: bool,
     pub group_id: Option<String>,
     pub group_output: Option<String>,
+    pub dev_burner_nsec_file: Option<PathBuf>,
 }
 
 pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
@@ -45,7 +48,19 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         Config::load(config_path)?
     };
 
-    config.whitenoise.use_keychain_nsec = true;
+    if options.dev_burner_nsec {
+        config.whitenoise.dev_burner_nsec = true;
+        config.whitenoise.dev_burner_nsec_file = Some(
+            config
+                .resolved_data_dir()
+                .join("dev-burner.nsec")
+                .display()
+                .to_string(),
+        );
+        config.whitenoise.use_keychain_nsec = false;
+    } else if !config.whitenoise.dev_burner_nsec {
+        config.whitenoise.use_keychain_nsec = true;
+    }
     if whitenoise_cli::should_reset_wn_bin_to_default(&config.whitenoise.wn_bin) {
         config.whitenoise.wn_bin = "wn".to_string();
     }
@@ -113,6 +128,11 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         key_package_published,
         group_id,
         group_output,
+        dev_burner_nsec_file: config
+            .whitenoise
+            .dev_burner_nsec_file
+            .as_deref()
+            .map(expand_tilde),
     })
 }
 
@@ -127,7 +147,7 @@ fn load_or_create_identity(
 ) -> Result<(PublicIdentity, bool)> {
     if force {
         let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, true)
-            .context("creating agentnoise desktop identity in OS keychain")?;
+            .context("creating agentnoise desktop identity in configured identity store")?;
         return Ok((identity, true));
     }
 
@@ -135,7 +155,7 @@ fn load_or_create_identity(
         Ok(identity) => Ok((identity, false)),
         Err(_) => {
             let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, false)
-                .context("creating agentnoise desktop identity in OS keychain")?;
+                .context("creating agentnoise desktop identity in configured identity store")?;
             Ok((identity, true))
         }
     }

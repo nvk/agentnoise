@@ -19,7 +19,7 @@ Local tap install shape:
 ```sh
 brew install nvk/tap/agentnoise
 brew services start nvk/tap/agentnoise
-tail -f "$(brew --prefix)/var/log/agentnoise.log"
+agentnoise up
 ```
 
 The formula builds and installs `agentnoise`, `wn`, and `wnd` under the same
@@ -29,6 +29,22 @@ in one code path. On a fresh install the service starts before a control chat
 exists, shows the QR/PIN pairing flow, and keeps discovering White Noise chats
 until the phone-created chat appears. Homebrew owns restart and boot through
 `brew services`.
+
+`agentnoise up` is also the local console. If the Homebrew service is already
+running, an interactive `agentnoise up` attaches to the existing engine and
+follows logs instead of starting a second listener. If the service is not
+running, it takes the foreground engine lock and behaves like the service until
+the terminal exits.
+
+For development-only installs where keychain prompts are noise, run:
+
+```sh
+agentnoise up --dev-burner-nsec
+```
+
+That writes a plaintext throwaway identity under the agentnoise data dir. Later
+Homebrew service starts reuse it because the flag persists in `config.toml`.
+Do not use this for a real identity.
 
 ## Release Checklist
 

@@ -35,6 +35,11 @@ Logs are written under:
 ~/Library/Logs/agentnoise/
 ```
 
+After loading the service, `agentnoise up` from a terminal attaches to the
+running LaunchAgent instead of starting a second listener. If the LaunchAgent is
+not running, the same command takes the foreground engine lock for
+troubleshooting.
+
 ## Inspect
 
 ```sh
@@ -55,6 +60,6 @@ agentnoise service uninstall --target launchd --unload
   `agentnoise up` enters PIN pairing mode. On macOS it shows the desktop
   identity QR, current PIN, and live countdown, and also prints the PIN to the
   launchd log.
-- `launchd install` runs `agentnoise up`, which starts `wnd`, repairs login from the OS keychain when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens.
+- `launchd install` runs `agentnoise up`, which starts `wnd`, repairs login from the configured bootstrap nsec when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens.
 - Restart the service after changing config.
 - If the process restarts, active jobs are marked `interrupted` in the local job store.

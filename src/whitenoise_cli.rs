@@ -9,6 +9,7 @@ use serde_json::Value;
 use zeroize::Zeroize;
 
 use crate::config::WhitenoiseConfig;
+use crate::identity;
 use crate::paths::{
     executable_next_to_agentnoise, expand_tilde, find_on_path, local_checkout_whitenoise_bin,
     managed_whitenoise_root, managed_wn_path, managed_wnd_path,
@@ -366,8 +367,12 @@ pub fn login_from_keychain(
     relay_override: Option<&str>,
 ) -> Result<String> {
     let wn = resolve_wn(&config.wn_bin);
-    let store = SecretStore::new(&config.keychain_service, &config.keychain_item);
-    let mut nsec = store.load_nsec()?;
+    let mut nsec = if config.dev_burner_nsec {
+        identity::load_default_nsec(config)?
+    } else {
+        let store = SecretStore::new(&config.keychain_service, &config.keychain_item);
+        store.load_nsec()?
+    };
     let output = run_login(&wn, config, relay_override, &nsec);
     nsec.zeroize();
 
@@ -389,7 +394,7 @@ pub fn login_from_keychain(
 }
 
 pub fn ensure_login_from_keychain(config: &WhitenoiseConfig) -> Result<bool> {
-    if !config.use_keychain_nsec {
+    if !config.use_keychain_nsec && !config.dev_burner_nsec {
         return Ok(false);
     }
     if account_logged_in(config)? {

@@ -20,9 +20,9 @@ If you know the phone White Noise `npub`:
 ```
 
 That creates or reuses the desktop keypair in the OS keychain, writes the config,
-starts the White Noise daemon if needed, logs in from the keychain, publishes the
-desktop profile/key package, creates the `agentnoise` control chat, and saves
-the group id when `wn` returns it.
+starts the White Noise daemon if needed, logs in from the configured bootstrap
+nsec, publishes the desktop profile/key package, creates the `agentnoise`
+control chat, and saves the group id when `wn` returns it.
 
 If you do not know the phone `npub`:
 
@@ -50,6 +50,11 @@ sender to `allowed_senders`.
 ```sh
 "$AGENTNOISE" up
 ```
+
+If a service is already running, this attaches as the local UI and follows logs.
+If no service owns the engine, it runs the listener in the foreground. This
+makes the same command useful for both desktop bring-up and troubleshooting a
+stopped service.
 
 From the phone, send:
 
@@ -80,3 +85,13 @@ They are not enough for local bring-up, because those `nono` profiles still
 block the macOS keychain and default Application Support paths that White Noise
 uses. Use a normal terminal, or a no-`nono` profile such as `codex-rawdog`, for
 the actual setup run.
+
+For development-only burner identities where keychain prompts get in the way:
+
+```sh
+"$AGENTNOISE" up --dev-burner-nsec
+```
+
+This writes a plaintext throwaway `nsec` under the agentnoise data dir and sets
+the config so later `up` or service starts reuse that file. Do not use it for a
+real identity.

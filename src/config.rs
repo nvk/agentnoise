@@ -30,6 +30,10 @@ pub struct WhitenoiseConfig {
     #[serde(default)]
     pub use_keychain_nsec: bool,
     #[serde(default)]
+    pub dev_burner_nsec: bool,
+    #[serde(default)]
+    pub dev_burner_nsec_file: Option<String>,
+    #[serde(default)]
     pub login_relay: Option<String>,
     #[serde(default = "default_pairing_relays")]
     pub pairing_relays: Vec<String>,
@@ -158,6 +162,8 @@ impl Config {
                 wn_bin: default_wn_bin(),
                 socket: None,
                 use_keychain_nsec: false,
+                dev_burner_nsec: false,
+                dev_burner_nsec_file: None,
                 login_relay: None,
                 pairing_relays: default_pairing_relays(),
                 keychain_service: default_keychain_service(),

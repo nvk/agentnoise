@@ -14,6 +14,7 @@ use agentnoise::doctor::render_doctor;
 use agentnoise::identity;
 use agentnoise::launchd;
 use agentnoise::runner::{AgentKind, AgentRequest};
+use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo};
 use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
@@ -24,6 +25,13 @@ use clap::{Args, Parser, Subcommand};
 use zeroize::Zeroize;
 
 const FIRST_PAIRING_SUBSCRIBE_LIMIT: u32 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenerMode {
+    Try,
+    Wait,
+    AttachIfBusy,
+}
 
 #[derive(Clone)]
 struct PairingRuntime {
@@ -106,6 +114,11 @@ struct SetupArgs {
     force_identity: bool,
     #[arg(long = "relay")]
     relays: Vec<String>,
+    #[arg(
+        long,
+        help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
+    )]
+    dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +138,11 @@ struct UpArgs {
     no_listen: bool,
     #[arg(long, help = "Do not start wn daemon before listening")]
     no_daemon: bool,
+    #[arg(
+        long,
+        help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
+    )]
+    dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Args)]
@@ -198,7 +216,7 @@ enum WhitenoiseCommand {
     },
     #[command(about = "Show wn daemon status")]
     DaemonStatus,
-    #[command(about = "Run wn login using the nsec stored in the OS keychain")]
+    #[command(about = "Run wn login using the configured bootstrap nsec")]
     LoginFromKeychain {
         #[arg(long)]
         relay: Option<String>,
@@ -222,7 +240,9 @@ enum LaunchdCommand {
 
 #[derive(Debug, Subcommand)]
 enum IdentityCommand {
-    #[command(about = "Generate one or more Nostr identities and store nsecs in the OS keychain")]
+    #[command(
+        about = "Generate one or more Nostr identities and store nsecs in the configured identity store"
+    )]
     Create {
         #[arg(long, default_value = "desktop")]
         name: String,
@@ -243,7 +263,7 @@ enum IdentityCommand {
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    #[command(about = "Delete a named identity nsec from the OS keychain")]
+    #[command(about = "Delete a named identity nsec from the configured identity store")]
     Delete {
         #[arg(long, default_value = "desktop")]
         name: String,
@@ -306,6 +326,7 @@ fn main() -> Result<()> {
                     group_name: args.group_name,
                     force_identity: args.force_identity,
                     relays: args.relays,
+                    dev_burner_nsec: args.dev_burner_nsec,
                 },
             )?;
             print_setup_result(&result);
@@ -370,17 +391,17 @@ fn main() -> Result<()> {
             println!("{}", app.run_request(request)?);
         }
         Command::Start(args) => {
-            start_listener(&config_path, args)?;
+            start_listener(&config_path, args, ListenerMode::Try)?;
         }
         Command::Listen => {
             let config = Config::load(&config_path)?;
             let pairing = pairing_for_listener(&config_path, &config)?;
-            run_listener(&config_path, config, pairing)?;
+            run_listener_with_mode(&config_path, config, pairing, ListenerMode::Try)?;
         }
         Command::Send { text } => {
             let config = Config::load(&config_path)?;
             if whitenoise_cli::ensure_login_from_keychain(&config.whitenoise)? {
-                eprintln!("agentnoise: restored White Noise login from OS keychain");
+                eprintln!("agentnoise: restored White Noise login from configured nsec");
             }
             let wn = WnClient::new(config.whitenoise);
             wn.send_reply(&text.join(" "))?;
@@ -446,7 +467,7 @@ fn main() -> Result<()> {
                     let output =
                         whitenoise_cli::login_from_keychain(&config.whitenoise, relay.as_deref())?;
                     if output.is_empty() {
-                        println!("logged in from OS keychain");
+                        println!("logged in from configured nsec");
                     } else {
                         println!("{output}");
                     }
@@ -459,14 +480,14 @@ fn main() -> Result<()> {
                 IdentityCommand::Create { name, count, force } => {
                     let identities =
                         identity::create_identities(&config.whitenoise, &name, count, force)?;
-                    println!("stored agentnoise identity nsecs in OS keychain");
+                    println!("stored agentnoise identity nsecs");
                     for identity in identities {
                         println!();
                         println!("name: {}", identity.name);
                         println!("npub: {}", identity.npub);
                         println!(
-                            "keychain: {} / {}",
-                            config.whitenoise.keychain_service, identity.keychain_item
+                            "store: {}",
+                            identity::identity_secret_label(&config.whitenoise, &identity.name)
                         );
                     }
                 }
@@ -475,8 +496,8 @@ fn main() -> Result<()> {
                     println!("name: {}", public.name);
                     println!("npub: {}", public.npub);
                     println!(
-                        "keychain: {} / {}",
-                        config.whitenoise.keychain_service, public.keychain_item
+                        "store: {}",
+                        identity::identity_secret_label(&config.whitenoise, &public.name)
                     );
                 }
                 IdentityCommand::Qr { name, relays } => {
@@ -493,12 +514,8 @@ fn main() -> Result<()> {
                     println!("{}", identity::render_qr(&payload.nprofile)?);
                 }
                 IdentityCommand::Delete { name } => {
-                    let store = identity::identity_store(&config.whitenoise, &name);
-                    store.delete_nsec()?;
-                    println!(
-                        "deleted agentnoise identity nsec from OS keychain: {}",
-                        store.label()
-                    );
+                    let label = identity::delete_identity_nsec(&config.whitenoise, &name)?;
+                    println!("deleted agentnoise identity nsec from {label}");
                 }
             }
         }
@@ -554,13 +571,17 @@ fn print_setup_result(result: &SetupResult) {
         println!("daemon: started");
     }
     if result.login_repaired {
-        println!("login: restored from OS keychain");
+        println!("login: restored from configured nsec");
     }
     if result.profile_published {
         println!("profile: published");
     }
     if result.key_package_published {
         println!("key package: published");
+    }
+    if let Some(path) = &result.dev_burner_nsec_file {
+        println!("dev burner nsec: {}", path.display());
+        println!("warning: development-only plaintext secret; do not use for a real identity");
     }
     if let Some(group_id) = &result.group_id {
         println!("group: {group_id}");
@@ -628,6 +649,13 @@ fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
 }
 
 fn up(config_path: &Path, args: UpArgs) -> Result<()> {
+    if should_attach_before_setup(config_path, &args)? {
+        let config = Config::load(config_path)?;
+        runtime::attach_ui(config_path, &config)?;
+        return Ok(());
+    }
+    wait_before_setup_if_needed(config_path, &args)?;
+
     let result = setup::setup(
         config_path,
         SetupOptions {
@@ -635,6 +663,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             group_name: args.group_name,
             force_identity: false,
             relays: args.relays.clone(),
+            dev_burner_nsec: args.dev_burner_nsec,
         },
     )?;
 
@@ -708,7 +737,51 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             group: None,
             no_daemon: args.no_daemon,
         },
+        up_listener_mode(),
     )
+}
+
+fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool> {
+    if !runtime::stdio_is_interactive()
+        || args.no_listen
+        || args.phone.is_some()
+        || args.group.is_some()
+        || !args.relays.is_empty()
+        || args.dev_burner_nsec
+        || !config_path.exists()
+    {
+        return Ok(false);
+    }
+
+    let config = Config::load(config_path)?;
+    runtime::engine_is_running(&config)
+}
+
+fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> {
+    if runtime::stdio_is_interactive()
+        || args.no_listen
+        || args.phone.is_some()
+        || args.group.is_some()
+        || !args.relays.is_empty()
+        || args.dev_burner_nsec
+        || !config_path.exists()
+    {
+        return Ok(());
+    }
+
+    let config = Config::load(config_path)?;
+    while runtime::engine_is_running(&config)? {
+        thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
+fn up_listener_mode() -> ListenerMode {
+    if runtime::stdio_is_interactive() {
+        ListenerMode::AttachIfBusy
+    } else {
+        ListenerMode::Wait
+    }
 }
 
 enum GroupDiscovery {
@@ -729,7 +802,7 @@ fn discover_group(config: &mut Config, config_path: &Path) -> Result<GroupDiscov
     Ok(GroupDiscovery::Ready)
 }
 
-fn start_listener(config_path: &Path, args: StartArgs) -> Result<()> {
+fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Result<()> {
     let mut config = Config::load(config_path)?;
     if let Some(group) = args
         .group
@@ -740,6 +813,12 @@ fn start_listener(config_path: &Path, args: StartArgs) -> Result<()> {
         config.whitenoise.add_control_group_id(group);
         config.save(config_path)?;
     }
+
+    let guard = acquire_listener_guard(config_path, &config, mode)?;
+    let Some(guard) = guard else {
+        runtime::attach_ui(config_path, &config)?;
+        return Ok(());
+    };
 
     let _daemon = if args.no_daemon {
         None
@@ -752,7 +831,10 @@ fn start_listener(config_path: &Path, args: StartArgs) -> Result<()> {
     };
 
     let pairing = pairing_for_listener(config_path, &config)?;
-    run_listener(config_path, config, pairing)
+    if let Some(pairing) = pairing_runtime_info(&config, pairing.as_ref()) {
+        guard.update_status(config_path, &config, Some(pairing))?;
+    }
+    run_listener(config_path, config, pairing, guard)
 }
 
 fn pairing_for_listener(config_path: &Path, config: &Config) -> Result<Option<PairingRuntime>> {
@@ -772,9 +854,61 @@ fn pairing_for_listener(config_path: &Path, config: &Config) -> Result<Option<Pa
     Ok(Some(PairingRuntime { gate, payload }))
 }
 
-fn run_listener(config_path: &Path, config: Config, pairing: Option<PairingRuntime>) -> Result<()> {
+fn run_listener_with_mode(
+    config_path: &Path,
+    config: Config,
+    pairing: Option<PairingRuntime>,
+    mode: ListenerMode,
+) -> Result<()> {
+    let guard = acquire_listener_guard(config_path, &config, mode)?;
+    let Some(guard) = guard else {
+        runtime::attach_ui(config_path, &config)?;
+        return Ok(());
+    };
+    if let Some(pairing) = pairing_runtime_info(&config, pairing.as_ref()) {
+        guard.update_status(config_path, &config, Some(pairing))?;
+    }
+    run_listener(config_path, config, pairing, guard)
+}
+
+fn acquire_listener_guard(
+    config_path: &Path,
+    config: &Config,
+    mode: ListenerMode,
+) -> Result<Option<EngineGuard>> {
+    match mode {
+        ListenerMode::Try => runtime::acquire_engine(config_path, config, AcquireMode::Try)?
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!("agentnoise is already running; use `agentnoise up` to attach")
+            }),
+        ListenerMode::Wait => runtime::acquire_engine(config_path, config, AcquireMode::Wait),
+        ListenerMode::AttachIfBusy => {
+            runtime::acquire_engine(config_path, config, AcquireMode::Try)
+        }
+    }
+}
+
+fn pairing_runtime_info(
+    config: &Config,
+    pairing: Option<&PairingRuntime>,
+) -> Option<RuntimePairingInfo> {
+    pairing.map(|pairing| RuntimePairingInfo {
+        npub: pairing.payload.npub.clone(),
+        nprofile: pairing.payload.nprofile.clone(),
+        relays: pairing.payload.relays.clone(),
+        pin_seconds: config.whitenoise.pairing_pin_seconds,
+    })
+}
+
+fn run_listener(
+    config_path: &Path,
+    config: Config,
+    pairing: Option<PairingRuntime>,
+    _guard: EngineGuard,
+) -> Result<()> {
     if whitenoise_cli::ensure_login_from_keychain(&config.whitenoise)? {
-        eprintln!("agentnoise: restored White Noise login from OS keychain");
+        eprintln!("agentnoise: restored White Noise login from configured nsec");
     }
     if let Some(pairing) = pairing.clone() {
         spawn_pairing_pin_display(pairing);
