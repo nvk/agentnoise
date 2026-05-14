@@ -78,6 +78,28 @@ When the foreground test works:
 "$AGENTNOISE" service install --target launchd --force --load
 ```
 
+## Optional Hermes Backend
+
+Hermes is off by default. To test it, install the Hermes CLI, create a dedicated
+`bondage` profile, and add this to the agentnoise config:
+
+```toml
+[agents.hermes]
+enabled = true
+profile = "hermes"
+bin = "hermes"
+```
+
+Restart agentnoise and send:
+
+```text
+/hermes say hello
+```
+
+agentnoise runs Hermes as `hermes chat --quiet --source agentnoise --toolsets
+skills -q ...` through `bondage`. Put `HERMES_HOME`, model endpoint settings,
+and filesystem restrictions in the `bondage` profile.
+
 ## Permission Note
 
 `codex-fix` and `codex-unsafe` are enough for editing and testing agentnoise.

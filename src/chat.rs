@@ -69,10 +69,12 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
         }
         "codex" => parse_run(AgentKind::Codex, rest),
         "claude" => parse_run(AgentKind::Claude, rest),
+        "hermes" => parse_run(AgentKind::Hermes, rest),
         "wiki" | "codex-wiki" => parse_wiki_run(AgentKind::Codex, "@wiki", rest),
         "claude-wiki" => parse_wiki_run(AgentKind::Claude, "wiki", rest),
         "codex-resume" => parse_resume(AgentKind::Codex, rest),
         "claude-resume" => parse_resume(AgentKind::Claude, rest),
+        "hermes-resume" => parse_resume(AgentKind::Hermes, rest),
         _ => bail!("unknown command: /{command}"),
     }
 }
@@ -239,6 +241,22 @@ mod tests {
             ChatCommand::Run(AgentRequest::resume(
                 AgentKind::Claude,
                 "abc123",
+                "keep going"
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_hermes_commands() {
+        assert_eq!(
+            parse_chat_command("/hermes explain the repo").unwrap(),
+            ChatCommand::Run(AgentRequest::prompt(AgentKind::Hermes, "explain the repo"))
+        );
+        assert_eq!(
+            parse_chat_command("/hermes-resume h123 keep going").unwrap(),
+            ChatCommand::Run(AgentRequest::resume(
+                AgentKind::Hermes,
+                "h123",
                 "keep going"
             ))
         );

@@ -24,10 +24,15 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
         command_check("bondage", &config.runner.bondage_bin),
         command_check("codex", &config.agents.codex.bin),
         command_check("claude", &config.agents.claude.bin),
+    ];
+    if config.agents.hermes.enabled {
+        checks.push(command_check("hermes", &config.agents.hermes.bin));
+    }
+    checks.extend([
         path_check("bondage conf", &config.resolved_bondage_conf()),
         path_check("data dir", &config.resolved_data_dir()),
         path_check("log dir", &config.resolved_log_dir()),
-    ];
+    ]);
 
     let group_count = config.whitenoise.control_group_ids().len();
     if group_count == 0 {

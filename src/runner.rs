@@ -24,6 +24,7 @@ use crate::workspace;
 pub enum AgentKind {
     Codex,
     Claude,
+    Hermes,
 }
 
 impl fmt::Display for AgentKind {
@@ -31,6 +32,7 @@ impl fmt::Display for AgentKind {
         formatter.write_str(match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Hermes => "hermes",
         })
     }
 }
@@ -271,6 +273,38 @@ impl Runner {
                     cwd: Some(workdir),
                 });
             }
+            (AgentKind::Hermes, Some(session)) => {
+                args.extend([
+                    "chat".to_string(),
+                    "--quiet".to_string(),
+                    "--source".to_string(),
+                    "agentnoise".to_string(),
+                    "--toolsets".to_string(),
+                    "skills".to_string(),
+                    "--resume".to_string(),
+                    session.to_string(),
+                    "-q".to_string(),
+                    request.prompt.clone(),
+                ]);
+            }
+            (AgentKind::Hermes, None) => {
+                let (_repo_root, workdir) = self.workspace_paths(request)?;
+                args.extend([
+                    "chat".to_string(),
+                    "--quiet".to_string(),
+                    "--source".to_string(),
+                    "agentnoise".to_string(),
+                    "--toolsets".to_string(),
+                    "skills".to_string(),
+                    "-q".to_string(),
+                    request.prompt.clone(),
+                ]);
+                return Ok(CommandPlan {
+                    program: self.config.runner.bondage_bin.clone(),
+                    args,
+                    cwd: Some(workdir),
+                });
+            }
         }
 
         Ok(CommandPlan {
@@ -477,6 +511,10 @@ fn summarize(
 }
 
 fn decode_agent_stdout(agent: AgentKind, stdout: &str) -> Option<String> {
+    if agent == AgentKind::Hermes {
+        return None;
+    }
+
     let mut saw_json = false;
     let mut final_result = None;
     let mut assistant_messages = Vec::new();
@@ -518,7 +556,7 @@ fn final_result_text(agent: AgentKind, value: &Value) -> Option<String> {
             .map(str::trim)
             .filter(|result| !result.is_empty())
             .map(str::to_string),
-        AgentKind::Codex => None,
+        AgentKind::Codex | AgentKind::Hermes => None,
     }
 }
 
@@ -526,6 +564,7 @@ fn assistant_message_text(agent: AgentKind, value: &Value) -> Option<String> {
     match agent {
         AgentKind::Codex => codex_message_text(value),
         AgentKind::Claude => claude_message_text(value),
+        AgentKind::Hermes => None,
     }
     .map(|text| format_chat_text(&text))
     .filter(|text| !text.trim().is_empty())
@@ -672,6 +711,90 @@ mod tests {
 
         assert!(plan.args.contains(&"--resume".to_string()));
         assert!(plan.args.contains(&"session-1".to_string()));
+    }
+
+    #[test]
+    fn hermes_is_disabled_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let error = runner
+            .build_command(&AgentRequest::new(AgentKind::Hermes, "work", "hello"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("hermes is disabled"));
+    }
+
+    #[test]
+    fn hermes_command_uses_bondage_and_restricted_toolset() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
+        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        config.agents.hermes.enabled = true;
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let bondage_conf = config.resolved_bondage_conf().display().to_string();
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let plan = runner
+            .build_command(&AgentRequest::new(AgentKind::Hermes, "work", "hello"))
+            .unwrap();
+
+        assert_eq!(plan.program, "bondage");
+        assert_eq!(
+            plan.args,
+            vec![
+                "exec".to_string(),
+                "hermes".to_string(),
+                bondage_conf,
+                "--".to_string(),
+                "hermes".to_string(),
+                "chat".to_string(),
+                "--quiet".to_string(),
+                "--source".to_string(),
+                "agentnoise".to_string(),
+                "--toolsets".to_string(),
+                "skills".to_string(),
+                "-q".to_string(),
+                "hello".to_string(),
+            ]
+        );
+        let repo_path = repo.path().canonicalize().unwrap();
+        assert_eq!(plan.cwd.as_deref(), Some(repo_path.as_path()));
+    }
+
+    #[test]
+    fn hermes_resume_does_not_require_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
+        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        config.agents.hermes.enabled = true;
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let plan = runner
+            .build_command(&AgentRequest::resume(AgentKind::Hermes, "h123", "continue"))
+            .unwrap();
+
+        assert_eq!(plan.cwd, None);
+        assert!(plan.args.contains(&"--resume".to_string()));
+        assert!(plan.args.contains(&"h123".to_string()));
     }
 
     #[test]

@@ -36,7 +36,7 @@ impl NewSessionRequest {
 
     pub fn ready_text(&self) -> String {
         format!(
-            "Session: {}\nWorkspace: {}\nReady. Send /codex or /claude.",
+            "Session: {}\nWorkspace: {}\nReady. Send /help.",
             self.name,
             workspace_text(&self.state)
         )
@@ -897,6 +897,9 @@ fn help_text() -> String {
         "/claude <prompt>",
         "/claude <repo> <prompt>",
         "/claude-resume <session> <prompt>",
+        "/hermes <prompt>",
+        "/hermes <repo> <prompt>",
+        "/hermes-resume <session> <prompt>",
         "/wiki <prompt>",
         "/codex-wiki <prompt>",
         "/claude-wiki <prompt>",
