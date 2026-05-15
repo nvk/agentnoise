@@ -708,7 +708,7 @@ fn main() -> Result<()> {
                         println!("- {relay}");
                     }
                     println!();
-                    println!("{}", identity::render_qr(&payload.nprofile)?);
+                    println!("{}", identity::render_qr(&payload.npub)?);
                 }
                 IdentityCommand::Delete { name } => {
                     let label = identity::delete_identity_nsec(&config.whitenoise, &name)?;
@@ -1023,7 +1023,7 @@ fn print_pairing_details(
         }
     }
     println!();
-    println!("{}", identity::render_qr(nprofile)?);
+    println!("{}", identity::render_qr(npub)?);
     Ok(())
 }
 
@@ -1299,11 +1299,11 @@ fn pairing_for_listener(
     let gate = PairingGate::new(config.whitenoise.pairing_pin_seconds);
     let payload = setup::pairing(config_path, &[])?;
     println!("agentnoise pairing required");
-    println!("QR contains the desktop nprofile/npub and relay hints. It never contains the nsec.");
+    println!("QR contains the desktop npub. The printed nprofile includes relay hints.");
     println!("npub: {}", payload.npub);
     println!("nprofile: {}", payload.nprofile);
     println!();
-    println!("{}", identity::render_qr(&payload.nprofile)?);
+    println!("{}", identity::render_qr(&payload.npub)?);
     println!();
     Ok(Some(PairingRuntime {
         gate,

@@ -333,7 +333,7 @@ fn print_status(status: &RuntimeStatus) {
         } else {
             println!("pairing PIN: waiting for listener update");
         }
-        if let Ok(qr) = crate::identity::render_qr(&pairing.nprofile) {
+        if let Ok(qr) = crate::identity::render_qr(&pairing.npub) {
             println!();
             println!("{qr}");
         }

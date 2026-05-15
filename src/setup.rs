@@ -96,7 +96,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         &identity.npub,
         &options.relays,
     )?;
-    let qr = identity::render_qr(&payload.nprofile)?;
+    let qr = identity::render_qr(&identity.npub)?;
 
     let mut group_id = None;
     let mut group_output = None;

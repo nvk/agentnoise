@@ -32,11 +32,7 @@ pub fn status_report(config: &Config) -> Result<StatusReport> {
     let key_store = if config.whitenoise.dev_burner_nsec {
         "dev-burner".to_string()
     } else if config.whitenoise.use_keychain_nsec {
-        match config.secret_store().nsec_status() {
-            Ok(true) => "keychain:present".to_string(),
-            Ok(false) => "keychain:missing".to_string(),
-            Err(error) => format!("keychain:error:{error:#}"),
-        }
+        "keychain:configured".to_string()
     } else {
         "none".to_string()
     };

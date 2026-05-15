@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use nostr::PublicKey;
@@ -199,11 +199,15 @@ pub fn daemon_running(config: &WhitenoiseConfig) -> Result<bool> {
     let wn = resolve_wn(&config.wn_bin);
     let mut command = Command::new(&wn);
     add_socket_arg(&mut command, config.resolved_socket().as_deref());
-    let output = command
-        .arg("daemon")
-        .arg("status")
-        .output()
-        .with_context(|| format!("running {} daemon status", wn.display()))?;
+    command.arg("daemon").arg("status");
+    let output = match output_with_timeout(
+        &mut command,
+        Duration::from_secs(5),
+        &format!("{} daemon status", wn.display()),
+    ) {
+        Ok(output) => output,
+        Err(_) => return Ok(false),
+    };
 
     if !output.status.success() {
         return Ok(false);
@@ -270,11 +274,12 @@ pub fn ensure_daemon(config: &WhitenoiseConfig) -> Result<Option<Child>> {
 pub fn daemon_status_with_socket(wn_path: &Path, socket: Option<&Path>) -> Result<String> {
     let mut command = Command::new(wn_path);
     add_socket_arg(&mut command, socket);
-    let output = command
-        .arg("daemon")
-        .arg("status")
-        .output()
-        .with_context(|| format!("running {} daemon status", wn_path.display()))?;
+    command.arg("daemon").arg("status");
+    let output = output_with_timeout(
+        &mut command,
+        Duration::from_secs(5),
+        &format!("{} daemon status", wn_path.display()),
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let text = if stdout.is_empty() { stderr } else { stdout };
@@ -663,6 +668,36 @@ fn checked_output(mut command: Command, wn: &Path, label: &str) -> Result<String
     }
 
     Ok(text)
+}
+
+fn output_with_timeout(command: &mut Command, timeout: Duration, label: &str) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("starting {label}"))?;
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .with_context(|| format!("checking {label}"))?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .with_context(|| format!("waiting for {label}"));
+        }
+        if started.elapsed() >= timeout {
+            child.kill().ok();
+            let output = child
+                .wait_with_output()
+                .with_context(|| format!("collecting timed out {label}"))?;
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let text = if stdout.is_empty() { stderr } else { stdout };
+            bail!("{label} timed out after {}s: {text}", timeout.as_secs());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn json_has_account(value: &Value) -> bool {

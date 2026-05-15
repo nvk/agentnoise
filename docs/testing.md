@@ -54,6 +54,11 @@ pairs through the printed SSH PIN, and verifies `/status` and `/help` replies.
 It still depends on the local White Noise binaries and relay reachability, so it
 is intentionally separate from the offline release check.
 
+Run this live roundtrip once as a pre-release smoke on a workstation. Do not put
+it in a repeat loop on the primary machine. Repeated live relay runs belong on a
+spare machine, disposable macOS install, or other environment that can be
+rebooted without interrupting work.
+
 Current White Noise daemons may still use the platform keyring for account login
 after agentnoise passes a dev burner `nsec` directly. If this fails with a
 `Keyring error` or `Operation not permitted`, rerun it from an unsandboxed user
@@ -70,3 +75,15 @@ just release-check
 This stays local and does not depend on hosted CI. It runs the fast checks,
 fixture contracts, the offline chat UX smoke, `cargo package --offline`, and
 formula placeholder checks.
+
+Use `release-check` as the main gate. Add one live fake-phone smoke after that
+when the machine is stable and network/relay coverage matters for the release.
+
+Manual phone smoke:
+
+1. Start or attach with `agentnoise up`.
+2. Send `/status` from the real phone chat.
+3. Confirm the phone displays the reply.
+4. If the phone is silent, check `runtime-events.jsonl` and `wn messages list`
+   before restarting anything. A local `reply-sent` with no phone display is a
+   White Noise delivery/sync delay, not an agent command failure.

@@ -11,6 +11,7 @@ use nostr::nips::nip19::ToBech32;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+use crate::auth::is_pairing_pin_message;
 use crate::config::{Config, WhitenoiseConfig};
 use crate::secrets;
 use crate::whitenoise_cli;
@@ -314,6 +315,7 @@ fn is_command_reply(text: &str, sent_message: &str) -> bool {
     !text.is_empty()
         && text != sent_message.trim()
         && text != "Paired. Send /help for commands."
+        && !is_pairing_pin_message(text)
         && !text.starts_with("I saw this while catching up after startup,")
 }
 
@@ -353,6 +355,8 @@ mod tests {
     fn fake_phone_reply_filter_ignores_harness_noise() {
         assert!(!is_command_reply("", "/status"));
         assert!(!is_command_reply("/status", "/status"));
+        assert!(!is_command_reply("123456", "/status"));
+        assert!(!is_command_reply("/pair 123-456", "/status"));
         assert!(!is_command_reply(
             " Paired. Send /help for commands. ",
             "/status"

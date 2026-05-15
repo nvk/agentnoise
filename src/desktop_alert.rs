@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 use qrcode::{Color, QrCode};
 
 use crate::auth::PairingPin;
-
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
@@ -95,7 +94,7 @@ fn platform_spawn_pairing_pin_alert(
 ) -> Result<Option<AlertHandle>> {
     let seconds = pin.expires_in_seconds.max(1);
     let qr_path = pairing_qr_path(&pin.code);
-    write_qr_bmp(nprofile, &qr_path)?;
+    write_qr_bmp(npub, &qr_path)?;
     let child = Command::new("osascript")
         .arg("-l")
         .arg("JavaScript")
@@ -191,8 +190,8 @@ const qrPath = env('AGENTNOISE_QR_PATH');
 const app = $.NSApplication.sharedApplication;
 app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
 
-const windowWidth = 430;
-const windowHeight = 560;
+const windowWidth = 500;
+const windowHeight = 650;
 const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable;
 const window = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
   $.NSMakeRect(0, 0, windowWidth, windowHeight),
@@ -219,23 +218,23 @@ function label(text, x, y, width, height, size, bold) {
   return field;
 }
 
-label('Pair agentnoise', 20, 516, 390, 28, 22, true);
-label('Scan this desktop identity in White Noise, then send the PIN.', 35, 486, 360, 24, 13, false);
+label('Pair agentnoise', 25, 600, 450, 30, 22, true);
+label('Scan this desktop identity in White Noise, then send the PIN.', 45, 568, 410, 28, 13, false);
 
 const image = $.NSImage.alloc.initWithContentsOfFile(qrPath);
-const imageView = $.NSImageView.alloc.initWithFrame($.NSMakeRect(90, 230, 250, 250));
+const imageView = $.NSImageView.alloc.initWithFrame($.NSMakeRect(80, 230, 340, 340));
 imageView.setImage(image);
 imageView.setImageScaling($.NSImageScaleProportionallyUpOrDown);
 content.addSubview(imageView);
 
-label('PIN', 20, 190, 390, 18, 12, false);
-label(pin, 20, 150, 390, 44, 38, true);
-const countdown = label('', 20, 124, 390, 24, 14, false);
+label('PIN', 25, 190, 450, 18, 12, false);
+label(pin, 25, 150, 450, 44, 38, true);
+const countdown = label('', 25, 124, 450, 24, 14, false);
 
-const npubField = label(npub, 25, 82, 380, 34, 10, false);
+const npubField = label(npub, 30, 82, 440, 34, 10, false);
 npubField.setSelectable(true);
 
-const closeButton = $.NSButton.alloc.initWithFrame($.NSMakeRect(170, 34, 90, 32));
+const closeButton = $.NSButton.alloc.initWithFrame($.NSMakeRect(205, 34, 90, 32));
 closeButton.setTitle('Close');
 closeButton.setBezelStyle($.NSBezelStyleRounded);
 closeButton.setTarget(app);
@@ -273,7 +272,7 @@ fn write_qr_bmp(payload: &str, path: &Path) -> Result<()> {
     let code = QrCode::new(payload.as_bytes()).context("building QR code")?;
     let quiet_zone = 4usize;
     let modules = code.width() + (quiet_zone * 2);
-    let module_pixels = (320 / modules).clamp(3, 8);
+    let module_pixels = (480 / modules).clamp(4, 10);
     let image_width = modules * module_pixels;
     let image_height = image_width;
     let row_stride = (image_width * 3).next_multiple_of(4);
@@ -340,7 +339,7 @@ mod tests {
     fn writes_qr_bmp() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("qr.bmp");
-        write_qr_bmp("nprofile1test", &path).unwrap();
+        write_qr_bmp("npub1test", &path).unwrap();
         let bytes = fs::read(path).unwrap();
         assert_eq!(&bytes[..2], b"BM");
         assert!(bytes.len() > 54);

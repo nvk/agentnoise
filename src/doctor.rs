@@ -116,23 +116,14 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
         });
     } else if config.whitenoise.use_keychain_nsec {
         let store = config.secret_store();
-        match store.nsec_status() {
-            Ok(true) => checks.push(Check {
-                level: Level::Ok,
-                name: "OS keychain nsec".to_string(),
-                detail: format!("present: {}", store.label()),
-            }),
-            Ok(false) => checks.push(Check {
-                level: Level::Warn,
-                name: "OS keychain nsec".to_string(),
-                detail: format!("missing: {}", store.label()),
-            }),
-            Err(error) => checks.push(Check {
-                level: Level::Warn,
-                name: "OS keychain nsec".to_string(),
-                detail: format!("unavailable: {error:#}"),
-            }),
-        }
+        checks.push(Check {
+            level: Level::Ok,
+            name: "OS keychain nsec".to_string(),
+            detail: format!(
+                "configured: {}; run `agentnoise keychain status` for a live keychain check",
+                store.label()
+            ),
+        });
     } else {
         checks.push(Check {
             level: Level::Ok,
@@ -277,5 +268,20 @@ mod tests {
 
         assert!(output.contains("[warn] agent launcher: direct"));
         assert!(!output.contains("bondage conf"));
+    }
+
+    #[test]
+    fn doctor_does_not_query_keychain_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.whitenoise.use_keychain_nsec = true;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+
+        let output = render_doctor(&temp.path().join("config.toml"), &config);
+
+        assert!(output.contains("OS keychain nsec"));
+        assert!(output.contains("configured: agentnoise / whitenoise-nsec"));
+        assert!(output.contains("agentnoise keychain status"));
     }
 }

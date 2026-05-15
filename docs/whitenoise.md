@@ -83,8 +83,10 @@ available, so checking the label does not require passing the phone `npub` or
 reading the desktop `nsec`. `identity rename <name>` changes the configured
 label and publishes it; add `--no-publish` to save only.
 
-The QR encodes a Nostr `nprofile`: the desktop `npub` plus relay hints. It is
-for phone discovery only and never contains the desktop `nsec`.
+The QR encodes the desktop `npub` because that is the most reliable scan target
+in the current phone app. The terminal output also prints a Nostr `nprofile`
+with relay hints for manual copy/paste. Neither value contains the desktop
+`nsec`.
 
 Pairing relay hints are only discovery hints. Message delivery uses the White
 Noise account relay list, which agentnoise can reconcile after login.
@@ -135,10 +137,11 @@ Render a pairing QR for the phone:
 agentnoise pair
 ```
 
-The QR encodes a standard Nostr `nprofile`, which contains the desktop bot
-`npub` plus relay hints. If `agentnoise up` is already running and waiting for
-first pairing, this command also prints the current live pairing PIN. Override
-relays at render time when needed:
+The QR encodes the desktop bot `npub`; the adjacent text prints the standard
+Nostr `nprofile`, which contains the same `npub` plus relay hints. If
+`agentnoise up` is already running and waiting for first pairing, this command
+also prints the current live pairing PIN. Override relays at render time when
+needed:
 
 ```sh
 agentnoise pair --relay wss://relay.example
@@ -173,6 +176,28 @@ Run `agentnoise identity status` to see configured pairing and message relays.
 Run `agentnoise whitenoise relays` to see the current White Noise account relay
 state, and `agentnoise whitenoise ensure-relays` to add the configured
 `message_relays` as `nip65`, `inbox`, and `key_package` relays.
+
+## Delivery Diagnostics
+
+agentnoise can prove that it received a phone message and handed a reply to
+White Noise before the phone app renders that reply. This is normal for
+troubleshooting: local send success and phone receipt are two different facts.
+
+Use these checks when a phone appears silent:
+
+```sh
+agentnoise status
+tail -f "$HOME/Library/Application Support/agentnoise/runtime-events.jsonl"
+wn messages list <group-id> --json
+wn debug health --json
+wn debug relay-control-state
+```
+
+If the journal shows `reply-sent` and `wn messages list` contains the reply,
+agentnoise already handed the message to White Noise. Delayed appearance on the
+phone points at relay/mobile sync. If the journal has inbound phone messages but
+no `reply-queued`, debug agentnoise command handling. If there is no inbound
+phone message, debug group subscription and relay reachability.
 
 To test the path manually:
 

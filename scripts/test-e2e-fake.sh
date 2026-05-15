@@ -3,6 +3,8 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+echo "live fake-phone smoke: run once on a workstation; do not loop this script on the primary machine" >&2
+
 timeout_seconds="${AGENTNOISE_FAKE_PHONE_TIMEOUT:-120}"
 if [ -n "${AGENTNOISE_BIN:-}" ]; then
   bin="$AGENTNOISE_BIN"

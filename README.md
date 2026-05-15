@@ -22,13 +22,17 @@ such alpha, much wow.
 
 ## Changelog
 
-**Unreleased** - **Optional direct agent launcher and cleaner session UX.**
+**v0.1.14** - **Optional direct launcher and reliability polish.**
 `bondage` remains the default and recommended local policy boundary, but
 first-run commands can now opt into `runner.launcher = "direct"` with
 `--direct-agents`. Direct mode runs raw `codex`, `claude`, or optional
 `hermes` CLIs with structured argv and skips the `bondage` binary/config
 checks in `agentnoise doctor`. Session replies now spell out current chat,
 target chat, workspace, and next command more clearly for phone use.
+Live fake-phone tests and service diagnostics were tightened, and `status` /
+`doctor` avoid slow implicit keychain probes. A local White Noise send can still
+arrive on the phone late; the docs now call out how to separate local send
+success from phone sync/display lag.
 
 **v0.1.13** - **White Noise login detection fix.** `wn whoami` reports logged
 in accounts as hex pubkeys while agentnoise config stores the desktop account
@@ -273,8 +277,8 @@ cargo build --release
 target/release/agentnoise up
 ```
 
-The QR contains the desktop `nprofile`/`npub` plus relay hints. It never exposes
-the desktop `nsec`.
+The QR scans as the desktop `npub`. The terminal also prints the `nprofile`
+with relay hints. Neither value exposes the desktop `nsec`.
 
 Pairing relay hints are for discovery. Message delivery uses the White Noise
 account relay list. agentnoise now keeps a broader message relay list in config
@@ -297,6 +301,19 @@ Inspect or apply those relays manually:
 agentnoise whitenoise relays
 agentnoise whitenoise ensure-relays
 ```
+
+If the phone does not show a reply, first check whether the desktop created one:
+
+```sh
+agentnoise status
+tail -f "$HOME/Library/Application Support/agentnoise/runtime-events.jsonl"
+```
+
+`reply-sent` means agentnoise handed the message to White Noise and stored it
+locally. The phone can still render it late if the White Noise relay or mobile
+sync path is delayed. Reopening the chat or restarting the local `agentnoise up`
+/ `wnd` pair can flush old replies, but treat that as a transport diagnostic,
+not proof that the agent ignored the command.
 
 ### Development Burner Identity
 
@@ -608,7 +625,7 @@ The agentnoise `npub` is public on relays, so first-run command authorization is
 separate from discovery. When `allowed_senders` is empty, `agentnoise up` enters
 pairing mode:
 
-1. Desktop shows a QR for the agentnoise `nprofile`.
+1. Desktop shows a QR for the agentnoise desktop `npub`.
 2. On macOS, agentnoise opens a pairing window with the QR, the desktop `npub`,
    a live countdown, and the current 6-digit PIN.
 3. The phone sends the PIN as the first message, either `123456` or `/pair 123456`.

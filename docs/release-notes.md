@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## 0.1.14 - 2026-05-15
 
 - Added `runner.launcher = "direct"` for installs that only have raw Codex,
   Claude, or Hermes CLIs and do not want to configure `bondage`.
@@ -20,6 +20,13 @@
 - Trimmed default message relays to a smaller set that behaved reliably in
   live White Noise tests, and retried key-package publishing when the daemon
   times out on slow relay work.
+- Standardized pairing QR rendering on the bare desktop `npub`, while keeping
+  the richer `nprofile` and relay hints printed as adjacent text.
+- Kept `agentnoise status` and `agentnoise doctor` responsive by avoiding
+  implicit OS keychain probes and bounding White Noise daemon status checks.
+- Documented the practical White Noise delivery diagnostic: agentnoise can
+  enqueue and persist a reply locally before the phone app renders it, so
+  phone smoke tests should distinguish local send success from phone receipt.
 
 ## 0.1.13
 
