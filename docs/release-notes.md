@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.15 - 2026-05-15
+
+- Fixed Homebrew service startup churn that could repeatedly touch the macOS
+  Keychain when `wnd` was slow to become ready.
+- Extended White Noise daemon startup readiness from 5 seconds to 60 seconds.
+- Avoided a second daemon startup check in `agentnoise up` after setup already
+  started and verified the daemon.
+
 ## 0.1.14 - 2026-05-15
 
 - Added `runner.launcher = "direct"` for installs that only have raw Codex,

@@ -1117,7 +1117,8 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
         config_path,
         StartArgs {
             group: None,
-            no_daemon: args.no_daemon,
+            // setup() already performed daemon startup/login/profile repair for `up`.
+            no_daemon: true,
             ssh: args.ssh,
         },
         if args.ssh {

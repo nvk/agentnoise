@@ -19,6 +19,8 @@ use crate::secrets::SecretStore;
 
 pub const REPO_URL: &str = "https://github.com/marmot-protocol/whitenoise-rs.git";
 pub const PACKAGE: &str = "whitenoise-cli";
+const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct WhitenoiseInstall {
@@ -202,7 +204,7 @@ pub fn daemon_running(config: &WhitenoiseConfig) -> Result<bool> {
     command.arg("daemon").arg("status");
     let output = match output_with_timeout(
         &mut command,
-        Duration::from_secs(5),
+        DAEMON_STATUS_TIMEOUT,
         &format!("{} daemon status", wn.display()),
     ) {
         Ok(output) => output,
@@ -249,15 +251,19 @@ pub fn ensure_daemon(config: &WhitenoiseConfig) -> Result<Option<Child>> {
     }
 
     let mut child = start_daemon(config)?;
-    for _ in 0..20 {
+    let started = Instant::now();
+    while started.elapsed() < DAEMON_START_TIMEOUT {
         if daemon_running(config)? {
             return Ok(Some(child));
         }
         if let Some(status) = child.try_wait().context("checking White Noise daemon")? {
+            if daemon_running(config)? {
+                return Ok(None);
+            }
             if !status.success() {
                 bail!("wn daemon start exited before it was ready: {status}");
             }
-            for _ in 0..20 {
+            while started.elapsed() < DAEMON_START_TIMEOUT {
                 if daemon_running(config)? {
                     return Ok(None);
                 }
@@ -268,7 +274,10 @@ pub fn ensure_daemon(config: &WhitenoiseConfig) -> Result<Option<Child>> {
         thread::sleep(Duration::from_millis(250));
     }
 
-    bail!("wn daemon did not become ready within 5 seconds");
+    bail!(
+        "wn daemon did not become ready within {} seconds",
+        DAEMON_START_TIMEOUT.as_secs()
+    );
 }
 
 pub fn daemon_status_with_socket(wn_path: &Path, socket: Option<&Path>) -> Result<String> {
@@ -277,7 +286,7 @@ pub fn daemon_status_with_socket(wn_path: &Path, socket: Option<&Path>) -> Resul
     command.arg("daemon").arg("status");
     let output = output_with_timeout(
         &mut command,
-        Duration::from_secs(5),
+        DAEMON_STATUS_TIMEOUT,
         &format!("{} daemon status", wn_path.display()),
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

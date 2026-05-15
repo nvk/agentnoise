@@ -22,6 +22,11 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.15** - **Homebrew service keychain prompt fix.** Service startup now
+waits longer for `wnd` to become ready and avoids a redundant second daemon
+startup check after setup. This prevents launchd keep-alive loops from
+repeatedly touching the macOS Keychain when White Noise startup is slow.
+
 **v0.1.14** - **Optional direct launcher and reliability polish.**
 `bondage` remains the default and recommended local policy boundary, but
 first-run commands can now opt into `runner.launcher = "direct"` with
