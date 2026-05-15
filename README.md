@@ -22,11 +22,13 @@ such alpha, much wow.
 
 ## Changelog
 
-**Unreleased** - **Optional direct agent launcher.** `bondage` remains the
-default and recommended local policy boundary, but first-run commands can now
-opt into `runner.launcher = "direct"` with `--direct-agents`. Direct mode runs
-raw `codex`, `claude`, or optional `hermes` CLIs with structured argv and skips
-the `bondage` binary/config checks in `agentnoise doctor`.
+**Unreleased** - **Optional direct agent launcher and cleaner session UX.**
+`bondage` remains the default and recommended local policy boundary, but
+first-run commands can now opt into `runner.launcher = "direct"` with
+`--direct-agents`. Direct mode runs raw `codex`, `claude`, or optional
+`hermes` CLIs with structured argv and skips the `bondage` binary/config
+checks in `agentnoise doctor`. Session replies now spell out current chat,
+target chat, workspace, and next command more clearly for phone use.
 
 **v0.1.13** - **White Noise login detection fix.** `wn whoami` reports logged
 in accounts as hex pubkeys while agentnoise config stores the desktop account

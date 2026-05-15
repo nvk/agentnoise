@@ -12,6 +12,21 @@ just test-fast
 
 This runs format, clippy, and the full Rust test suite.
 
+Offline chat UX smoke:
+
+```sh
+./scripts/test-chat-ux.sh
+```
+
+This uses temp state and a fake phone sender to exercise `/status`, `/rename`,
+`/cd`, `/list`, `/new`, `/resume`, and `/close` without touching your real
+White Noise identity or OS keychain. To also run one real direct Codex/frontier
+job through that same fake chat flow:
+
+```sh
+AGENTNOISE_CHAT_UX_FRONTIER=1 ./scripts/test-chat-ux.sh
+```
+
 White Noise adapter contract fixtures:
 
 ```sh
@@ -53,4 +68,5 @@ just release-check
 ```
 
 This stays local and does not depend on hosted CI. It runs the fast checks,
-fixture contracts, `cargo package --offline`, and formula placeholder checks.
+fixture contracts, the offline chat UX smoke, `cargo package --offline`, and
+formula placeholder checks.

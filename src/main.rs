@@ -527,9 +527,11 @@ fn main() -> Result<()> {
                 RouteAction::Ignore => {}
                 RouteAction::Reply(reply) => println!("{reply}"),
                 RouteAction::NewSession(request) => {
-                    println!("New session requested: {}", request.name);
+                    println!("{}", request.created_text());
+                    println!("New chat: {}", request.group_name());
+                    println!("{}", request.ready_text());
                     println!(
-                        "Run this command from the live listener so agentnoise can create the White Noise chat."
+                        "Note: `agentnoise handle` does not create the White Noise chat; run this from the live listener for real delivery."
                     );
                 }
                 RouteAction::ResumeSession(request) => {

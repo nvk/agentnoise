@@ -9,6 +9,11 @@
 - Added `agentnoise config launcher <bondage|direct>` for existing configs.
 - Kept `bondage` as the default launcher and updated `doctor`, `status`, and
   `agents` output to make the active launcher visible.
+- Reworked phone-facing session replies for `/new`, `/list`, `/resume`,
+  `/close`, and `/status` so they name the current chat, target chat,
+  workspace, and next action without relying on symbolic markers.
+- Added `scripts/test-chat-ux.sh`, an offline fake-phone chat smoke test with
+  an optional real frontier Codex leg via `AGENTNOISE_CHAT_UX_FRONTIER=1`.
 
 ## 0.1.13
 

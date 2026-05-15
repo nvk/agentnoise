@@ -43,7 +43,7 @@ impl NewSessionRequest {
 
     pub fn ready_text(&self) -> String {
         format!(
-            "Session: {}\nWorkspace: {}\nReady. Send /help.",
+            "Session: {}\nWorkspace: {}\nThis chat is ready. Send /pwd or /codex <prompt>.",
             self.name,
             workspace_text(&self.state)
         )
@@ -51,8 +51,9 @@ impl NewSessionRequest {
 
     pub fn created_text(&self) -> String {
         format!(
-            "Created session: {}\nOpen the new agentnoise chat in White Noise.",
-            self.name
+            "Created session: {}\nI opened a new White Noise chat named \"{}\" and sent a ready message there.\nContinue in that chat, or send /list.",
+            self.name,
+            self.group_name()
         )
     }
 }
@@ -468,7 +469,7 @@ impl AgentApp {
             .unwrap_or_else(|| "none".to_string());
 
         format!(
-            "agentnoise\nStatus: OK\nSession: {session_name}\nChats: {groups}\nWorkspace: {workspace}\nJobs: {active} active\nRepos: {}",
+            "agentnoise\nStatus: OK\nSession: {session_name}\nSessions: {groups}\nWorkspace: {workspace}\nJobs: {active} active\nRepos: {}",
             self.config.repos.len()
         )
     }
@@ -532,28 +533,27 @@ impl AgentApp {
     fn sessions_text(&self, sender_key: &str) -> String {
         let sessions = self.session_entries(sender_key);
         if sessions.is_empty() {
-            return "No saved sessions yet. Send /rename <name> or /new <name>.".to_string();
+            return "No sessions yet. Send /rename <name> to name this chat, or /new <name> to create another.".to_string();
         }
 
         let lines = sessions
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                let marker = if entry.key == sender_key { "*" } else { "-" };
-                let closed = if entry.state.closed { " closed" } else { "" };
+                let status = session_status_label(entry.key == sender_key, entry.state.closed);
                 format!(
-                    "{}. {marker} {}{} {} id:{}",
+                    "{}. {}{}\n   chat: {}\n   workspace: {}",
                     index + 1,
                     entry.name,
-                    closed,
+                    status,
+                    short_group_id(&entry.group_id),
                     workspace_text(&entry.state),
-                    short_group_id(&entry.group_id)
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        format!("Sessions\n{lines}")
+        format!("Sessions\n{lines}\nSend /resume <number|name|id>.")
     }
 
     fn resume_session_action(
@@ -591,7 +591,7 @@ impl AgentApp {
         self.sessions.set(&entry.key, state.clone())?;
 
         let target_text = format!(
-            "Session resumed: {}\nWorkspace: {}\nReady.",
+            "Session: {}\nWorkspace: {}\nResumed here. Send /pwd or /codex <prompt>.",
             entry.name,
             workspace_text(&state)
         );
@@ -604,7 +604,7 @@ impl AgentApp {
         Ok(RouteAction::ResumeSession(ResumeSessionRequest {
             group_id: entry.group_id.clone(),
             reply_text: format!(
-                "Resumed session: {}\nOpen the agentnoise chat with id:{}.",
+                "Resumed session: {}\nI sent a ready message to chat id:{}.\nContinue in that chat, or send /list.",
                 entry.name,
                 short_group_id(&entry.group_id)
             ),
@@ -659,7 +659,9 @@ impl AgentApp {
         session.closed = true;
         let name = session_display_name(sender_key, &session);
         self.sessions.set(sender_key, session)?;
-        Ok(format!("Closed session: {name}"))
+        Ok(format!(
+            "Closed session: {name}\nSend /list to switch sessions, or /resume {name} to reopen it."
+        ))
     }
 
     fn repos_text(&self, sender_key: &str) -> String {
@@ -1114,6 +1116,15 @@ fn normalize_session_name(name: Option<&str>) -> Option<String> {
 
 fn short_group_id(group_id: &str) -> String {
     group_id.chars().take(6).collect()
+}
+
+fn session_status_label(current: bool, closed: bool) -> &'static str {
+    match (current, closed) {
+        (true, true) => " (current, closed)",
+        (true, false) => " (current)",
+        (false, true) => " (closed)",
+        (false, false) => "",
+    }
 }
 
 fn generated_session_name() -> String {
@@ -1592,7 +1603,8 @@ mod tests {
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/sessions")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("* main")
+            RouteAction::Reply(reply) if reply.contains("main (current)")
+                && reply.contains("chat: group-")
         ));
     }
 
@@ -1617,20 +1629,23 @@ mod tests {
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/list")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("1. - bugfix")
-                && reply.contains("2. * main")
+            RouteAction::Reply(reply) if reply.contains("1. bugfix")
+                && reply.contains("2. main (current)")
+                && reply.contains("Send /resume <number|name|id>.")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/resume bugfix")
                 .unwrap(),
             RouteAction::ResumeSession(request) if request.group_id == "group-b"
                 && request.reply_text.contains("Resumed session: bugfix")
-                && request.target_text.contains("Session resumed: bugfix")
+                && request.reply_text.contains("Continue in that chat")
+                && request.target_text.contains("Session: bugfix")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/resume 2")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("Session resumed: main")
+            RouteAction::Reply(reply) if reply.contains("Session: main")
+                && reply.contains("Resumed here")
         ));
     }
 }
