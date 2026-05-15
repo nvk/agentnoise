@@ -26,14 +26,9 @@ pub const DEFAULT_PAIRING_RELAYS: &[&str] = &[
 
 pub const DEFAULT_MESSAGE_RELAYS: &[&str] = &[
     "wss://index.hzrd149.com",
-    "wss://indexer.coracle.social",
     "wss://relay.primal.net",
-    "wss://relay.damus.io",
     "wss://relay.ditto.pub",
     "wss://nos.lol",
-    "wss://relay.nostr.band",
-    "wss://relay.snort.social",
-    "wss://relay.nostr.bg",
     "wss://nostr.mom",
 ];
 
@@ -440,10 +435,10 @@ mod tests {
             .map(|relay| (*relay).to_string())
             .collect::<Vec<_>>();
 
-        assert!(relays.len() >= 10);
-        assert!(relays.len() <= 12);
+        assert!(relays.len() >= 5);
+        assert!(relays.len() <= 8);
         assert!(relays.contains(&"wss://relay.primal.net".to_string()));
-        assert!(relays.contains(&"wss://relay.nostr.band".to_string()));
+        assert!(relays.contains(&"wss://nostr.mom".to_string()));
         assert_eq!(relays.len(), dedupe_relays(relays.clone()).len());
     }
 

@@ -4,10 +4,15 @@ set -eu
 cd "$(dirname "$0")/.."
 
 timeout_seconds="${AGENTNOISE_FAKE_PHONE_TIMEOUT:-120}"
-bin="${AGENTNOISE_BIN:-target/debug/agentnoise}"
-
-if [ ! -x "$bin" ]; then
+if [ -n "${AGENTNOISE_BIN:-}" ]; then
+  bin="$AGENTNOISE_BIN"
+  if [ ! -x "$bin" ]; then
+    echo "AGENTNOISE_BIN is not executable: $bin" >&2
+    exit 1
+  fi
+else
   cargo build
+  bin="target/debug/agentnoise"
 fi
 
 tmpdir="$(mktemp -d)"
@@ -32,6 +37,7 @@ desktop_data="$tmpdir/desktop-wnd"
 desktop_logs="$tmpdir/desktop-wnd-logs"
 desktop_socket="$desktop_data/release/wnd.sock"
 perl -0pi -e 's#wn_bin = "wn"#wn_bin = "wn"\nsocket = "'"$desktop_socket"'"#s; s#data_dir = ".*?"#data_dir = "'"$tmpdir/data"'"#s; s#log_dir = ".*?"#log_dir = "'"$tmpdir/logs"'"#s; s#worktree_dir = ".*?"#worktree_dir = "'"$tmpdir/worktrees"'"#s' "$config"
+perl -0pi -e 's#pairing_pin_seconds = [0-9]+#pairing_pin_seconds = 600#' "$config"
 
 wn_path="$("$bin" --config "$config" whitenoise path)"
 wnd_bin="$(dirname "$wn_path")/wnd"
@@ -76,7 +82,7 @@ fi
 listener_pid="$!"
 
 pin=""
-deadline=$(( $(date +%s) + 60 ))
+deadline=$(( $(date +%s) + 180 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
   if ! kill -0 "$listener_pid" 2>/dev/null; then
     sed -n '1,200p' "$tmpdir/listener.out" >&2 || true
@@ -84,7 +90,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     echo "agentnoise listener exited before printing a pairing PIN" >&2
     exit 1
   fi
-  pin="$(sed -n 's/^phone first message: //p' "$tmpdir/listener.out" | tail -n 1)"
+  pin_line="$(sed -n 's/^pairing PIN: \([0-9][0-9]*\) (expires in \([0-9][0-9]*\)s).*/\1 \2/p' "$tmpdir/listener.out" | tail -n 1)"
+  pin="$(printf '%s\n' "$pin_line" | awk '$2 >= 90 { print $1 }')"
   if [ -n "$pin" ]; then
     break
   fi
@@ -110,6 +117,12 @@ if grep -q "replies: none before timeout" "$tmpdir/status.out"; then
   echo "fake-phone /status did not receive a reply" >&2
   exit 1
 fi
+if ! grep -q "Status: OK" "$tmpdir/status.out"; then
+  sed -n '1,200p' "$tmpdir/status.out" >&2
+  sed -n '1,200p' "$tmpdir/status.err" >&2 || true
+  echo "fake-phone /status did not receive the agentnoise status reply" >&2
+  exit 1
+fi
 
 "$bin" --config "$config" fake-phone roundtrip \
   --root "$tmpdir/fake-phone" \
@@ -120,6 +133,12 @@ if grep -q "replies: none before timeout" "$tmpdir/help.out"; then
   sed -n '1,200p' "$tmpdir/help.out" >&2
   sed -n '1,200p' "$tmpdir/help.err" >&2 || true
   echo "fake-phone /help did not receive a reply" >&2
+  exit 1
+fi
+if ! grep -q "/status" "$tmpdir/help.out"; then
+  sed -n '1,200p' "$tmpdir/help.out" >&2
+  sed -n '1,200p' "$tmpdir/help.err" >&2 || true
+  echo "fake-phone /help did not receive the command list" >&2
   exit 1
 fi
 

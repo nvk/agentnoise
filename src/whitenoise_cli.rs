@@ -430,12 +430,25 @@ pub fn update_profile(
 
 pub fn publish_key_package(config: &WhitenoiseConfig) -> Result<String> {
     let wn = resolve_wn(&config.wn_bin);
-    let mut command = Command::new(&wn);
-    add_socket_arg(&mut command, config.resolved_socket().as_deref());
-    command.arg("keys").arg("publish").arg("--json");
-    add_account_arg(&mut command, config.account.as_deref());
+    let mut last_error = None;
 
-    checked_output(command, &wn, "keys publish")
+    for attempt in 1..=3 {
+        let mut command = Command::new(&wn);
+        add_socket_arg(&mut command, config.resolved_socket().as_deref());
+        command.arg("keys").arg("publish").arg("--json");
+        add_account_arg(&mut command, config.account.as_deref());
+
+        match checked_output(command, &wn, "keys publish") {
+            Ok(output) => return Ok(output),
+            Err(error) if attempt < 3 => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_secs(attempt * 2));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.expect("key package publish retry error"))
 }
 
 pub fn login_from_configured_nsec(

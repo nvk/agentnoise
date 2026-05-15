@@ -119,6 +119,11 @@ impl Drop for ChildGuard {
 fn start_fake_wnd(config: &Config, plan: &FakePhonePlan) -> Result<Child> {
     let wnd = whitenoise_cli::resolve_wnd_for_config(&config.whitenoise);
     let relays = config.whitenoise.pairing_relays.join(",");
+    if plan.socket.exists() {
+        fs::remove_file(&plan.socket).with_context(|| {
+            format!("removing stale fake phone socket {}", plan.socket.display())
+        })?;
+    }
     Command::new(&wnd)
         .arg("--data-dir")
         .arg(&plan.data_dir)
@@ -252,7 +257,7 @@ fn send_until_reply(
     message: &str,
     timeout: Duration,
 ) -> Result<Vec<String>> {
-    let mut child = client.subscribe_group_with_limit(group_id, 50)?;
+    let mut child = client.subscribe_group_with_limit(group_id, 0)?;
     let stdout = child
         .stdout
         .take()
@@ -271,7 +276,7 @@ fn send_until_reply(
                 }
             };
             for event in WnClient::parse_events_for_group(&value, &reader_group_id) {
-                if !event.text.trim().is_empty() && event.text.trim() != sent_message.trim() {
+                if is_command_reply(&event.text, &sent_message) {
                     let _ = tx.send(Ok(event.text));
                     return;
                 }
@@ -304,6 +309,14 @@ fn send_until_reply(
     Ok(replies)
 }
 
+fn is_command_reply(text: &str, sent_message: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text != sent_message.trim()
+        && text != "Paired. Send /help for commands."
+        && !text.starts_with("I saw this while catching up after startup,")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +347,23 @@ mod tests {
         let reused = load_or_create_burner_nsec(&plan).unwrap();
         assert_eq!(reused, nsec);
         assert_eq!(npub_from_nsec(&reused).unwrap(), npub);
+    }
+
+    #[test]
+    fn fake_phone_reply_filter_ignores_harness_noise() {
+        assert!(!is_command_reply("", "/status"));
+        assert!(!is_command_reply("/status", "/status"));
+        assert!(!is_command_reply(
+            " Paired. Send /help for commands. ",
+            "/status"
+        ));
+        assert!(!is_command_reply(
+            "I saw this while catching up after startup, so I did not run it:\n/status\nSend it again now, or send /help.",
+            "/status"
+        ));
+        assert!(is_command_reply(
+            "agentnoise\nStatus: OK\nSession: default",
+            "/status"
+        ));
     }
 }

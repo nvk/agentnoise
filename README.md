@@ -284,14 +284,9 @@ and reconciles it through `wn relays add` after login:
 [whitenoise]
 message_relays = [
   "wss://index.hzrd149.com",
-  "wss://indexer.coracle.social",
   "wss://relay.primal.net",
-  "wss://relay.damus.io",
   "wss://relay.ditto.pub",
   "wss://nos.lol",
-  "wss://relay.nostr.band",
-  "wss://relay.snort.social",
-  "wss://relay.nostr.bg",
   "wss://nostr.mom",
 ]
 ```

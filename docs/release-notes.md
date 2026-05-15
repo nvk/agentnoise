@@ -14,6 +14,12 @@
   workspace, and next action without relying on symbolic markers.
 - Added `scripts/test-chat-ux.sh`, an offline fake-phone chat smoke test with
   an optional real frontier Codex leg via `AGENTNOISE_CHAT_UX_FRONTIER=1`.
+- Hardened the live fake-phone E2E harness so it rebuilds before running,
+  waits for a fresh pairing PIN, ignores pairing/catch-up noise, and asserts
+  real `/status` and `/help` replies.
+- Trimmed default message relays to a smaller set that behaved reliably in
+  live White Noise tests, and retried key-package publishing when the daemon
+  times out on slow relay work.
 
 ## 0.1.13
 
