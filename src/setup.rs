@@ -36,6 +36,7 @@ pub struct SetupResult {
     pub login_repaired: bool,
     pub profile_published: bool,
     pub key_package_published: bool,
+    pub message_relay_entries_added: usize,
     pub group_id: Option<String>,
     pub group_output: Option<String>,
     pub dev_burner_nsec_file: Option<PathBuf>,
@@ -98,6 +99,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         false
     };
     let login_repaired = whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)?;
+    let message_relays = whitenoise_cli::ensure_message_relays(&config.whitenoise)?;
     whitenoise_cli::update_profile(
         &config.whitenoise,
         &config.whitenoise.profile_name,
@@ -141,6 +143,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         login_repaired,
         profile_published,
         key_package_published,
+        message_relay_entries_added: message_relays.added_entries,
         group_id,
         group_output,
         dev_burner_nsec_file: config

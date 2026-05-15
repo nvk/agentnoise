@@ -37,6 +37,22 @@ pub struct VisibleGroup {
     pub peer_pubkey: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayStatus {
+    pub url: String,
+    pub types: Vec<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayEnsureSummary {
+    pub configured_relays: usize,
+    pub added_entries: usize,
+    pub already_present_entries: usize,
+}
+
+const MESSAGE_RELAY_TYPES: &[&str] = &["nip65", "inbox", "key_package"];
+
 impl Default for WhitenoiseInstall {
     fn default() -> Self {
         Self {
@@ -328,6 +344,65 @@ pub fn list_groups(config: &WhitenoiseConfig) -> Result<Vec<VisibleGroup>> {
     parse_groups_output(&text)
 }
 
+pub fn list_relays(config: &WhitenoiseConfig) -> Result<Vec<RelayStatus>> {
+    let wn = resolve_wn(&config.wn_bin);
+    let mut command = Command::new(&wn);
+    add_socket_arg(&mut command, config.resolved_socket().as_deref());
+    command.arg("relays").arg("list").arg("--json");
+    add_account_arg(&mut command, config.account.as_deref());
+
+    let text = checked_output(command, &wn, "relays list")?;
+    parse_relays_output(&text)
+}
+
+pub fn ensure_message_relays(config: &WhitenoiseConfig) -> Result<RelayEnsureSummary> {
+    let relays = dedupe_urls(config.message_relays.clone());
+    if relays.is_empty() {
+        return Ok(RelayEnsureSummary {
+            configured_relays: 0,
+            added_entries: 0,
+            already_present_entries: 0,
+        });
+    }
+
+    let mut current = list_relays(config)?;
+    let mut added_entries = 0;
+    let mut already_present_entries = 0;
+    for relay in &relays {
+        for relay_type in MESSAGE_RELAY_TYPES {
+            if has_relay_type(&current, relay, relay_type) {
+                already_present_entries += 1;
+                continue;
+            }
+            add_relay(config, relay, relay_type)?;
+            added_entries += 1;
+            add_relay_status(&mut current, relay, relay_type);
+        }
+    }
+
+    Ok(RelayEnsureSummary {
+        configured_relays: relays.len(),
+        added_entries,
+        already_present_entries,
+    })
+}
+
+fn add_relay(config: &WhitenoiseConfig, relay: &str, relay_type: &str) -> Result<String> {
+    let wn = resolve_wn(&config.wn_bin);
+    let mut command = Command::new(&wn);
+    add_socket_arg(&mut command, config.resolved_socket().as_deref());
+    command
+        .arg("relays")
+        .arg("add")
+        .arg("--json")
+        .arg("--type")
+        .arg(relay_type)
+        .arg(relay);
+    add_account_arg(&mut command, config.account.as_deref());
+
+    checked_output(command, &wn, "relays add")
+}
+
 pub fn update_profile(
     config: &WhitenoiseConfig,
     name: &str,
@@ -600,6 +675,132 @@ fn parse_groups_output(text: &str) -> Result<Vec<VisibleGroup>> {
     Ok(groups)
 }
 
+fn parse_relays_output(text: &str) -> Result<Vec<RelayStatus>> {
+    let value: Value = serde_json::from_str(text.trim()).context("parsing wn relays list JSON")?;
+    let mut relays = Vec::new();
+    collect_relays(&value, &mut relays);
+
+    let mut merged: Vec<RelayStatus> = Vec::new();
+    for relay in relays {
+        if let Some(existing) = merged.iter_mut().find(|existing| existing.url == relay.url) {
+            for relay_type in relay.types {
+                if !existing
+                    .types
+                    .iter()
+                    .any(|existing| existing == &relay_type)
+                {
+                    existing.types.push(relay_type);
+                }
+            }
+            if existing.status.is_none() {
+                existing.status = relay.status;
+            }
+        } else {
+            merged.push(relay);
+        }
+    }
+    for relay in &mut merged {
+        relay.types.sort();
+    }
+    merged.sort_by(|left, right| left.url.cmp(&right.url));
+    Ok(merged)
+}
+
+fn collect_relays(value: &Value, relays: &mut Vec<RelayStatus>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(relay) = relay_status(value) {
+                relays.push(relay);
+                return;
+            }
+            for value in object.values() {
+                collect_relays(value, relays);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_relays(value, relays);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn relay_status(value: &Value) -> Option<RelayStatus> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    let url = object.get("url").and_then(Value::as_str)?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let types = object
+        .get("types")
+        .and_then(Value::as_array)
+        .map(|types| {
+            types
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|relay_type| !relay_type.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let status = object
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(RelayStatus {
+        url: url.to_string(),
+        types,
+        status,
+    })
+}
+
+fn has_relay_type(relays: &[RelayStatus], relay: &str, relay_type: &str) -> bool {
+    relays.iter().any(|status| {
+        status.url == relay
+            && status
+                .types
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(relay_type))
+    })
+}
+
+fn add_relay_status(relays: &mut Vec<RelayStatus>, relay: &str, relay_type: &str) {
+    if let Some(status) = relays.iter_mut().find(|status| status.url == relay) {
+        if !status
+            .types
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(relay_type))
+        {
+            status.types.push(relay_type.to_string());
+        }
+        return;
+    }
+
+    relays.push(RelayStatus {
+        url: relay.to_string(),
+        types: vec![relay_type.to_string()],
+        status: None,
+    });
+}
+
+fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for url in urls {
+        let url = url.trim();
+        if url.is_empty() {
+            continue;
+        }
+        if !output.iter().any(|existing| existing == url) {
+            output.push(url.to_string());
+        }
+    }
+    output
+}
+
 fn collect_visible_groups(value: &Value, groups: &mut Vec<VisibleGroup>) {
     match value {
         Value::Object(object) => {
@@ -784,5 +985,41 @@ mod tests {
             groups[0].peer_pubkey.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn parses_relay_list_and_merges_types() {
+        let output = r#"{
+          "result": [
+            {
+              "status": "Connected",
+              "types": ["nip65", "inbox"],
+              "url": "wss://relay.example"
+            },
+            {
+              "status": "Connected",
+              "types": ["key_package"],
+              "url": "wss://relay.example"
+            }
+          ]
+        }"#;
+
+        let relays = parse_relays_output(output).unwrap();
+        assert_eq!(relays.len(), 1);
+        assert_eq!(relays[0].url, "wss://relay.example");
+        assert_eq!(
+            relays[0].types,
+            vec![
+                "inbox".to_string(),
+                "key_package".to_string(),
+                "nip65".to_string()
+            ]
+        );
+        assert!(has_relay_type(&relays, "wss://relay.example", "inbox"));
+        assert!(has_relay_type(
+            &relays,
+            "wss://relay.example",
+            "key_package"
+        ));
     }
 }

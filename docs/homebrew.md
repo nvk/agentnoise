@@ -46,6 +46,20 @@ That writes a plaintext throwaway identity under the agentnoise data dir. Later
 Homebrew service starts reuse it because the flag persists in `config.toml`.
 Do not use this for a real identity.
 
+To check or change the machine label shown in White Noise:
+
+```sh
+agentnoise identity status
+agentnoise identity rename agentnoise-mbp
+```
+
+To inspect or repair the White Noise account relays used for message delivery:
+
+```sh
+agentnoise whitenoise relays
+agentnoise whitenoise ensure-relays
+```
+
 ## Release Checklist
 
 1. Tag a release.

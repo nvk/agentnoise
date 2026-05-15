@@ -145,12 +145,17 @@ impl AgentApp {
             return Ok(RouteAction::Reply(reply));
         }
         if self.should_ignore_sender(sender) {
-            return Ok(RouteAction::Ignore);
+            return Ok(RouteAction::Reply(self.sender_not_allowed_text()));
         }
 
         let command = match parse_chat_command(text) {
             Ok(command) => command,
-            Err(_) => return Ok(RouteAction::Ignore),
+            Err(error) => {
+                return Ok(RouteAction::Reply(invalid_command_text(
+                    text,
+                    &format!("{error:#}"),
+                )));
+            }
         };
 
         let session_key = session_key(group_id, sender);
@@ -236,18 +241,22 @@ impl AgentApp {
         sender: Option<&str>,
         message: &str,
     ) -> Result<RouteAction> {
-        if self.should_ignore_bot(sender) || self.should_ignore_sender(sender) {
+        if self.should_ignore_bot(sender) {
             return Ok(RouteAction::Ignore);
+        }
+        if self.should_ignore_sender(sender) {
+            return Ok(RouteAction::Reply(self.sender_not_allowed_text()));
         }
 
         Ok(RouteAction::Reply(message.to_string()))
     }
 
     pub fn route_unsupported_event(&self, event: &MessageEvent) -> Result<RouteAction> {
-        if self.should_ignore_bot(event.sender.as_deref())
-            || self.should_ignore_sender(event.sender.as_deref())
-        {
+        if self.should_ignore_bot(event.sender.as_deref()) {
             return Ok(RouteAction::Ignore);
+        }
+        if self.should_ignore_sender(event.sender.as_deref()) {
+            return Ok(RouteAction::Reply(self.sender_not_allowed_text()));
         }
 
         if event.attachments.is_empty() {
@@ -269,6 +278,25 @@ impl AgentApp {
             attachments::render_record_summary(&record),
             record.id
         )))
+    }
+
+    pub fn route_initial_history_event(&self, event: &MessageEvent) -> Result<RouteAction> {
+        if self.should_ignore_bot(event.sender.as_deref()) {
+            return Ok(RouteAction::Ignore);
+        }
+        if let Some(reply) = self.try_pair_sender(event.sender.as_deref(), &event.text)? {
+            return Ok(RouteAction::Reply(reply));
+        }
+        if self.should_ignore_sender(event.sender.as_deref()) {
+            return Ok(RouteAction::Reply(self.sender_not_allowed_text()));
+        }
+
+        let text = event.text.trim();
+        if text.is_empty() && event.attachments.is_empty() {
+            return Ok(RouteAction::Ignore);
+        }
+
+        Ok(RouteAction::Reply(initial_history_text(text)))
     }
 
     pub fn accepts_current_pairing_pin(&self, sender: Option<&str>, text: &str) -> bool {
@@ -342,6 +370,16 @@ impl AgentApp {
         };
 
         self.auth.should_ignore_sender(sender)
+    }
+
+    fn sender_not_allowed_text(&self) -> String {
+        if self.auth.pairing_required() {
+            "Pairing required. Send the current desktop/SSH PIN as `/pair 123456`, then send `/help`."
+                .to_string()
+        } else {
+            "This sender is not paired with agentnoise. Pair from the desktop or SSH terminal, then send `/help`."
+                .to_string()
+        }
     }
 
     fn try_pair_sender(&self, sender: Option<&str>, text: &str) -> Result<Option<String>> {
@@ -1115,6 +1153,48 @@ fn split_first(input: &str) -> (&str, &str) {
     }
 }
 
+fn invalid_command_text(text: &str, error: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "I received an empty message. Send /help for commands, or try /codex <prompt>."
+            .to_string();
+    }
+
+    if error.contains("not a command") {
+        return format!(
+            "I received: {}\nagentnoise only runs explicit commands. Send /help for commands, or try /codex <prompt>.",
+            preview_text(text)
+        );
+    }
+
+    format!("Command not run: {error}\nSend /help for commands, or try /codex <prompt>.")
+}
+
+fn initial_history_text(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "I saw an older White Noise item while catching up after startup, so I did not run it. Send it again now, or send /help."
+            .to_string();
+    }
+
+    format!(
+        "I saw this while catching up after startup, so I did not run it:\n{}\nSend it again now, or send /help.",
+        preview_text(text)
+    )
+}
+
+fn preview_text(text: &str) -> String {
+    const MAX: usize = 180;
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX {
+        return collapsed;
+    }
+
+    let mut output = collapsed.chars().take(MAX).collect::<String>();
+    output.push_str("...");
+    output
+}
+
 fn help_text() -> String {
     [
         "agentnoise commands",
@@ -1269,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_messages_reply_only_to_allowed_senders() {
+    fn unsupported_messages_reply_with_auth_guidance() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
@@ -1289,7 +1369,64 @@ mod tests {
         assert!(matches!(
             app.route_unsupported_message(Some("stranger"), "Attachment received")
                 .unwrap(),
-            RouteAction::Ignore
+            RouteAction::Reply(reply) if reply.contains("not paired")
+        ));
+    }
+
+    #[test]
+    fn bare_text_gets_helpful_reply_instead_of_ignore() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("group-a"), Some("phone"), "Test")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains("I received: Test")
+                && reply.contains("/codex <prompt>")
+        ));
+        assert!(matches!(
+            app.route_message(Some("group-a"), Some("phone"), "/wat")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains("unknown command")
+                && reply.contains("/help")
+        ));
+    }
+
+    #[test]
+    fn initial_history_gets_catchup_reply_instead_of_silent_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+        let event = MessageEvent {
+            group_id: Some("group-a".to_string()),
+            sender: Some("phone".to_string()),
+            text: "/codex run this".to_string(),
+            unsupported: None,
+            id: Some("event-a".to_string()),
+            trigger: None,
+            is_initial: true,
+            attachments: Vec::new(),
+        };
+
+        assert!(matches!(
+            app.route_initial_history_event(&event).unwrap(),
+            RouteAction::Reply(reply) if reply.contains("catching up after startup")
+                && reply.contains("/codex run this")
         ));
     }
 

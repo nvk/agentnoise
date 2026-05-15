@@ -24,6 +24,19 @@ pub const DEFAULT_PAIRING_RELAYS: &[&str] = &[
     "wss://nos.lol",
 ];
 
+pub const DEFAULT_MESSAGE_RELAYS: &[&str] = &[
+    "wss://index.hzrd149.com",
+    "wss://indexer.coracle.social",
+    "wss://relay.primal.net",
+    "wss://relay.damus.io",
+    "wss://relay.ditto.pub",
+    "wss://nos.lol",
+    "wss://relay.nostr.band",
+    "wss://relay.snort.social",
+    "wss://relay.nostr.bg",
+    "wss://nostr.mom",
+];
+
 #[derive(Debug, Clone)]
 pub struct PublicIdentity {
     pub name: String,
@@ -362,6 +375,20 @@ mod tests {
     #[test]
     fn qr_render_is_nonempty() {
         assert!(!render_qr("nprofile1test").unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn default_message_relays_are_broad_but_bounded() {
+        let relays = DEFAULT_MESSAGE_RELAYS
+            .iter()
+            .map(|relay| (*relay).to_string())
+            .collect::<Vec<_>>();
+
+        assert!(relays.len() >= 10);
+        assert!(relays.len() <= 12);
+        assert!(relays.contains(&"wss://relay.primal.net".to_string()));
+        assert!(relays.contains(&"wss://relay.nostr.band".to_string()));
+        assert_eq!(relays.len(), dedupe_relays(relays.clone()).len());
     }
 
     #[test]

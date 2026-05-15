@@ -1,5 +1,20 @@
 # Release Notes
 
+## 0.1.10
+
+- Added explicit replies for bare text, unknown commands, unauthorized senders,
+  and startup catch-up messages that were previously easy to mistake for a dead
+  daemon.
+- Added three-attempt reply sends with outbound journal details when White
+  Noise send fails.
+- Added `agentnoise identity status` and `agentnoise identity rename <name>` so
+  a machine's published White Noise/Nostr label can be checked or changed
+  without supplying a phone `npub`.
+- Accepted `agentnoise -- help` as a forgiving alias for normal CLI help.
+- Added configured White Noise message relays, reconciled as `nip65`, `inbox`,
+  and `key_package` account relays after login, plus `agentnoise whitenoise
+  relays` and `agentnoise whitenoise ensure-relays` for inspection/repair.
+
 ## 0.1.9
 
 - Added SSH pairing mode with terminal-only PIN display via `agentnoise up

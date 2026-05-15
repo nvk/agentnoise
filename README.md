@@ -22,6 +22,14 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.10** - **Reliability and identity polish.** Bare text, unknown
+commands, unauthorized senders, and startup catch-up events now get explicit
+phone replies instead of silent drops. Added reply send retries,
+`agentnoise identity status`, `agentnoise identity rename <name>`, and support
+for the common typo `agentnoise -- help`. Added configured White Noise message
+relays and `agentnoise whitenoise relays`/`ensure-relays` so message delivery
+can use a broader account relay set instead of only the QR discovery hints.
+
 **v0.1.9** - **Remote pairing polish.** Added SSH pairing mode with
 terminal-only PIN display, `--name` for per-machine White Noise/Nostr profile
 labels, and a remote SSH guide that passes the phone `npub` without moving any
@@ -134,6 +142,8 @@ Useful local diagnostics:
 agentnoise status
 agentnoise doctor
 agentnoise agents
+agentnoise identity status
+agentnoise identity rename agentnoise-mbp
 agentnoise fake-phone plan
 ```
 
@@ -150,6 +160,14 @@ machine creates and stores its own desktop identity locally. Use a distinct
 `--name` per machine so White Noise can show `agentnoise-mbp`,
 `agentnoise-linuxbox`, or whatever label makes sense.
 
+After setup, check or change the published machine label without passing any
+phone identity:
+
+```sh
+agentnoise identity status
+agentnoise identity rename agentnoise-linuxbox
+```
+
 The service is expected to start even before the White Noise chat exists. It
 waits, keeps showing a rotating PIN while pairing is required, and discovers
 the phone-created chat automatically. During first pairing it also reads a small
@@ -165,6 +183,33 @@ target/release/agentnoise up
 
 The QR contains the desktop `nprofile`/`npub` plus relay hints. It never exposes
 the desktop `nsec`.
+
+Pairing relay hints are for discovery. Message delivery uses the White Noise
+account relay list. agentnoise now keeps a broader message relay list in config
+and reconciles it through `wn relays add` after login:
+
+```toml
+[whitenoise]
+message_relays = [
+  "wss://index.hzrd149.com",
+  "wss://indexer.coracle.social",
+  "wss://relay.primal.net",
+  "wss://relay.damus.io",
+  "wss://relay.ditto.pub",
+  "wss://nos.lol",
+  "wss://relay.nostr.band",
+  "wss://relay.snort.social",
+  "wss://relay.nostr.bg",
+  "wss://nostr.mom",
+]
+```
+
+Inspect or apply those relays manually:
+
+```sh
+agentnoise whitenoise relays
+agentnoise whitenoise ensure-relays
+```
 
 ### Development Burner Identity
 
@@ -364,6 +409,10 @@ for the session, `/cd ..` moves within that selected repo, and plain `/codex` or
 enabled. `/wiki` follows the local Codex `codex-wiki` convention by prefixing
 `@wiki`; `/claude-wiki` sends a `wiki ...` prompt for Claude installations with
 the LLM Wiki instructions/plugin available.
+
+Plain text and unknown slash commands are not executed, but they are answered.
+The reply points the user at `/help` and `/codex <prompt>` so a mistyped phone
+message does not look like a dead daemon.
 
 Codex and Claude JSON streams are converted into occasional progress messages
 while a job runs. The default interval is conservative

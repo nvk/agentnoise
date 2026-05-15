@@ -72,13 +72,22 @@ Give each computer a unique published profile name:
 ```sh
 agentnoise up --name agentnoise-mbp
 agentnoise up --phone npub1... --name agentnoise-linuxbox
+agentnoise identity status
+agentnoise identity rename agentnoise-freebsd
 ```
 
 The display name is saved in `config.toml` and published through the White
 Noise/Nostr profile, so the phone can tell multiple agentnoise desktops apart.
+`identity status` uses the public account already saved in config when
+available, so checking the label does not require passing the phone `npub` or
+reading the desktop `nsec`. `identity rename <name>` changes the configured
+label and publishes it; add `--no-publish` to save only.
 
 The QR encodes a Nostr `nprofile`: the desktop `npub` plus relay hints. It is
 for phone discovery only and never contains the desktop `nsec`.
+
+Pairing relay hints are only discovery hints. Message delivery uses the White
+Noise account relay list, which agentnoise can reconcile after login.
 
 Use a dedicated desktop identity. Do not reuse the phone identity secret.
 
@@ -145,10 +154,27 @@ pairing_relays = [
     "wss://relay.ditto.pub",
     "wss://nos.lol",
 ]
+message_relays = [
+    "wss://index.hzrd149.com",
+    "wss://indexer.coracle.social",
+    "wss://relay.primal.net",
+    "wss://relay.damus.io",
+    "wss://relay.ditto.pub",
+    "wss://nos.lol",
+    "wss://relay.nostr.band",
+    "wss://relay.snort.social",
+    "wss://relay.nostr.bg",
+    "wss://nostr.mom",
+]
 keychain_service = "agentnoise"
 keychain_item = "whitenoise-nsec"
 login_relay = "wss://relay.example" # optional
 ```
+
+Run `agentnoise identity status` to see configured pairing and message relays.
+Run `agentnoise whitenoise relays` to see the current White Noise account relay
+state, and `agentnoise whitenoise ensure-relays` to add the configured
+`message_relays` as `nip65`, `inbox`, and `key_package` relays.
 
 To test the path manually:
 

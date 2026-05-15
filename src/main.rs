@@ -257,6 +257,10 @@ struct ServiceArgs {
 enum WhitenoiseCommand {
     #[command(about = "Show resolved White Noise CLI paths and daemon state")]
     Status,
+    #[command(about = "List White Noise account relays used for message delivery")]
+    Relays,
+    #[command(about = "Add configured message relays to the White Noise account")]
+    EnsureRelays,
     #[command(about = "Print the resolved wn path")]
     Path,
     #[command(about = "Install wn and wnd under agentnoise's managed data directory")]
@@ -321,6 +325,14 @@ enum LaunchdCommand {
 
 #[derive(Debug, Subcommand)]
 enum IdentityCommand {
+    #[command(about = "Show the configured desktop identity and published profile labels")]
+    Status,
+    #[command(about = "Change the configured White Noise/Nostr profile name for this machine")]
+    Rename {
+        name: String,
+        #[arg(long, help = "Save config only; publish on the next setup/up run")]
+        no_publish: bool,
+    },
     #[command(
         about = "Generate one or more Nostr identities and store nsecs in the configured identity store"
     )]
@@ -391,7 +403,7 @@ enum ServiceCommand {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalized_cli_args());
     let config_path = Config::path_or_default(cli.config);
 
     match cli.command {
@@ -561,6 +573,21 @@ fn main() -> Result<()> {
                 WhitenoiseCommand::Status => {
                     println!("{}", whitenoise_cli::render_status(&config.whitenoise));
                 }
+                WhitenoiseCommand::Relays => {
+                    print_whitenoise_relays(&config)?;
+                }
+                WhitenoiseCommand::EnsureRelays => {
+                    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
+                        eprintln!("agentnoise: restored White Noise login from configured nsec");
+                    }
+                    let summary = whitenoise_cli::ensure_message_relays(&config.whitenoise)?;
+                    println!("configured relays: {}", summary.configured_relays);
+                    println!("added relay entries: {}", summary.added_entries);
+                    println!(
+                        "already present entries: {}",
+                        summary.already_present_entries
+                    );
+                }
                 WhitenoiseCommand::Path => {
                     println!(
                         "{}",
@@ -608,8 +635,14 @@ fn main() -> Result<()> {
             }
         }
         Command::Identity(args) => {
-            let config = Config::load_or_template(&config_path)?;
+            let mut config = Config::load_or_template(&config_path)?;
             match args.command {
+                IdentityCommand::Status => {
+                    print_identity_status(&config);
+                }
+                IdentityCommand::Rename { name, no_publish } => {
+                    rename_identity_profile(&config_path, &mut config, &name, no_publish)?;
+                }
                 IdentityCommand::Create { name, count, force } => {
                     let identities =
                         identity::create_identities(&config.whitenoise, &name, count, force)?;
@@ -684,6 +717,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn normalized_cli_args() -> Vec<String> {
+    let mut args = std::env::args().collect::<Vec<_>>();
+    if args.len() >= 3 && args[1] == "--" {
+        args.remove(1);
+    }
+    args
+}
+
 fn print_setup_result(result: &SetupResult) {
     println!("agentnoise setup complete");
     println!("config: {}", result.config_path.display());
@@ -713,6 +754,12 @@ fn print_setup_result(result: &SetupResult) {
     if result.key_package_published {
         println!("key package: published");
     }
+    if result.message_relay_entries_added > 0 {
+        println!(
+            "message relay entries added: {}",
+            result.message_relay_entries_added
+        );
+    }
     if let Some(path) = &result.dev_burner_nsec_file {
         println!("dev burner nsec: {}", path.display());
         println!("warning: development-only plaintext secret; do not use for a real identity");
@@ -737,6 +784,126 @@ fn print_setup_result(result: &SetupResult) {
         println!("If agentnoise is already running, it will discover the chat automatically.");
         println!("Otherwise run: agentnoise up");
     }
+}
+
+fn print_identity_status(config: &Config) {
+    println!("identity: {}", identity::DEFAULT_IDENTITY_NAME);
+    println!("profile name: {}", config.whitenoise.profile_name);
+    println!(
+        "profile display: {}",
+        config.whitenoise.profile_display_name
+    );
+    println!("profile about: {}", config.whitenoise.profile_about);
+    println!(
+        "store: {}",
+        identity::identity_secret_label(&config.whitenoise, identity::DEFAULT_IDENTITY_NAME)
+    );
+    if let Some(npub) = config
+        .whitenoise
+        .account
+        .as_deref()
+        .or(config.whitenoise.bot_npub.as_deref())
+    {
+        println!("npub: {npub}");
+    } else {
+        println!("npub: unavailable; run `agentnoise up` once to create the desktop identity");
+    }
+    let groups = config.whitenoise.control_group_ids();
+    println!("groups: {}", groups.len());
+    println!(
+        "allowed senders: {}",
+        config.whitenoise.allowed_senders.len()
+    );
+    println!("pairing relays:");
+    for relay in identity::pairing_relays(&config.whitenoise, &[]) {
+        println!("- {relay}");
+    }
+    println!("message relays:");
+    for relay in &config.whitenoise.message_relays {
+        println!("- {relay}");
+    }
+}
+
+fn rename_identity_profile(
+    config_path: &Path,
+    config: &mut Config,
+    name: &str,
+    no_publish: bool,
+) -> Result<()> {
+    let display_name = name.trim();
+    if display_name.is_empty() {
+        bail!("profile name cannot be empty");
+    }
+
+    config.whitenoise.profile_name = setup::normalize_profile_name(display_name);
+    config.whitenoise.profile_display_name = display_name.to_string();
+    config.save(config_path)?;
+
+    println!("profile name: {}", config.whitenoise.profile_name);
+    println!(
+        "profile display: {}",
+        config.whitenoise.profile_display_name
+    );
+    if no_publish {
+        println!("profile: saved; next agentnoise setup/up publishes it");
+        return Ok(());
+    }
+
+    if config.whitenoise.account.is_none()
+        && let Ok(public) =
+            identity::load_public_identity(&config.whitenoise, identity::DEFAULT_IDENTITY_NAME)
+    {
+        config.whitenoise.account = Some(public.npub.clone());
+        config.whitenoise.bot_npub = Some(public.npub);
+        config.save(config_path)?;
+    }
+
+    match publish_configured_profile(config) {
+        Ok(()) => println!("profile: published"),
+        Err(error) => {
+            println!("profile: saved; publish failed: {error:#}");
+            println!("run `agentnoise up` after fixing White Noise login to publish it");
+        }
+    }
+
+    Ok(())
+}
+
+fn publish_configured_profile(config: &Config) -> Result<()> {
+    let _daemon = whitenoise_cli::ensure_daemon(&config.whitenoise)?;
+    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
+        eprintln!("agentnoise: restored White Noise login from configured nsec");
+    }
+    whitenoise_cli::update_profile(
+        &config.whitenoise,
+        &config.whitenoise.profile_name,
+        &config.whitenoise.profile_display_name,
+        &config.whitenoise.profile_about,
+    )?;
+    Ok(())
+}
+
+fn print_whitenoise_relays(config: &Config) -> Result<()> {
+    let relays = whitenoise_cli::list_relays(&config.whitenoise)?;
+    println!("configured message relays:");
+    for relay in &config.whitenoise.message_relays {
+        println!("- {relay}");
+    }
+    println!("White Noise account relays:");
+    if relays.is_empty() {
+        println!("- none");
+    } else {
+        for relay in relays {
+            let types = if relay.types.is_empty() {
+                "-".to_string()
+            } else {
+                relay.types.join(",")
+            };
+            let status = relay.status.unwrap_or_else(|| "unknown".to_string());
+            println!("- {} [{}] {}", relay.url, types, status);
+        }
+    }
+    Ok(())
 }
 
 fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
@@ -1121,6 +1288,18 @@ fn run_listener(
     if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
         eprintln!("agentnoise: restored White Noise login from configured nsec");
     }
+    match whitenoise_cli::ensure_message_relays(&config.whitenoise) {
+        Ok(summary) if summary.added_entries > 0 => {
+            eprintln!(
+                "agentnoise: added {} White Noise message relay entries",
+                summary.added_entries
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("agentnoise: failed to ensure White Noise message relays: {error:#}");
+        }
+    }
     if let Some(pairing) = pairing.clone() {
         spawn_pairing_pin_display(pairing);
     }
@@ -1312,6 +1491,15 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                 let process_initial_pairing = event.unsupported.is_none()
                     && app.accepts_current_pairing_pin(event.sender.as_deref(), &event.text);
                 if ignore_initial && event.is_initial && !process_initial_pairing {
+                    match app.route_initial_history_event(&event)? {
+                        RouteAction::Ignore => {}
+                        RouteAction::Reply(reply) => {
+                            send_reply_recorded(&wn, &event_journal, group_id, &reply)?;
+                        }
+                        RouteAction::NewSession(_)
+                        | RouteAction::ResumeSession(_)
+                        | RouteAction::Run(_) => {}
+                    }
                     continue;
                 }
 
@@ -1489,15 +1677,41 @@ fn send_reply_recorded(
     group_id: &str,
     text: &str,
 ) -> Result<()> {
-    let result = wn.send_reply_to(group_id, text);
-    let ok = result.is_ok();
-    let detail = result.as_ref().err().map(|error| format!("{error:#}"));
+    const ATTEMPTS: usize = 3;
+
+    let mut last_error = None;
+    for attempt in 1..=ATTEMPTS {
+        match wn.send_reply_to(group_id, text) {
+            Ok(()) => {
+                let detail = (attempt > 1).then(|| format!("sent after {attempt} attempts"));
+                if let Ok(mut journal) = event_journal.lock()
+                    && let Err(error) = journal.record_outbound(group_id, text, true, detail)
+                {
+                    eprintln!("agentnoise: failed to record outbound event: {error:#}");
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if attempt < ATTEMPTS {
+                    eprintln!(
+                        "agentnoise: send reply failed, retrying ({attempt}/{ATTEMPTS}): {detail}"
+                    );
+                    thread::sleep(Duration::from_millis(500 * attempt as u64));
+                }
+                last_error = Some(detail);
+            }
+        }
+    }
+
+    let detail = last_error.unwrap_or_else(|| "unknown send failure".to_string());
+    let journal_detail = Some(format!("failed after {ATTEMPTS} attempts: {detail}"));
     if let Ok(mut journal) = event_journal.lock()
-        && let Err(error) = journal.record_outbound(group_id, text, ok, detail)
+        && let Err(error) = journal.record_outbound(group_id, text, false, journal_detail)
     {
         eprintln!("agentnoise: failed to record outbound event: {error:#}");
     }
-    result
+    bail!("failed to send reply after {ATTEMPTS} attempts: {detail}")
 }
 
 fn listener_subscribe_limit(config: &Config) -> u32 {

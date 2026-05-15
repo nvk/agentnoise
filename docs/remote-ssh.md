@@ -53,6 +53,30 @@ agentnoise up --ssh --phone npub1... --name agentnoise-freebsd
 The display name is saved in `config.toml` and published through the White
 Noise/Nostr profile. The normalized Nostr profile `name` is also saved.
 
+After setup, inspect or rename the current desktop identity without passing a
+phone `npub`:
+
+```sh
+agentnoise identity status
+agentnoise identity rename agentnoise-labbox
+```
+
+`identity status` reads the stored public account from config when available,
+so it does not need the desktop `nsec`. `identity rename` saves the new machine
+label and publishes it through White Noise; use `--no-publish` to save config
+only and publish on the next `agentnoise up`.
+
+## Message Relays
+
+The QR relay hints only help the phone find the desktop identity. Actual
+message delivery uses the White Noise account relay list. Check or repair that
+state from SSH with:
+
+```sh
+agentnoise whitenoise relays
+agentnoise whitenoise ensure-relays
+```
+
 ## Secret Handling
 
 Do not pass an `nsec` over SSH for normal setup. If you need to import an

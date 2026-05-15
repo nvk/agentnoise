@@ -39,6 +39,8 @@ pub struct WhitenoiseConfig {
     pub login_relay: Option<String>,
     #[serde(default = "default_pairing_relays")]
     pub pairing_relays: Vec<String>,
+    #[serde(default = "default_message_relays")]
+    pub message_relays: Vec<String>,
     #[serde(default = "default_keychain_service")]
     pub keychain_service: String,
     #[serde(default = "default_keychain_item")]
@@ -191,6 +193,7 @@ impl Config {
                 dev_burner_nsec_file: None,
                 login_relay: None,
                 pairing_relays: default_pairing_relays(),
+                message_relays: default_message_relays(),
                 keychain_service: default_keychain_service(),
                 keychain_item: default_keychain_item(),
                 subscribe_limit: default_subscribe_limit(),
@@ -410,6 +413,13 @@ fn default_keychain_item() -> String {
 
 fn default_pairing_relays() -> Vec<String> {
     crate::identity::DEFAULT_PAIRING_RELAYS
+        .iter()
+        .map(|relay| (*relay).to_string())
+        .collect()
+}
+
+fn default_message_relays() -> Vec<String> {
+    crate::identity::DEFAULT_MESSAGE_RELAYS
         .iter()
         .map(|relay| (*relay).to_string())
         .collect()

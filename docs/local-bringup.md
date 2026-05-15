@@ -50,6 +50,24 @@ Use a distinct `--name` for every computer, for example `agentnoise-mbp` or
 White Noise/Nostr profile so the phone can tell multiple agentnoise identities
 apart.
 
+To inspect or rename the current machine later:
+
+```sh
+agentnoise identity status
+agentnoise identity rename agentnoise-mbp
+```
+
+Use `agentnoise identity rename <name> --no-publish` when you only want to edit
+config and let the next `agentnoise up` publish the profile.
+
+If messages are slow or missing, inspect the actual White Noise account relay
+state, not just the QR pairing hints:
+
+```sh
+agentnoise whitenoise relays
+agentnoise whitenoise ensure-relays
+```
+
 ## Remote SSH Pairing
 
 When pairing over SSH, pass only the phone `npub` and keep the PIN in the SSH
