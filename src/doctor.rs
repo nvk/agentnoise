@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::{Config, RunnerLauncher};
 use crate::paths::{expand_tilde, find_on_path};
 use crate::whitenoise_cli;
 
@@ -21,10 +21,21 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
     let mut checks = vec![
         path_check("config", config_path),
         wn_command_check(&config.whitenoise.wn_bin),
-        command_check("bondage", &config.runner.bondage_bin),
+    ];
+    match config.runner.launcher {
+        RunnerLauncher::Bondage => {
+            checks.push(command_check("bondage", &config.runner.bondage_bin))
+        }
+        RunnerLauncher::Direct => checks.push(Check {
+            level: Level::Warn,
+            name: "agent launcher".to_string(),
+            detail: "direct; bondage local policy boundary is disabled".to_string(),
+        }),
+    }
+    checks.extend([
         command_check("codex", &config.agents.codex.bin),
         command_check("claude", &config.agents.claude.bin),
-    ];
+    ]);
     if config.agents.hermes.enabled {
         checks.push(command_check("hermes", &config.agents.hermes.bin));
     }
@@ -35,8 +46,10 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
             detail: warning,
         });
     }
+    if config.runner.launcher == RunnerLauncher::Bondage {
+        checks.push(path_check("bondage conf", &config.resolved_bondage_conf()));
+    }
     checks.extend([
-        path_check("bondage conf", &config.resolved_bondage_conf()),
         path_check("data dir", &config.resolved_data_dir()),
         path_check("log dir", &config.resolved_log_dir()),
     ]);
@@ -250,5 +263,19 @@ mod tests {
 
         assert!(output.contains("generic profile `codex`"));
         assert!(output.contains("codex-agentnoise"));
+    }
+
+    #[test]
+    fn doctor_skips_bondage_checks_in_direct_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+
+        let output = render_doctor(&temp.path().join("config.toml"), &config);
+
+        assert!(output.contains("[warn] agent launcher: direct"));
+        assert!(!output.contains("bondage conf"));
     }
 }

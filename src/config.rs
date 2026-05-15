@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{default_config_path, default_data_dir, default_log_dir, expand_tilde};
@@ -71,6 +73,8 @@ pub struct WhitenoiseConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerConfig {
+    #[serde(default)]
+    pub launcher: RunnerLauncher,
     #[serde(default = "default_bondage_bin")]
     pub bondage_bin: String,
     #[serde(default = "default_bondage_conf")]
@@ -91,6 +95,24 @@ pub struct RunnerConfig {
     pub worktree_dir: String,
     #[serde(default)]
     pub allow_generic_agent_profiles: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum RunnerLauncher {
+    #[default]
+    Bondage,
+    Direct,
+}
+
+impl fmt::Display for RunnerLauncher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Bondage => "bondage",
+            Self::Direct => "direct",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -147,7 +169,7 @@ impl Config {
         }
     }
 
-    pub fn write_template(path: &Path, force: bool) -> Result<()> {
+    pub fn write_template(path: &Path, force: bool, launcher: RunnerLauncher) -> Result<()> {
         if path.exists() && !force {
             bail!(
                 "{} already exists; use --force to overwrite",
@@ -157,8 +179,13 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        fs::write(path, Self::template_toml()?)
-            .with_context(|| format!("writing {}", path.display()))?;
+        let mut config = Self::template();
+        config.runner.launcher = launcher;
+        fs::write(
+            path,
+            toml::to_string_pretty(&config).context("serializing template config")?,
+        )
+        .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
@@ -211,6 +238,7 @@ impl Config {
                 profile_about: default_profile_about(),
             },
             runner: RunnerConfig {
+                launcher: RunnerLauncher::Bondage,
                 bondage_bin: default_bondage_bin(),
                 bondage_conf: default_bondage_conf(),
                 data_dir: default_data_dir_string(),
@@ -304,6 +332,9 @@ impl Config {
 
     pub fn effective_agent_profile(&self, agent: AgentKind) -> String {
         let configured = self.agent(agent).profile.trim();
+        if self.runner.launcher == RunnerLauncher::Direct {
+            return configured.to_string();
+        }
         if !self.runner.allow_generic_agent_profiles && is_generic_agent_profile(agent, configured)
         {
             return recommended_agentnoise_profile(agent).to_string();
@@ -317,6 +348,9 @@ impl Config {
             .filter_map(|agent| {
                 let config = self.agent(agent);
                 if !config.enabled {
+                    return None;
+                }
+                if self.runner.launcher == RunnerLauncher::Direct {
                     return None;
                 }
                 let configured = config.profile.trim();
@@ -621,6 +655,7 @@ path = "/tmp"
         assert!(!config.agents.hermes.enabled);
         assert_eq!(config.agents.hermes.profile, "hermes-agentnoise");
         assert_eq!(config.agents.hermes.bin, "hermes");
+        assert_eq!(config.runner.launcher, RunnerLauncher::Bondage);
         assert_eq!(config.whitenoise.profile_name, "agentnoise");
         assert_eq!(config.whitenoise.profile_display_name, "agentnoise desktop");
     }
@@ -636,6 +671,16 @@ path = "/tmp"
         assert_eq!(config.agent_profile_warnings().len(), 1);
 
         config.runner.allow_generic_agent_profiles = true;
+        assert_eq!(config.effective_agent_profile(AgentKind::Codex), "codex");
+        assert!(config.agent_profile_warnings().is_empty());
+    }
+
+    #[test]
+    fn direct_launcher_does_not_rewrite_agent_profiles() {
+        let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Direct;
+        config.agents.codex.profile = "codex".to_string();
+
         assert_eq!(config.effective_agent_profile(AgentKind::Codex), "codex");
         assert!(config.agent_profile_warnings().is_empty());
     }

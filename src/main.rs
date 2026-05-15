@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use agentnoise::app::{AgentApp, NewSessionRequest, RouteAction};
 use agentnoise::auth::PairingGate;
-use agentnoise::config::Config;
+use agentnoise::config::{Config, RunnerLauncher};
 use agentnoise::desktop_alert;
 use agentnoise::doctor::render_doctor;
 use agentnoise::events::EventJournal;
@@ -113,6 +113,11 @@ enum Command {
 struct InitArgs {
     #[arg(long)]
     force: bool,
+    #[arg(
+        long,
+        help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
+    )]
+    direct_agents: bool,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +140,11 @@ struct SetupArgs {
         help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
     )]
     dev_burner_nsec: bool,
+    #[arg(
+        long,
+        help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
+    )]
+    direct_agents: bool,
 }
 
 #[derive(Debug, Args)]
@@ -161,6 +171,11 @@ struct UpArgs {
         help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
     )]
     dev_burner_nsec: bool,
+    #[arg(
+        long,
+        help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
+    )]
+    direct_agents: bool,
     #[arg(
         long,
         help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
@@ -221,6 +236,10 @@ struct ConfigArgs {
 enum ConfigCommand {
     Path,
     PrintTemplate,
+    #[command(about = "Set the local agent launcher: bondage or direct")]
+    Launcher {
+        launcher: RunnerLauncher,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -408,7 +427,15 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => {
-            Config::write_template(&config_path, args.force)?;
+            Config::write_template(
+                &config_path,
+                args.force,
+                if args.direct_agents {
+                    RunnerLauncher::Direct
+                } else {
+                    RunnerLauncher::Bondage
+                },
+            )?;
             println!("wrote {}", config_path.display());
         }
         Command::Setup(args) => {
@@ -421,6 +448,7 @@ fn main() -> Result<()> {
                     force_identity: args.force_identity,
                     relays: args.relays,
                     dev_burner_nsec: args.dev_burner_nsec,
+                    direct_agents: args.direct_agents,
                     start_daemon: true,
                 },
             )?;
@@ -478,6 +506,12 @@ fn main() -> Result<()> {
         Command::Config(args) => match args.command {
             ConfigCommand::Path => println!("{}", config_path.display()),
             ConfigCommand::PrintTemplate => println!("{}", Config::template_toml()?),
+            ConfigCommand::Launcher { launcher } => {
+                let mut config = Config::load_or_template(&config_path)?;
+                config.runner.launcher = launcher;
+                config.save(&config_path)?;
+                println!("agent launcher: {}", config.runner.launcher);
+            }
         },
         Command::Parse { message } => {
             let command = agentnoise::chat::parse_chat_command(&message)?;
@@ -1008,6 +1042,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             force_identity: false,
             relays: args.relays.clone(),
             dev_burner_nsec: args.dev_burner_nsec,
+            direct_agents: args.direct_agents,
             start_daemon: !args.no_daemon,
         },
     )?;
@@ -1099,6 +1134,7 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
         || args.name.is_some()
         || !args.relays.is_empty()
         || args.dev_burner_nsec
+        || args.direct_agents
         || args.ssh
         || !config_path.exists()
     {

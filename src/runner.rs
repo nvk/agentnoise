@@ -14,7 +14,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{Config, RunnerLauncher};
 use crate::jobs::{JobRecord, JobStore};
 use crate::progress::{self, ProgressEvent};
 use crate::text::format_chat_text;
@@ -274,18 +274,9 @@ impl Runner {
             bail!("{} is disabled in config", request.agent);
         }
 
-        let bondage_conf = self.config.resolved_bondage_conf().display().to_string();
-        let agent_profile = self.config.effective_agent_profile(request.agent);
         let prompt = agentnoise_prompt(request);
-        let mut args = vec![
-            "exec".to_string(),
-            agent_profile,
-            bondage_conf,
-            "--".to_string(),
-            agent.bin.clone(),
-        ];
-
-        match (request.agent, request.resume_session.as_deref()) {
+        let mut args = Vec::new();
+        let cwd = match (request.agent, request.resume_session.as_deref()) {
             (AgentKind::Codex, Some(session)) => {
                 args.extend([
                     "exec".to_string(),
@@ -294,6 +285,7 @@ impl Runner {
                     session.to_string(),
                     prompt,
                 ]);
+                None
             }
             (AgentKind::Codex, None) => {
                 let (_repo_root, workdir) = self.workspace_paths(request)?;
@@ -304,6 +296,7 @@ impl Runner {
                     workdir.display().to_string(),
                     prompt,
                 ]);
+                Some(workdir)
             }
             (AgentKind::Claude, Some(session)) => {
                 args.extend([
@@ -314,6 +307,7 @@ impl Runner {
                     session.to_string(),
                     prompt,
                 ]);
+                None
             }
             (AgentKind::Claude, None) => {
                 let (repo_root, workdir) = self.workspace_paths(request)?;
@@ -332,11 +326,7 @@ impl Runner {
                     repo_root.display().to_string(),
                     prompt,
                 ]);
-                return Ok(CommandPlan {
-                    program: self.config.runner.bondage_bin.clone(),
-                    args,
-                    cwd: Some(workdir),
-                });
+                Some(workdir)
             }
             (AgentKind::Hermes, Some(session)) => {
                 args.extend([
@@ -351,6 +341,7 @@ impl Runner {
                     "-q".to_string(),
                     prompt,
                 ]);
+                None
             }
             (AgentKind::Hermes, None) => {
                 let (_repo_root, workdir) = self.workspace_paths(request)?;
@@ -364,22 +355,33 @@ impl Runner {
                     "-q".to_string(),
                     prompt,
                 ]);
-                return Ok(CommandPlan {
-                    program: self.config.runner.bondage_bin.clone(),
-                    args,
-                    cwd: Some(workdir),
-                });
+                Some(workdir)
             }
+        };
+
+        if self.config.runner.launcher == RunnerLauncher::Direct {
+            return Ok(CommandPlan {
+                program: agent.bin.clone(),
+                args,
+                cwd,
+            });
         }
+
+        let bondage_conf = self.config.resolved_bondage_conf().display().to_string();
+        let agent_profile = self.config.effective_agent_profile(request.agent);
+        let mut wrapped_args = vec![
+            "exec".to_string(),
+            agent_profile,
+            bondage_conf,
+            "--".to_string(),
+            agent.bin.clone(),
+        ];
+        wrapped_args.extend(args);
 
         Ok(CommandPlan {
             program: self.config.runner.bondage_bin.clone(),
-            args,
-            cwd: if request.resume_session.is_none() {
-                Some(self.workspace_paths(request)?.1)
-            } else {
-                None
-            },
+            args: wrapped_args,
+            cwd,
         })
     }
 
@@ -831,6 +833,34 @@ mod tests {
         assert!(plan.args.contains(&"-C".to_string()));
         assert!(plan.args.contains(&workdir.display().to_string()));
         assert_eq!(plan.cwd.as_deref(), Some(workdir.as_path()));
+    }
+
+    #[test]
+    fn direct_launcher_runs_raw_codex_without_bondage() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let plan = runner
+            .build_command(&AgentRequest::new(AgentKind::Codex, "work", "hello"))
+            .unwrap();
+
+        assert_eq!(plan.program, "codex");
+        assert_eq!(plan.args[0], "exec");
+        assert!(!plan.args.contains(&"codex-agentnoise".to_string()));
+        assert!(!plan.args.contains(&"bondage".to_string()));
+        assert!(plan.args.contains(&"--json".to_string()));
+        assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
+        let repo_path = repo.path().canonicalize().unwrap();
+        assert_eq!(plan.cwd.as_deref(), Some(repo_path.as_path()));
     }
 
     #[test]

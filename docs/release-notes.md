@@ -1,5 +1,15 @@
 # Release Notes
 
+## Unreleased
+
+- Added `runner.launcher = "direct"` for installs that only have raw Codex,
+  Claude, or Hermes CLIs and do not want to configure `bondage`.
+- Added `--direct-agents` to `agentnoise init`, `agentnoise setup`, and
+  `agentnoise up` so first-run setup can persist direct mode.
+- Added `agentnoise config launcher <bondage|direct>` for existing configs.
+- Kept `bondage` as the default launcher and updated `doctor`, `status`, and
+  `agents` output to make the active launcher visible.
+
 ## 0.1.13
 
 - Normalized `wn whoami --json` login detection across hex pubkeys and

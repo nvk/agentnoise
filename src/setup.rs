@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{Config, WhitenoiseConfig};
+use crate::config::{Config, RunnerLauncher, WhitenoiseConfig};
 use crate::identity::{self, DEFAULT_IDENTITY_NAME, PairingPayload, PublicIdentity};
 use crate::paths::expand_tilde;
 use crate::whitenoise_cli;
@@ -18,6 +18,7 @@ pub struct SetupOptions {
     pub force_identity: bool,
     pub relays: Vec<String>,
     pub dev_burner_nsec: bool,
+    pub direct_agents: bool,
     pub start_daemon: bool,
 }
 
@@ -62,6 +63,9 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         config.whitenoise.use_keychain_nsec = false;
     } else if !config.whitenoise.dev_burner_nsec {
         config.whitenoise.use_keychain_nsec = true;
+    }
+    if options.direct_agents {
+        config.runner.launcher = RunnerLauncher::Direct;
     }
     if let Some(name) = options
         .profile_name

@@ -11,6 +11,40 @@ cargo build --release
 export AGENTNOISE="$PWD/target/release/agentnoise"
 ```
 
+## Agent Launcher
+
+The recommended path uses `bondage` profiles named `codex-agentnoise` and
+`claude-agentnoise` so phone-triggered jobs run behind a local policy boundary.
+
+If you only have raw Codex or Claude installed, initialize direct mode before
+pairing:
+
+```sh
+"$AGENTNOISE" init --direct-agents
+```
+
+Or set it during the first setup run:
+
+```sh
+"$AGENTNOISE" up --direct-agents --no-listen
+```
+
+This persists `runner.launcher = "direct"` in config. Direct mode skips
+`bondage` and runs the raw agent CLIs with structured argv. Confirm the active
+mode with:
+
+```sh
+"$AGENTNOISE" doctor
+"$AGENTNOISE" agents
+```
+
+Existing configs can switch without re-running setup:
+
+```sh
+"$AGENTNOISE" config launcher direct
+"$AGENTNOISE" config launcher bondage
+```
+
 ## Pair
 
 If you know the phone White Noise `npub`:
@@ -142,6 +176,9 @@ runs: `codex-agentnoise` and `claude-agentnoise`. Older configs that name the
 generic `codex` or `claude` profiles are mapped to the matching
 `*-agentnoise` profile unless `runner.allow_generic_agent_profiles = true` is
 set.
+
+When `runner.launcher = "direct"`, the configured profile names are unused and
+Hermes runs directly as `hermes chat ...`.
 
 ## Permission Note
 

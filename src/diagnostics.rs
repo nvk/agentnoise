@@ -13,6 +13,7 @@ use crate::whitenoise_cli;
 pub struct StatusReport {
     pub engine_running: bool,
     pub runtime: Option<runtime::RuntimeStatus>,
+    pub agent_launcher: String,
     pub groups: Vec<String>,
     pub event_summary: EventSummary,
     pub recent_jobs: usize,
@@ -51,6 +52,7 @@ pub fn status_report(config: &Config) -> Result<StatusReport> {
     Ok(StatusReport {
         engine_running: runtime::engine_is_running(config)?,
         runtime: runtime::read_status(config)?,
+        agent_launcher: config.runner.launcher.to_string(),
         groups: config.whitenoise.control_group_ids(),
         event_summary: summarize_event_log(&config.resolved_event_log_path())?,
         recent_jobs: recent_jobs.len(),
@@ -74,6 +76,7 @@ pub fn render_status_report(config_path: &Path, config: &Config) -> String {
                         "stopped"
                     }
                 ),
+                format!("agent launcher: {}", report.agent_launcher),
                 format!("groups: {}", report.groups.len()),
                 format!(
                     "jobs: {} recent, {} active",

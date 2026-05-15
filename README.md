@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**Unreleased** - **Optional direct agent launcher.** `bondage` remains the
+default and recommended local policy boundary, but first-run commands can now
+opt into `runner.launcher = "direct"` with `--direct-agents`. Direct mode runs
+raw `codex`, `claude`, or optional `hermes` CLIs with structured argv and skips
+the `bondage` binary/config checks in `agentnoise doctor`.
+
 **v0.1.13** - **White Noise login detection fix.** `wn whoami` reports logged
 in accounts as hex pubkeys while agentnoise config stores the desktop account
 as `npub`. The startup check now normalizes both forms, so agentnoise only
@@ -72,7 +78,7 @@ starting a second listener, and disposable development identities can use
 
 ## What It Does
 
-agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through [`bondage`](https://agentbondage.org/), stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
+agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher, [`bondage`](https://agentbondage.org/) by default or direct raw CLIs by explicit opt-in, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The most tested target is macOS. Linux and FreeBSD service templates are
 included and should be treated as newer paths.
@@ -80,9 +86,9 @@ included and should be treated as newer paths.
 ## Requirements
 
 - Rust toolchain for building from source
-- `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
+- recommended/default: `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
 - Codex CLI and Claude Code CLI
-- optional: Hermes Agent CLI plus a dedicated `bondage` profile
+- optional: Hermes Agent CLI plus a dedicated `bondage` profile, or direct Hermes mode
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
 - OS keychain access if using automatic White Noise login repair with a real identity
 - a dedicated White Noise group for agent control
@@ -94,6 +100,37 @@ default: `codex-agentnoise`, `claude-agentnoise`, and optional
 remote chat runs unless `runner.allow_generic_agent_profiles = true` is set.
 This keeps phone-triggered jobs separate from human terminal profiles and gives
 the launcher a place to pin sandbox, secrets, and non-interactive behavior.
+
+For a minimal install that only has raw Codex or Claude, opt into direct mode:
+
+```sh
+agentnoise init --direct-agents
+```
+
+Or set it during first setup:
+
+```sh
+agentnoise up --direct-agents --no-listen
+```
+
+That writes:
+
+```toml
+[runner]
+launcher = "direct"
+```
+
+Direct mode does not require `bondage` at runtime. It still uses structured argv
+and the same White Noise pairing/allowlist, but local filesystem, network,
+secret, and approval behavior is whatever the raw agent CLI enforces. Use
+`agentnoise doctor` or `agentnoise agents` to confirm the active launcher.
+
+Existing installs can switch explicitly:
+
+```sh
+agentnoise config launcher direct
+agentnoise config launcher bondage
+```
 
 ## Security Stack
 
@@ -113,7 +150,8 @@ The intended stack is:
 
 In short: the phone can ask for work, agentnoise authenticates and routes the
 request, and the local stack decides what the agent process is actually allowed
-to touch.
+to touch. In direct mode that local stack is just the raw agent CLI and its own
+permissions model.
 
 ## First Run
 
@@ -121,6 +159,23 @@ Install from Homebrew:
 
 ```sh
 brew install nvk/tap/agentnoise
+```
+
+The Homebrew formula installs the same binary either way. Choose the local
+agent launcher in agentnoise config:
+
+```sh
+# recommended policy boundary
+agentnoise init
+
+# minimal raw Codex/Claude mode
+agentnoise init --direct-agents
+```
+
+For an existing config:
+
+```sh
+agentnoise config launcher direct
 ```
 
 Then start it. For normal desktop use, run it as a Homebrew service:

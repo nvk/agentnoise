@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::approvals;
-use crate::config::Config;
+use crate::config::{Config, RunnerLauncher};
 use crate::runner::{AgentKind, AgentRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentCapability {
     pub agent: AgentKind,
     pub enabled: bool,
+    pub launcher: RunnerLauncher,
     pub profile: String,
     pub bin: String,
     pub permission_mode: Option<String>,
@@ -28,6 +29,7 @@ pub fn capabilities(config: &Config) -> Vec<AgentCapability> {
             AgentCapability {
                 agent,
                 enabled: config_agent.enabled,
+                launcher: config.runner.launcher,
                 profile: config.effective_agent_profile(agent),
                 bin: config_agent.bin.clone(),
                 permission_mode: config_agent.permission_mode.clone(),
@@ -58,10 +60,16 @@ pub fn render_capabilities(config: &Config) -> String {
                 .filter(|value| !value.is_empty())
                 .map(|value| format!(" permission:{value}"))
                 .unwrap_or_default();
+            let profile = if capability.launcher == RunnerLauncher::Direct {
+                "profile: unused in direct mode".to_string()
+            } else {
+                format!("profile: {}", capability.profile)
+            };
             format!(
-                "- {} {status}{approval}{permission}\n  profile: {}\n  bin: {}\n  commands: {}",
+                "- {} {status}{approval}{permission}\n  launcher: {}\n  {}\n  bin: {}\n  commands: {}",
                 capability.agent,
-                capability.profile,
+                capability.launcher,
+                profile,
                 capability.bin,
                 capability.commands.join(", ")
             )
