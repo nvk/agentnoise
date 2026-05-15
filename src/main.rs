@@ -23,6 +23,8 @@ use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
 use agentnoise::wn::WnClient;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use zeroize::Zeroize;
 
 const FIRST_PAIRING_SUBSCRIBE_LIMIT: u32 = 20;
@@ -1512,6 +1514,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
 
     let initial_groups = initial_group_ids(&wn);
     let subscribe_limit = listener_subscribe_limit(app.config());
+    let mut startup_hello_sent = HashSet::new();
     if initial_groups.is_empty() {
         println!("agentnoise waiting for White Noise control chat");
         println!("agentnoise will keep discovering chats until the phone-created chat appears");
@@ -1524,6 +1527,13 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                 &group_id,
                 subscribe_limit,
             )?;
+            send_startup_hello_if_needed(
+                app.config(),
+                &wn,
+                &event_journal,
+                &mut startup_hello_sent,
+                &group_id,
+            );
         }
     }
     spawn_group_discovery(Arc::clone(&wn), tx.clone());
@@ -1548,7 +1558,15 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         subscribe_limit,
                     ) {
                         eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
+                        continue;
                     }
+                    send_startup_hello_if_needed(
+                        app.config(),
+                        &wn,
+                        &event_journal,
+                        &mut startup_hello_sent,
+                        &group_id,
+                    );
                 }
             }
             StreamItem::DiscoveryError(message) => {
@@ -1765,6 +1783,54 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
     }
 
     Ok(())
+}
+
+fn send_startup_hello_if_needed(
+    config: &Config,
+    wn: &WnClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    sent: &mut HashSet<String>,
+    group_id: &str,
+) {
+    if !should_send_startup_hello(config, sent, group_id) {
+        return;
+    }
+    let text = startup_hello_text(config);
+    if let Err(error) = send_reply_recorded(wn, event_journal, group_id, &text) {
+        eprintln!("agentnoise: failed to send startup hello to {group_id}: {error:#}");
+    }
+}
+
+fn should_send_startup_hello(config: &Config, sent: &mut HashSet<String>, group_id: &str) -> bool {
+    let group_id = group_id.trim();
+    !group_id.is_empty()
+        && !config.whitenoise.allowed_senders.is_empty()
+        && sent.insert(group_id.to_string())
+}
+
+fn startup_hello_text(config: &Config) -> String {
+    let timestamp = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_string());
+    render_startup_hello(config, &timestamp)
+}
+
+fn render_startup_hello(config: &Config, timestamp: &str) -> String {
+    let profile = config.whitenoise.profile_display_name.trim();
+    let workspace = config
+        .default_repo_alias()
+        .map(|alias| format!("{alias}:/"))
+        .unwrap_or_else(|| "none".to_string());
+    let mut lines = vec![
+        "agentnoise is up".to_string(),
+        format!("timestamp: {timestamp}"),
+    ];
+    if !profile.is_empty() {
+        lines.push(format!("profile: {profile}"));
+    }
+    lines.push(format!("workspace: {workspace}"));
+    lines.push("Send /status or /help.".to_string());
+    lines.join("\n")
 }
 
 fn send_reply_recorded(
@@ -2004,5 +2070,45 @@ fn extend_unique(group_ids: &mut Vec<String>, more: impl IntoIterator<Item = Str
         if !group_id.is_empty() && !group_ids.iter().any(|existing| existing == group_id) {
             group_ids.push(group_id.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_hello_includes_time_profile_and_workspace() {
+        let mut config = Config::template();
+        config.whitenoise.profile_display_name = "m5".to_string();
+
+        let text = render_startup_hello(&config, "2026-05-15T20:00:00Z");
+
+        assert_eq!(
+            text,
+            "agentnoise is up\n\
+             timestamp: 2026-05-15T20:00:00Z\n\
+             profile: m5\n\
+             workspace: sandbox:/\n\
+             Send /status or /help."
+        );
+    }
+
+    #[test]
+    fn startup_hello_requires_pairing_and_deduplicates_per_group() {
+        let mut config = Config::template();
+        let mut sent = HashSet::new();
+
+        assert!(!should_send_startup_hello(&config, &mut sent, "group-a"));
+
+        config
+            .whitenoise
+            .allowed_senders
+            .push("npub1pairedphone".to_string());
+
+        assert!(should_send_startup_hello(&config, &mut sent, "group-a"));
+        assert!(!should_send_startup_hello(&config, &mut sent, "group-a"));
+        assert!(should_send_startup_hello(&config, &mut sent, "group-b"));
+        assert!(!should_send_startup_hello(&config, &mut sent, " "));
     }
 }

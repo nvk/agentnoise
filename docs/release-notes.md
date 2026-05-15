@@ -1,5 +1,12 @@
 # Release Notes
 
+## Unreleased
+
+- Added a startup hello for already-paired control chats. When agentnoise
+  reaches the listener, it posts `agentnoise is up` with an RFC3339 UTC
+  timestamp, profile, and workspace so the phone can tell the service is alive
+  after a restart.
+
 ## 0.1.15 - 2026-05-15
 
 - Fixed Homebrew service startup churn that could repeatedly touch the macOS
