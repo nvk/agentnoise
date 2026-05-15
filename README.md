@@ -22,6 +22,11 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.13** - **White Noise login detection fix.** `wn whoami` reports logged
+in accounts as hex pubkeys while agentnoise config stores the desktop account
+as `npub`. The startup check now normalizes both forms, so agentnoise only
+skips Keychain repair when the actual White Noise signing account is present.
+
 **v0.1.12** - **Service keychain startup fix.** `agentnoise up` now reuses the
 cached desktop `npub` from config for QR/profile setup instead of loading the
 desktop `nsec` on every service restart. Homebrew services should only touch
@@ -134,8 +139,9 @@ the pairing window.
 
 After the desktop `npub` is written to config, service restarts use that public
 identity for QR/profile setup and avoid reading the `nsec` unless White Noise
-login repair is needed. If macOS blocks background Keychain access, authorize it
-from Terminal once:
+login repair is needed. The listener still requires a logged-in White Noise
+signing account before it can send replies. If macOS blocks background Keychain
+access during repair, authorize it from Terminal once:
 
 ```sh
 agentnoise keychain status

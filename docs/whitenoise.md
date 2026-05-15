@@ -187,10 +187,12 @@ agentnoise stores the desktop public key in config after setup. Normal
 `agentnoise up` and service restarts use that cached `npub` for pairing QR and
 profile setup, so they do not read the desktop `nsec` just to start. agentnoise
 checks `wn whoami --json` at startup. If the configured White Noise account is
-already logged in, it does not read the keychain. If the account is missing and
+already logged in, matching either `npub` or the hex pubkey returned by White
+Noise, it does not read the keychain. If the account is missing and
 `use_keychain_nsec = true`, it reads the `nsec` once, feeds it to `wn login`,
-then zeroizes the in-process copy. The long-running message loop does not poll
-the keychain.
+then zeroizes the in-process copy. The listener still needs a logged-in White
+Noise signing account to send replies; the long-running message loop does not
+poll the keychain.
 
 ## Development Burner Identity
 

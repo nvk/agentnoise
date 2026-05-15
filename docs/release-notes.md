@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.13
+
+- Normalized `wn whoami --json` login detection across hex pubkeys and
+  configured `npub` account values.
+- Preserved the invariant that agentnoise only listens after White Noise has a
+  usable signing account, while avoiding unnecessary Keychain repair when that
+  account is already logged in.
+
 ## 0.1.12
 
 - Reused the cached desktop `npub` from config for pairing QR/profile setup so

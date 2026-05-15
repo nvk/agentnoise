@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use nostr::PublicKey;
 use serde_json::Value;
 use zeroize::Zeroize;
 
@@ -535,15 +536,16 @@ pub fn account_logged_in(config: &WhitenoiseConfig) -> Result<bool> {
         return Ok(false);
     }
 
+    let value: Value = serde_json::from_str(stdout).context("parsing wn whoami JSON")?;
+
     if let Some(account) = config
         .account
         .as_deref()
         .filter(|account| !account.trim().is_empty())
     {
-        return Ok(stdout.contains(account));
+        return Ok(json_has_account_pubkey(&value, account));
     }
 
-    let value: Value = serde_json::from_str(stdout).context("parsing wn whoami JSON")?;
     Ok(json_has_account(&value))
 }
 
@@ -656,6 +658,37 @@ fn json_has_account(value: &Value) -> bool {
         Value::String(value) => !value.trim().is_empty(),
         _ => false,
     }
+}
+
+fn json_has_account_pubkey(value: &Value, account: &str) -> bool {
+    let expected = public_key_hex(account);
+    json_has_string(value, &mut |candidate| {
+        let candidate = candidate.trim();
+        if candidate == account.trim() {
+            return true;
+        }
+        match (&expected, public_key_hex(candidate)) {
+            (Some(expected), Some(candidate)) => expected == &candidate,
+            _ => false,
+        }
+    })
+}
+
+fn json_has_string(value: &Value, predicate: &mut impl FnMut(&str) -> bool) -> bool {
+    match value {
+        Value::String(value) => predicate(value),
+        Value::Array(values) => values.iter().any(|value| json_has_string(value, predicate)),
+        Value::Object(object) => object
+            .values()
+            .any(|value| json_has_string(value, predicate)),
+        _ => false,
+    }
+}
+
+fn public_key_hex(value: &str) -> Option<String> {
+    PublicKey::parse(value.trim())
+        .ok()
+        .map(|public_key| public_key.to_hex())
 }
 
 pub fn group_id_from_output(text: &str) -> Option<String> {
@@ -926,6 +959,7 @@ fn looks_like_group_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::nips::nip19::ToBech32;
 
     #[test]
     fn explicit_path_is_preserved() {
@@ -958,6 +992,20 @@ mod tests {
 
         let value: Value = serde_json::from_str(r#"{"result":[]}"#).unwrap();
         assert!(!json_has_account(&value));
+    }
+
+    #[test]
+    fn matches_whoami_hex_pubkey_for_npub_account() {
+        let public_key =
+            PublicKey::parse("da3122fc8de09013bf2fcedeb7eae35f2d37128aaa0e82a1329a76b19e3c88fe")
+                .unwrap();
+        let account_npub = public_key.to_bech32().unwrap();
+        let value: Value = serde_json::from_str(
+            r#"{"result":[{"pubkey":"da3122fc8de09013bf2fcedeb7eae35f2d37128aaa0e82a1329a76b19e3c88fe"}]}"#,
+        )
+        .unwrap();
+
+        assert!(json_has_account_pubkey(&value, &account_npub));
     }
 
     #[test]
