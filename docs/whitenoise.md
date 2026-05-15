@@ -183,7 +183,14 @@ agentnoise whitenoise login-from-keychain
 agentnoise doctor
 ```
 
-agentnoise checks `wn whoami --json` at startup. If the configured White Noise account is already logged in, it does not read the keychain. If the account is missing and `use_keychain_nsec = true`, it reads the `nsec` once, feeds it to `wn login`, then zeroizes the in-process copy. The long-running message loop does not poll the keychain.
+agentnoise stores the desktop public key in config after setup. Normal
+`agentnoise up` and service restarts use that cached `npub` for pairing QR and
+profile setup, so they do not read the desktop `nsec` just to start. agentnoise
+checks `wn whoami --json` at startup. If the configured White Noise account is
+already logged in, it does not read the keychain. If the account is missing and
+`use_keychain_nsec = true`, it reads the `nsec` once, feeds it to `wn login`,
+then zeroizes the in-process copy. The long-running message loop does not poll
+the keychain.
 
 ## Development Burner Identity
 
@@ -219,7 +226,13 @@ agentnoise keychain delete-nsec
 agentnoise identity delete --name desktop-2
 ```
 
-High-availability note: the OS keychain must be available to the same service account that runs agentnoise. A macOS per-user LaunchAgent can normally read the login keychain after the user session is unlocked. Headless Linux Secret Service setups often depend on a DBus/user session and should be tested from the exact supervisor context before relying on automatic restart repair.
+High-availability note: the OS keychain must be available to the same service
+account that runs agentnoise when login repair is needed. A macOS per-user
+LaunchAgent can normally read the login keychain after the user session is
+unlocked, but macOS may require one Terminal authorization first:
+`agentnoise keychain status`. Headless Linux Secret Service setups often depend
+on a DBus/user session and should be tested from the exact supervisor context
+before relying on automatic restart repair.
 
 ## Create Control Chats
 

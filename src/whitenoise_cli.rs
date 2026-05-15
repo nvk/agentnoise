@@ -446,7 +446,12 @@ pub fn login_from_configured_nsec(
         identity::load_default_nsec(config)?
     } else {
         let store = SecretStore::new(&config.keychain_service, &config.keychain_item);
-        store.load_nsec()?
+        store.load_nsec().with_context(|| {
+            format!(
+                "loading configured nsec from {}; non-interactive services cannot reliably show OS keychain prompts, so run `agentnoise keychain status` or `agentnoise up` once from Terminal to authorize access",
+                store.label()
+            )
+        })?
     };
     let output = run_login(&wn, config, relay_override, &nsec);
     nsec.zeroize();

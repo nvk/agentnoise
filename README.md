@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.12** - **Service keychain startup fix.** `agentnoise up` now reuses the
+cached desktop `npub` from config for QR/profile setup instead of loading the
+desktop `nsec` on every service restart. Homebrew services should only touch
+the OS keychain when creating the identity or repairing a missing White Noise
+login. Keychain repair errors now explain the Terminal authorization step.
+
 **v0.1.11** - **Pairing identity fix.** Normalized Nostr sender identity
 checks across hex pubkeys and `npub` values. This stops agentnoise from
 treating its own White Noise replies as unpaired inbound messages when the
@@ -125,6 +131,15 @@ so the service can take over after a foreground troubleshooting run exits.
 On first run, agentnoise creates the desktop identity, stores its `nsec` in the
 OS keychain, starts White Noise, publishes the profile/key package, and opens
 the pairing window.
+
+After the desktop `npub` is written to config, service restarts use that public
+identity for QR/profile setup and avoid reading the `nsec` unless White Noise
+login repair is needed. If macOS blocks background Keychain access, authorize it
+from Terminal once:
+
+```sh
+agentnoise keychain status
+```
 
 Pair the phone:
 

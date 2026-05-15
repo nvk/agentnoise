@@ -122,6 +122,39 @@ pub fn load_public_identity(config: &WhitenoiseConfig, name: &str) -> Result<Pub
     })
 }
 
+pub fn configured_public_identity(
+    config: &WhitenoiseConfig,
+    name: &str,
+) -> Result<Option<PublicIdentity>> {
+    if let Some(npub) = [config.account.as_deref(), config.bot_npub.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|npub| !npub.is_empty())
+    {
+        return public_identity_from_npub(config, name, npub).map(Some);
+    }
+
+    Ok(None)
+}
+
+pub fn public_identity_from_npub(
+    config: &WhitenoiseConfig,
+    name: &str,
+    npub: &str,
+) -> Result<PublicIdentity> {
+    let name = normalize_identity_name(name)?;
+    let public_key = PublicKey::parse(npub.trim())
+        .with_context(|| format!("parsing configured npub for identity {name}"))?;
+    let npub = public_key.to_bech32().expect("npub bech32");
+
+    Ok(PublicIdentity {
+        keychain_item: keychain_item_for_identity(&config.keychain_item, &name),
+        name,
+        npub,
+    })
+}
+
 pub fn pairing_payload(
     config: &WhitenoiseConfig,
     name: &str,
@@ -135,6 +168,29 @@ pub fn pairing_payload(
     let relays = pairing_relays(config, relay_overrides);
     let nprofile = nprofile(keys.public_key(), &relays)?;
     let npub = keys.public_key().to_bech32().expect("npub bech32");
+
+    Ok(PairingPayload {
+        kind: "agentnoise.identity".to_string(),
+        version: 1,
+        name,
+        npub,
+        nprofile,
+        relays,
+    })
+}
+
+pub fn pairing_payload_from_npub(
+    config: &WhitenoiseConfig,
+    name: &str,
+    npub: &str,
+    relay_overrides: &[String],
+) -> Result<PairingPayload> {
+    let name = normalize_identity_name(name)?;
+    let public_key = PublicKey::parse(npub.trim())
+        .with_context(|| format!("parsing configured npub for identity {name}"))?;
+    let relays = pairing_relays(config, relay_overrides);
+    let nprofile = nprofile(public_key, &relays)?;
+    let npub = public_key.to_bech32().expect("npub bech32");
 
     Ok(PairingPayload {
         kind: "agentnoise.identity".to_string(),
@@ -389,6 +445,35 @@ mod tests {
         assert!(relays.contains(&"wss://relay.primal.net".to_string()));
         assert!(relays.contains(&"wss://relay.nostr.band".to_string()));
         assert_eq!(relays.len(), dedupe_relays(relays.clone()).len());
+    }
+
+    #[test]
+    fn configured_public_identity_uses_cached_npub() {
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+        let mut config = crate::config::Config::template().whitenoise;
+        config.account = Some(npub.clone());
+
+        let identity = configured_public_identity(&config, DEFAULT_IDENTITY_NAME)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(identity.name, DEFAULT_IDENTITY_NAME);
+        assert_eq!(identity.npub, npub);
+    }
+
+    #[test]
+    fn pairing_payload_from_npub_does_not_need_secret_store() {
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+        let config = crate::config::Config::template().whitenoise;
+
+        let payload =
+            pairing_payload_from_npub(&config, DEFAULT_IDENTITY_NAME, &npub, &[]).unwrap();
+
+        assert_eq!(payload.npub, npub);
+        assert!(payload.nprofile.starts_with("nprofile1"));
+        assert!(!payload.relays.is_empty());
     }
 
     #[test]

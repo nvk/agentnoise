@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.1.12
+
+- Reused the cached desktop `npub` from config for pairing QR/profile setup so
+  normal `agentnoise up` and Homebrew service restarts do not load the desktop
+  `nsec` unnecessarily.
+- Limited OS keychain access during startup to identity creation and real White
+  Noise login repair.
+- Added clearer keychain repair guidance for non-interactive service contexts
+  where macOS may not show an authorization prompt.
+
 ## 0.1.11
 
 - Normalized Nostr sender identity checks across hex pubkeys and `npub`

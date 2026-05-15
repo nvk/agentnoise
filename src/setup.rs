@@ -86,8 +86,12 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     ensure_runtime_dirs(&config)?;
     config.save(config_path)?;
 
-    let payload =
-        identity::pairing_payload(&config.whitenoise, DEFAULT_IDENTITY_NAME, &options.relays)?;
+    let payload = identity::pairing_payload_from_npub(
+        &config.whitenoise,
+        DEFAULT_IDENTITY_NAME,
+        &identity.npub,
+        &options.relays,
+    )?;
     let qr = identity::render_qr(&payload.nprofile)?;
 
     let mut group_id = None;
@@ -176,6 +180,17 @@ pub fn normalize_profile_name(name: &str) -> String {
 
 pub fn pairing(config_path: &Path, relays: &[String]) -> Result<PairingPayload> {
     let config = Config::load_or_template(config_path)?;
+    if let Some(identity) =
+        identity::configured_public_identity(&config.whitenoise, DEFAULT_IDENTITY_NAME)?
+    {
+        return identity::pairing_payload_from_npub(
+            &config.whitenoise,
+            DEFAULT_IDENTITY_NAME,
+            &identity.npub,
+            relays,
+        );
+    }
+
     identity::pairing_payload(&config.whitenoise, DEFAULT_IDENTITY_NAME, relays)
 }
 
@@ -187,6 +202,10 @@ fn load_or_create_identity(
         let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, true)
             .context("creating agentnoise desktop identity in configured identity store")?;
         return Ok((identity, true));
+    }
+
+    if let Some(identity) = identity::configured_public_identity(config, DEFAULT_IDENTITY_NAME)? {
+        return Ok((identity, false));
     }
 
     match identity::load_public_identity(config, DEFAULT_IDENTITY_NAME) {
@@ -211,6 +230,8 @@ fn ensure_runtime_dirs(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::Keys;
+    use nostr::nips::nip19::ToBech32;
 
     #[test]
     fn normalizes_profile_name_for_nostr_name_field() {
@@ -220,5 +241,19 @@ mod tests {
         );
         assert_eq!(normalize_profile_name(" linux_box "), "linux-box");
         assert_eq!(normalize_profile_name("!!!"), "agentnoise");
+    }
+
+    #[test]
+    fn load_or_create_identity_prefers_cached_public_config() {
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+        let mut config = Config::template().whitenoise;
+        config.account = Some(npub.clone());
+        config.use_keychain_nsec = true;
+
+        let (identity, created) = load_or_create_identity(&config, false).unwrap();
+
+        assert!(!created);
+        assert_eq!(identity.npub, npub);
     }
 }
