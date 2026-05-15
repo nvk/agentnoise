@@ -1,7 +1,8 @@
 class Agentnoise < Formula
   desc "Chat with local coding agents through White Noise"
   homepage "https://agentnoise.com"
-  url "https://github.com/nvk/agentnoise.git", tag: "v0.1.14"
+  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.14.tar.gz"
+  sha256 "59307773705cfc091ef2e3672adde584fb81d9cbed6b484da68c16d01855b5d0"
   license "MIT"
   head "https://github.com/nvk/agentnoise.git", branch: "main"
 
