@@ -1,0 +1,20 @@
+{
+  "error": {
+    "message": "relay timeout"
+  }
+}
+{
+  "result": {
+    "trigger": "MessageReceived",
+    "message": {
+      "content": "/help",
+      "sender_npub": "npub123",
+      "id": "ghi",
+      "mls_group_id": {
+        "value": {
+          "vec": [1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "result": [
+    {
+      "status": "Connected",
+      "types": ["nip65", "inbox"],
+      "url": "wss://relay.example"
+    },
+    {
+      "status": "Connected",
+      "types": ["key_package"],
+      "url": "wss://relay.example"
+    }
+  ]
+}

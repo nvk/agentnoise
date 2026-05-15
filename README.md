@@ -80,12 +80,20 @@ included and should be treated as newer paths.
 ## Requirements
 
 - Rust toolchain for building from source
-- `bondage` with `codex` and `claude` profiles
+- `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
 - Codex CLI and Claude Code CLI
 - optional: Hermes Agent CLI plus a dedicated `bondage` profile
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
 - OS keychain access if using automatic White Noise login repair with a real identity
 - a dedicated White Noise group for agent control
+
+agentnoise launches coding agents through dedicated `bondage` profiles by
+default: `codex-agentnoise`, `claude-agentnoise`, and optional
+`hermes-agentnoise`. If an older config still says `profile = "codex"` or
+`profile = "claude"`, agentnoise uses the matching `*-agentnoise` profile for
+remote chat runs unless `runner.allow_generic_agent_profiles = true` is set.
+This keeps phone-triggered jobs separate from human terminal profiles and gives
+the launcher a place to pin sandbox, secrets, and non-interactive behavior.
 
 ## Security Stack
 
@@ -515,7 +523,7 @@ creating a dedicated `bondage` profile:
 ```toml
 [agents.hermes]
 enabled = true
-profile = "hermes"
+profile = "hermes-agentnoise"
 bin = "hermes"
 ```
 
@@ -535,7 +543,7 @@ From White Noise:
 The command shape is intentionally narrow:
 
 ```sh
-bondage exec hermes ~/.config/bondage/bondage.conf -- hermes chat --quiet --source agentnoise --toolsets skills -q "<prompt>"
+bondage exec hermes-agentnoise ~/.config/bondage/bondage.conf -- hermes chat --quiet --source agentnoise --toolsets skills -q "<prompt>"
 ```
 
 Use the `bondage` profile to set a dedicated `HERMES_HOME`, model endpoint
@@ -555,8 +563,10 @@ pairing mode:
 4. agentnoise stores that sender in `allowed_senders`.
 5. All other messages are ignored until this succeeds.
 
-The PIN also prints to stdout/stderr logs for headless and non-macOS setups. It
-rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
+The PIN also prints to stdout/stderr logs for headless and non-macOS setups.
+While the listener is running, `agentnoise pair` prints the same live PIN in the
+terminal alongside the QR. It rotates on `whitenoise.pairing_pin_seconds`, which
+defaults to 30 seconds.
 
 ## Security Defaults
 
@@ -574,6 +584,7 @@ rotates on `whitenoise.pairing_pin_seconds`, which defaults to 30 seconds.
 - [Local bring-up](docs/local-bringup.md)
 - [Remote SSH pairing](docs/remote-ssh.md)
 - [Fake phone testing](docs/fake-phone-testing.md)
+- [Testing](docs/testing.md)
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)
 - [Homebrew packaging](docs/homebrew.md)

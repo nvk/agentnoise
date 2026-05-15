@@ -1,0 +1,12 @@
+{
+  "result": [
+    {
+      "dm_peer_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mls_group_id": "0123456789abcdef0123456789abcdef"
+    },
+    {
+      "dm_peer_pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mls_group_id": "0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

@@ -387,27 +387,7 @@ mod tests {
 
     #[test]
     fn parses_pretty_json_stream() {
-        let input = br#"{
-  "result": {
-    "trigger": "InitialMessage",
-    "message": {
-      "content": "/status",
-      "author": "npub123",
-      "id": "abc"
-    }
-  }
-}
-{
-  "result": {
-    "trigger": "MessageReceived",
-    "message": {
-      "content": "/jobs",
-      "author": "npub123",
-      "id": "def"
-    }
-  }
-}
-"#;
+        let input = include_bytes!("../tests/fixtures/wn/messages-subscribe/pretty-stream.jsonl");
 
         let values = WnClient::parse_events_from_reader(&input[..])
             .collect::<Result<Vec<_>>>()
@@ -422,6 +402,27 @@ mod tests {
         assert!(events[0].is_initial);
         assert_eq!(events[1].text, "/jobs");
         assert!(!events[1].is_initial);
+    }
+
+    #[test]
+    fn fixture_contract_subscribe_ignores_error_and_parses_following_message() {
+        let input =
+            include_bytes!("../tests/fixtures/wn/messages-subscribe/error-then-message.jsonl");
+
+        let values = WnClient::parse_events_from_reader(&input[..])
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let events = values
+            .iter()
+            .flat_map(WnClient::parse_events)
+            .collect::<Vec<_>>();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "/help");
+        assert_eq!(
+            events[0].group_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
     }
 
     #[test]

@@ -89,6 +89,8 @@ pub struct RunnerConfig {
     pub approval_ttl_seconds: u64,
     #[serde(default = "default_worktree_dir_string")]
     pub worktree_dir: String,
+    #[serde(default)]
+    pub allow_generic_agent_profiles: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -218,17 +220,18 @@ impl Config {
                 progress_interval_seconds: default_progress_interval_seconds(),
                 approval_ttl_seconds: default_approval_ttl_seconds(),
                 worktree_dir: default_worktree_dir_string(),
+                allow_generic_agent_profiles: false,
             },
             agents: AgentsConfig {
                 codex: AgentConfig {
                     enabled: true,
-                    profile: "codex".to_string(),
+                    profile: recommended_agentnoise_profile(AgentKind::Codex).to_string(),
                     bin: "codex".to_string(),
                     permission_mode: None,
                 },
                 claude: AgentConfig {
                     enabled: true,
-                    profile: "claude".to_string(),
+                    profile: recommended_agentnoise_profile(AgentKind::Claude).to_string(),
                     bin: "claude".to_string(),
                     permission_mode: Some("auto".to_string()),
                 },
@@ -297,6 +300,39 @@ impl Config {
             AgentKind::Claude => &self.agents.claude,
             AgentKind::Hermes => &self.agents.hermes,
         }
+    }
+
+    pub fn effective_agent_profile(&self, agent: AgentKind) -> String {
+        let configured = self.agent(agent).profile.trim();
+        if !self.runner.allow_generic_agent_profiles && is_generic_agent_profile(agent, configured)
+        {
+            return recommended_agentnoise_profile(agent).to_string();
+        }
+        configured.to_string()
+    }
+
+    pub fn agent_profile_warnings(&self) -> Vec<String> {
+        [AgentKind::Codex, AgentKind::Claude, AgentKind::Hermes]
+            .into_iter()
+            .filter_map(|agent| {
+                let config = self.agent(agent);
+                if !config.enabled {
+                    return None;
+                }
+                let configured = config.profile.trim();
+                if !self.runner.allow_generic_agent_profiles
+                    && is_generic_agent_profile(agent, configured)
+                {
+                    return Some(format!(
+                        "{} configured with generic profile `{}`; using `{}` for agentnoise runs",
+                        agent,
+                        configured,
+                        recommended_agentnoise_profile(agent)
+                    ));
+                }
+                None
+            })
+            .collect()
     }
 
     pub fn resolved_data_dir(&self) -> PathBuf {
@@ -488,10 +524,30 @@ fn default_approval_ttl_seconds() -> u64 {
 fn default_hermes_agent_config() -> AgentConfig {
     AgentConfig {
         enabled: false,
-        profile: "hermes".to_string(),
+        profile: recommended_agentnoise_profile(AgentKind::Hermes).to_string(),
         bin: "hermes".to_string(),
         permission_mode: None,
     }
+}
+
+pub fn recommended_agentnoise_profile(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Codex => "codex-agentnoise",
+        AgentKind::Claude => "claude-agentnoise",
+        AgentKind::Hermes => "hermes-agentnoise",
+    }
+}
+
+fn generic_agent_profile(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Codex => "codex",
+        AgentKind::Claude => "claude",
+        AgentKind::Hermes => "hermes",
+    }
+}
+
+fn is_generic_agent_profile(agent: AgentKind, profile: &str) -> bool {
+    profile == generic_agent_profile(agent)
 }
 
 #[cfg(test)]
@@ -563,9 +619,24 @@ path = "/tmp"
         let config: Config = toml::from_str(text).unwrap();
 
         assert!(!config.agents.hermes.enabled);
-        assert_eq!(config.agents.hermes.profile, "hermes");
+        assert_eq!(config.agents.hermes.profile, "hermes-agentnoise");
         assert_eq!(config.agents.hermes.bin, "hermes");
         assert_eq!(config.whitenoise.profile_name, "agentnoise");
         assert_eq!(config.whitenoise.profile_display_name, "agentnoise desktop");
+    }
+
+    #[test]
+    fn generic_agent_profiles_are_forced_to_agentnoise_profiles() {
+        let mut config = Config::template();
+        config.agents.codex.profile = "codex".to_string();
+        assert_eq!(
+            config.effective_agent_profile(AgentKind::Codex),
+            "codex-agentnoise"
+        );
+        assert_eq!(config.agent_profile_warnings().len(), 1);
+
+        config.runner.allow_generic_agent_profiles = true;
+        assert_eq!(config.effective_agent_profile(AgentKind::Codex), "codex");
+        assert!(config.agent_profile_warnings().is_empty());
     }
 }

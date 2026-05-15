@@ -135,7 +135,10 @@ Render a pairing QR for the phone:
 agentnoise pair
 ```
 
-The QR encodes a standard Nostr `nprofile`, which contains the desktop bot `npub` plus relay hints. Override relays at render time when needed:
+The QR encodes a standard Nostr `nprofile`, which contains the desktop bot
+`npub` plus relay hints. If `agentnoise up` is already running and waiting for
+first pairing, this command also prints the current live pairing PIN. Override
+relays at render time when needed:
 
 ```sh
 agentnoise pair --relay wss://relay.example

@@ -8,9 +8,11 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use time::Duration as TimeDuration;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::auth::PairingPin;
 use crate::config::Config;
 
 const LOCK_FILE: &str = "engine.lock";
@@ -28,6 +30,33 @@ pub struct RuntimePairingInfo {
     pub nprofile: String,
     pub relays: Vec<String>,
     pub pin_seconds: u64,
+    #[serde(default)]
+    pub current_pin: Option<RuntimePairingPin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePairingPin {
+    pub code: String,
+    pub expires_at: String,
+}
+
+impl RuntimePairingPin {
+    pub fn from_pairing_pin(pin: &PairingPin) -> Self {
+        let expires_at = OffsetDateTime::now_utc()
+            + TimeDuration::seconds(pin.expires_in_seconds.min(i64::MAX as u64) as i64);
+        Self {
+            code: pin.code.clone(),
+            expires_at: expires_at
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| "unknown-time".to_string()),
+        }
+    }
+
+    pub fn remaining_seconds(&self) -> Option<u64> {
+        let expires_at = OffsetDateTime::parse(&self.expires_at, &Rfc3339).ok()?;
+        let remaining = (expires_at - OffsetDateTime::now_utc()).whole_seconds();
+        Some(remaining.max(0) as u64)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,6 +208,27 @@ pub fn read_status(config: &Config) -> Result<Option<RuntimeStatus>> {
     Ok(Some(status))
 }
 
+pub fn update_pairing_pin(config: &Config, pin: Option<RuntimePairingPin>) -> Result<()> {
+    let path = status_path(config);
+    let Some(mut status) = read_status(config)? else {
+        return Ok(());
+    };
+    if let Some(pairing) = status.pairing.as_mut() {
+        pairing.current_pin = pin;
+        write_runtime_status(&path, &status)?;
+    }
+    Ok(())
+}
+
+pub fn clear_pairing(config: &Config) -> Result<()> {
+    let path = status_path(config);
+    let Some(mut status) = read_status(config)? else {
+        return Ok(());
+    };
+    status.pairing = None;
+    write_runtime_status(&path, &status)
+}
+
 fn write_lock_owner(mut lock: &File) -> Result<()> {
     lock.set_len(0).context("truncating runtime lock")?;
     lock.seek(SeekFrom::Start(0))
@@ -248,7 +298,11 @@ fn write_status(
         groups: config.whitenoise.control_group_ids(),
         pairing,
     };
-    let text = serde_json::to_string_pretty(&status).context("serializing runtime status")?;
+    write_runtime_status(path, &status)
+}
+
+fn write_runtime_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
+    let text = serde_json::to_string_pretty(status).context("serializing runtime status")?;
     fs::write(path, text).with_context(|| format!("writing runtime status {}", path.display()))
 }
 
@@ -274,6 +328,11 @@ fn print_status(status: &RuntimeStatus) {
             println!("- {relay}");
         }
         println!("pin window: {}s", pairing.pin_seconds);
+        if let Some(pin) = &pairing.current_pin {
+            print_runtime_pairing_pin(pin);
+        } else {
+            println!("pairing PIN: waiting for listener update");
+        }
         if let Ok(qr) = crate::identity::render_qr(&pairing.nprofile) {
             println!();
             println!("{qr}");
@@ -281,6 +340,14 @@ fn print_status(status: &RuntimeStatus) {
     } else {
         println!("pairing: not required");
     }
+}
+
+pub fn print_runtime_pairing_pin(pin: &RuntimePairingPin) {
+    match pin.remaining_seconds() {
+        Some(seconds) => println!("pairing PIN: {} (expires in {}s)", pin.code, seconds),
+        None => println!("pairing PIN: {} (expires at {})", pin.code, pin.expires_at),
+    }
+    println!("phone first message: {}", pin.code);
 }
 
 fn existing_log_paths(config: &Config) -> Vec<PathBuf> {
@@ -466,6 +533,7 @@ mod tests {
                     nprofile: "nprofile-pair".to_string(),
                     relays: vec!["wss://relay.example".to_string()],
                     pin_seconds: 30,
+                    current_pin: None,
                 }),
             )
             .unwrap();
@@ -474,5 +542,40 @@ mod tests {
         assert_eq!(status.npub.as_deref(), Some("npub-test"));
         assert_eq!(status.groups, vec!["group-a"]);
         assert_eq!(status.pairing.unwrap().pin_seconds, 30);
+    }
+
+    #[test]
+    fn runtime_pairing_pin_updates_and_clears() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path());
+        let config_path = temp.path().join("config.toml");
+        let guard = acquire_engine(&config_path, &config, AcquireMode::Try)
+            .unwrap()
+            .unwrap();
+        guard
+            .update_status(
+                &config_path,
+                &config,
+                Some(RuntimePairingInfo {
+                    npub: "npub-pair".to_string(),
+                    nprofile: "nprofile-pair".to_string(),
+                    relays: Vec::new(),
+                    pin_seconds: 30,
+                    current_pin: None,
+                }),
+            )
+            .unwrap();
+
+        let pin = RuntimePairingPin {
+            code: "123456".to_string(),
+            expires_at: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+        };
+        update_pairing_pin(&config, Some(pin.clone())).unwrap();
+        let status = read_status(&config).unwrap().unwrap();
+        assert_eq!(status.pairing.unwrap().current_pin, Some(pin));
+
+        clear_pairing(&config).unwrap();
+        let status = read_status(&config).unwrap().unwrap();
+        assert!(status.pairing.is_none());
     }
 }

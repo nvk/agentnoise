@@ -28,6 +28,13 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
     if config.agents.hermes.enabled {
         checks.push(command_check("hermes", &config.agents.hermes.bin));
     }
+    for warning in config.agent_profile_warnings() {
+        checks.push(Check {
+            level: Level::Warn,
+            name: "agent profile".to_string(),
+            detail: warning,
+        });
+    }
     checks.extend([
         path_check("bondage conf", &config.resolved_bondage_conf()),
         path_check("data dir", &config.resolved_data_dir()),
@@ -225,4 +232,23 @@ fn find_executable(command: &str) -> Option<PathBuf> {
     }
 
     find_on_path(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_warns_about_generic_agent_profiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.agents.codex.profile = "codex".to_string();
+
+        let output = render_doctor(&temp.path().join("config.toml"), &config);
+
+        assert!(output.contains("generic profile `codex`"));
+        assert!(output.contains("codex-agentnoise"));
+    }
 }

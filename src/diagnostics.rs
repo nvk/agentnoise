@@ -80,9 +80,10 @@ pub fn render_status_report(config_path: &Path, config: &Config) -> String {
                     report.recent_jobs, report.active_jobs
                 ),
                 format!(
-                    "events: {} inbound, {} outbound, {} outbound failed",
+                    "events: {} inbound, {} outbound, {} queued, {} outbound failed",
                     report.event_summary.inbound,
                     report.event_summary.outbound,
+                    report.event_summary.outbound_enqueued,
                     report.event_summary.failed_outbound
                 ),
                 format!("identity store: {}", report.key_store),
@@ -94,6 +95,18 @@ pub fn render_status_report(config_path: &Path, config: &Config) -> String {
                 if let Some(pairing) = runtime.pairing {
                     lines.push(format!("pairing: {}s PIN window", pairing.pin_seconds));
                     lines.push(format!("pairing npub: {}", pairing.npub));
+                    if let Some(pin) = pairing.current_pin {
+                        match pin.remaining_seconds() {
+                            Some(seconds) => lines.push(format!(
+                                "pairing PIN: {} (expires in {}s)",
+                                pin.code, seconds
+                            )),
+                            None => lines.push(format!(
+                                "pairing PIN: {} (expires at {})",
+                                pin.code, pin.expires_at
+                            )),
+                        }
+                    }
                 }
             }
             lines.join("\n")

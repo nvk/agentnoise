@@ -1,0 +1,20 @@
+{
+  "result": {
+    "trigger": "InitialMessage",
+    "message": {
+      "content": "/status",
+      "author": "npub123",
+      "id": "abc"
+    }
+  }
+}
+{
+  "result": {
+    "trigger": "MessageReceived",
+    "message": {
+      "content": "/jobs",
+      "author": "npub123",
+      "id": "def"
+    }
+  }
+}

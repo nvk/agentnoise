@@ -15,7 +15,7 @@ use agentnoise::events::EventJournal;
 use agentnoise::identity;
 use agentnoise::launchd;
 use agentnoise::runner::{AgentKind, AgentRequest};
-use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo};
+use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo, RuntimePairingPin};
 use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
@@ -430,12 +430,7 @@ fn main() -> Result<()> {
             up(&config_path, args)?;
         }
         Command::Pair(args) => {
-            let payload = setup::pairing(&config_path, &args.relays)?;
-            println!("agentnoise pairing");
-            println!("npub: {}", payload.npub);
-            println!("nprofile: {}", payload.nprofile);
-            println!();
-            println!("{}", identity::render_qr(&payload.nprofile)?);
+            pair_command(&config_path, args)?;
         }
         Command::Status(args) => {
             let config = Config::load_or_template(&config_path)?;
@@ -949,6 +944,53 @@ fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
     Ok(())
 }
 
+fn pair_command(config_path: &Path, args: PairArgs) -> Result<()> {
+    let config = Config::load_or_template(config_path)?;
+    if runtime::engine_is_running(&config)?
+        && let Some(status) = runtime::read_status(&config)?
+        && let Some(pairing) = status.pairing
+    {
+        print_pairing_details(
+            &pairing.npub,
+            &pairing.nprofile,
+            pairing.current_pin.as_ref(),
+            Some("pairing PIN: waiting for listener update"),
+        )?;
+        return Ok(());
+    }
+
+    let payload = setup::pairing(config_path, &args.relays)?;
+    print_pairing_details(
+        &payload.npub,
+        &payload.nprofile,
+        None,
+        Some("pairing PIN: unavailable until `agentnoise up` is running"),
+    )?;
+    Ok(())
+}
+
+fn print_pairing_details(
+    npub: &str,
+    nprofile: &str,
+    pin: Option<&RuntimePairingPin>,
+    missing_pin_text: Option<&str>,
+) -> Result<()> {
+    println!("agentnoise pairing");
+    println!("npub: {npub}");
+    println!("nprofile: {nprofile}");
+    match pin {
+        Some(pin) => runtime::print_runtime_pairing_pin(pin),
+        None => {
+            if let Some(text) = missing_pin_text {
+                println!("{text}");
+            }
+        }
+    }
+    println!();
+    println!("{}", identity::render_qr(nprofile)?);
+    Ok(())
+}
+
 fn up(config_path: &Path, args: UpArgs) -> Result<()> {
     if should_attach_before_setup(config_path, &args)? {
         let config = Config::load(config_path)?;
@@ -1276,6 +1318,7 @@ fn pairing_runtime_info(
         nprofile: pairing.payload.nprofile.clone(),
         relays: pairing.payload.relays.clone(),
         pin_seconds: config.whitenoise.pairing_pin_seconds,
+        current_pin: None,
     })
 }
 
@@ -1301,7 +1344,7 @@ fn run_listener(
         }
     }
     if let Some(pairing) = pairing.clone() {
-        spawn_pairing_pin_display(pairing);
+        spawn_pairing_pin_display(config.clone(), pairing);
     }
     let app = Arc::new(AgentApp::new_with_auth(
         config_path.to_path_buf(),
@@ -1316,7 +1359,7 @@ fn run_listener(
     listen(config_path, app, wn)
 }
 
-fn spawn_pairing_pin_display(pairing: PairingRuntime) {
+fn spawn_pairing_pin_display(config: Config, pairing: PairingRuntime) {
     thread::spawn(move || {
         let pairing_gate = pairing.gate;
         let payload = pairing.payload;
@@ -1328,6 +1371,12 @@ fn spawn_pairing_pin_display(pairing: PairingRuntime) {
         }
         while !pairing_gate.is_complete() {
             let pin = pairing_gate.current_pin();
+            if let Err(error) = runtime::update_pairing_pin(
+                &config,
+                Some(RuntimePairingPin::from_pairing_pin(&pin)),
+            ) {
+                eprintln!("agentnoise: failed to publish pairing PIN to runtime status: {error:#}");
+            }
             print_pairing_pin(pin.clone());
             let mut alert = match display {
                 PairingDisplay::Desktop => {
@@ -1351,6 +1400,9 @@ fn spawn_pairing_pin_display(pairing: PairingRuntime) {
                 if pairing_gate.is_complete() {
                     if let Some(alert) = alert.as_mut() {
                         alert.close();
+                    }
+                    if let Err(error) = runtime::clear_pairing(&config) {
+                        eprintln!("agentnoise: failed to clear runtime pairing status: {error:#}");
                     }
                     show_pairing_success(display);
                     return;
@@ -1630,7 +1682,12 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         }
                     }
                     RouteAction::Run(request) => {
-                        send_reply_recorded(&wn, &event_journal, group_id, "Job accepted.")?;
+                        send_reply_recorded(
+                            &wn,
+                            &event_journal,
+                            group_id,
+                            &app.run_ack_text(&request),
+                        )?;
                         let app = Arc::clone(&app);
                         let wn = Arc::clone(&wn);
                         let event_journal = Arc::clone(&event_journal);
@@ -1678,6 +1735,12 @@ fn send_reply_recorded(
     text: &str,
 ) -> Result<()> {
     const ATTEMPTS: usize = 3;
+
+    if let Ok(mut journal) = event_journal.lock()
+        && let Err(error) = journal.record_outbound_queued(group_id, text)
+    {
+        eprintln!("agentnoise: failed to record queued outbound event: {error:#}");
+    }
 
     let mut last_error = None;
     for attempt in 1..=ATTEMPTS {

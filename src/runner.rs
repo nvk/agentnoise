@@ -275,9 +275,11 @@ impl Runner {
         }
 
         let bondage_conf = self.config.resolved_bondage_conf().display().to_string();
+        let agent_profile = self.config.effective_agent_profile(request.agent);
+        let prompt = agentnoise_prompt(request);
         let mut args = vec![
             "exec".to_string(),
-            agent.profile.clone(),
+            agent_profile,
             bondage_conf,
             "--".to_string(),
             agent.bin.clone(),
@@ -290,7 +292,7 @@ impl Runner {
                     "resume".to_string(),
                     "--json".to_string(),
                     session.to_string(),
-                    request.prompt.clone(),
+                    prompt,
                 ]);
             }
             (AgentKind::Codex, None) => {
@@ -300,7 +302,7 @@ impl Runner {
                     "--json".to_string(),
                     "-C".to_string(),
                     workdir.display().to_string(),
-                    request.prompt.clone(),
+                    prompt,
                 ]);
             }
             (AgentKind::Claude, Some(session)) => {
@@ -310,7 +312,7 @@ impl Runner {
                     "stream-json".to_string(),
                     "--resume".to_string(),
                     session.to_string(),
-                    request.prompt.clone(),
+                    prompt,
                 ]);
             }
             (AgentKind::Claude, None) => {
@@ -328,7 +330,7 @@ impl Runner {
                 args.extend([
                     "--add-dir".to_string(),
                     repo_root.display().to_string(),
-                    request.prompt.clone(),
+                    prompt,
                 ]);
                 return Ok(CommandPlan {
                     program: self.config.runner.bondage_bin.clone(),
@@ -347,7 +349,7 @@ impl Runner {
                     "--resume".to_string(),
                     session.to_string(),
                     "-q".to_string(),
-                    request.prompt.clone(),
+                    prompt,
                 ]);
             }
             (AgentKind::Hermes, None) => {
@@ -360,7 +362,7 @@ impl Runner {
                     "--toolsets".to_string(),
                     "skills".to_string(),
                     "-q".to_string(),
-                    request.prompt.clone(),
+                    prompt,
                 ]);
                 return Ok(CommandPlan {
                     program: self.config.runner.bondage_bin.clone(),
@@ -725,6 +727,46 @@ fn content_item_text(value: &Value) -> Option<String> {
     None
 }
 
+fn agentnoise_prompt(request: &AgentRequest) -> String {
+    let mut context = vec![
+        "Agentnoise context:".to_string(),
+        "- You are running under agentnoise, a White Noise phone-to-desktop control bridge.".to_string(),
+        "- The user is chatting from a phone; reply concise, outcome-first, with no Markdown tables or raw logs unless asked.".to_string(),
+        "- Full logs stay local; mention /tail <job> when extra detail is useful.".to_string(),
+        "- The selected repo, cwd, and session come from agentnoise. Do not ask the user to SSH into this machine.".to_string(),
+        "- If this task touches agentnoise, consider pairing, service startup, relay/message reliability, and phone UX.".to_string(),
+    ];
+
+    if looks_like_wiki_prompt(&request.prompt) {
+        context.push(
+            "- LLM-Wiki instructions or plugins may be available; return a compact digest with paths and sources, not a pasted article.".to_string(),
+        );
+    }
+    if let Some(repo) = request.repo_alias.as_deref() {
+        context.push(format!("- Agentnoise repo alias: {repo}."));
+    }
+    if let Some(cwd) = request.cwd.as_deref() {
+        context.push(format!("- Agentnoise cwd: {cwd}."));
+    }
+    if let Some(session) = request.resume_session.as_deref() {
+        context.push(format!("- Resuming agent session: {session}."));
+    }
+
+    format!(
+        "{}\n\nUser request:\n{}",
+        context.join("\n"),
+        request.prompt
+    )
+}
+
+fn looks_like_wiki_prompt(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    prompt == "@wiki"
+        || prompt.starts_with("@wiki ")
+        || prompt == "wiki"
+        || prompt.starts_with("wiki ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,10 +794,12 @@ mod tests {
 
         assert_eq!(plan.program, "bondage");
         assert_eq!(plan.args[0], "exec");
-        assert_eq!(plan.args[1], "codex");
+        assert_eq!(plan.args[1], "codex-agentnoise");
         assert!(plan.args.contains(&"codex".to_string()));
         assert!(plan.args.contains(&"--json".to_string()));
         assert!(plan.args.contains(&"-C".to_string()));
+        assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
+        assert!(plan.args.last().unwrap().contains("User request:\nhello"));
         let repo_path = repo.path().canonicalize().unwrap();
         assert!(plan.args.contains(&repo_path.display().to_string()));
         assert_eq!(plan.cwd.as_deref(), Some(repo_path.as_path()));
@@ -801,16 +845,12 @@ mod tests {
         let jobs =
             JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
         let runner = Runner::new(config, jobs);
-        let plan = runner
-            .build_command(&AgentRequest::resume(
-                AgentKind::Claude,
-                "session-1",
-                "continue",
-            ))
-            .unwrap();
+        let request = AgentRequest::resume(AgentKind::Claude, "session-1", "continue");
+        let plan = runner.build_command(&request).unwrap();
 
         assert!(plan.args.contains(&"--resume".to_string()));
         assert!(plan.args.contains(&"session-1".to_string()));
+        assert_eq!(plan.args.last().unwrap(), &agentnoise_prompt(&request));
     }
 
     #[test]
@@ -848,16 +888,15 @@ mod tests {
         let jobs =
             JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
         let runner = Runner::new(config, jobs);
-        let plan = runner
-            .build_command(&AgentRequest::new(AgentKind::Hermes, "work", "hello"))
-            .unwrap();
+        let request = AgentRequest::new(AgentKind::Hermes, "work", "hello");
+        let plan = runner.build_command(&request).unwrap();
 
         assert_eq!(plan.program, "bondage");
         assert_eq!(
             plan.args,
             vec![
                 "exec".to_string(),
-                "hermes".to_string(),
+                "hermes-agentnoise".to_string(),
                 bondage_conf,
                 "--".to_string(),
                 "hermes".to_string(),
@@ -868,7 +907,7 @@ mod tests {
                 "--toolsets".to_string(),
                 "skills".to_string(),
                 "-q".to_string(),
-                "hello".to_string(),
+                agentnoise_prompt(&request),
             ]
         );
         let repo_path = repo.path().canonicalize().unwrap();
@@ -895,6 +934,16 @@ mod tests {
         assert_eq!(plan.cwd, None);
         assert!(plan.args.contains(&"--resume".to_string()));
         assert!(plan.args.contains(&"h123".to_string()));
+        assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
+    }
+
+    #[test]
+    fn wiki_prompt_gets_llm_wiki_context() {
+        let request = AgentRequest::prompt(AgentKind::Codex, "@wiki research chat UX");
+        let prompt = agentnoise_prompt(&request);
+
+        assert!(prompt.contains("LLM-Wiki"));
+        assert!(prompt.contains("User request:\n@wiki research chat UX"));
     }
 
     #[test]

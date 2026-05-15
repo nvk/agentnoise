@@ -35,6 +35,8 @@ pub struct RuntimeEvent {
 pub struct EventSummary {
     pub inbound: usize,
     pub outbound: usize,
+    #[serde(default)]
+    pub outbound_enqueued: usize,
     pub failed_outbound: usize,
     pub seen_message_ids: usize,
 }
@@ -107,6 +109,23 @@ impl EventJournal {
         if !ok {
             self.summary.failed_outbound += 1;
         }
+        let kind = if ok { "reply-sent" } else { "reply-failed" };
+        self.append_outbound(group_id, text, kind, ok, detail)
+    }
+
+    pub fn record_outbound_queued(&mut self, group_id: &str, text: &str) -> Result<()> {
+        self.summary.outbound_enqueued += 1;
+        self.append_outbound(group_id, text, "reply-queued", true, None)
+    }
+
+    fn append_outbound(
+        &self,
+        group_id: &str,
+        text: &str,
+        kind: &str,
+        ok: bool,
+        detail: Option<String>,
+    ) -> Result<()> {
         self.append(&RuntimeEvent {
             version: 1,
             at: now_string(),
@@ -114,7 +133,7 @@ impl EventJournal {
             group_id: group_id.to_string(),
             sender: None,
             message_id: None,
-            kind: "reply".to_string(),
+            kind: kind.to_string(),
             ok,
             detail,
             preview: preview(text, 180),
@@ -139,9 +158,13 @@ impl EventJournal {
                     }
                 }
                 EventDirection::Outbound => {
-                    self.summary.outbound += 1;
-                    if !event.ok {
-                        self.summary.failed_outbound += 1;
+                    if event.kind == "reply-queued" {
+                        self.summary.outbound_enqueued += 1;
+                    } else {
+                        self.summary.outbound += 1;
+                        if !event.ok {
+                            self.summary.failed_outbound += 1;
+                        }
                     }
                 }
             }
@@ -213,5 +236,22 @@ mod tests {
         let reopened = EventJournal::open(&path).unwrap();
         assert!(reopened.already_seen("group", Some("msg1")));
         assert_eq!(reopened.summary().inbound, 1);
+    }
+
+    #[test]
+    fn journal_records_outbound_queue_and_terminal_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("events.jsonl");
+        let mut journal = EventJournal::open(&path).unwrap();
+
+        journal.record_outbound_queued("group", "hello").unwrap();
+        journal
+            .record_outbound("group", "hello", false, Some("boom".to_string()))
+            .unwrap();
+
+        let summary = EventJournal::open(&path).unwrap().summary();
+        assert_eq!(summary.outbound_enqueued, 1);
+        assert_eq!(summary.outbound, 1);
+        assert_eq!(summary.failed_outbound, 1);
     }
 }

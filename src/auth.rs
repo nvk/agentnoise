@@ -75,10 +75,22 @@ pub fn is_pairing_pin_message(message: &str) -> bool {
 
 fn normalize_pin_message(message: &str) -> Option<String> {
     let message = message.trim();
-    let message = message
-        .strip_prefix("/pair")
-        .map(str::trim)
-        .unwrap_or(message);
+    let message = if message.starts_with('/') {
+        let mut parts = message.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or_default();
+        if !command.eq_ignore_ascii_case("/pair") {
+            return None;
+        }
+        parts.next().unwrap_or_default().trim()
+    } else {
+        message
+    };
+    if message
+        .chars()
+        .any(|ch| !ch.is_ascii_digit() && !ch.is_ascii_whitespace() && ch != '-')
+    {
+        return None;
+    }
     let pin = message
         .chars()
         .filter(|ch| ch.is_ascii_digit())
@@ -113,13 +125,20 @@ mod tests {
         assert!(gate.verify(&pin));
         assert!(gate.verify(&format!("/pair {pin}")));
         assert!(gate.verify(&format!("{} {}", &pin[..3], &pin[3..])));
+        assert!(gate.verify(&format!("/PAIR {}-{}", &pin[..3], &pin[3..])));
         assert!(!gate.verify("000000"));
+        assert!(!gate.verify(&format!("/pairing {pin}")));
+        assert!(!gate.verify(&format!("pin {pin}")));
     }
 
     #[test]
     fn detects_pairing_pin_messages() {
         assert!(is_pairing_pin_message("123456"));
+        assert!(is_pairing_pin_message("123 456"));
         assert!(is_pairing_pin_message("/pair 123456"));
+        assert!(is_pairing_pin_message("/PAIR 123-456"));
         assert!(!is_pairing_pin_message("/help"));
+        assert!(!is_pairing_pin_message("/pairing 123456"));
+        assert!(!is_pairing_pin_message("pin 123456"));
     }
 }

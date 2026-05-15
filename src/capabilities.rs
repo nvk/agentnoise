@@ -28,7 +28,7 @@ pub fn capabilities(config: &Config) -> Vec<AgentCapability> {
             AgentCapability {
                 agent,
                 enabled: config_agent.enabled,
-                profile: config_agent.profile.clone(),
+                profile: config.effective_agent_profile(agent),
                 bin: config_agent.bin.clone(),
                 permission_mode: config_agent.permission_mode.clone(),
                 approval_required,

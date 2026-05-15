@@ -123,7 +123,7 @@ Hermes is off by default. To test it, install the Hermes CLI, create a dedicated
 ```toml
 [agents.hermes]
 enabled = true
-profile = "hermes"
+profile = "hermes-agentnoise"
 bin = "hermes"
 ```
 
@@ -136,6 +136,12 @@ Restart agentnoise and send:
 agentnoise runs Hermes as `hermes chat --quiet --source agentnoise --toolsets
 skills -q ...` through `bondage`. Put `HERMES_HOME`, model endpoint settings,
 and filesystem restrictions in the `bondage` profile.
+
+Codex and Claude should also use dedicated `bondage` profiles for phone-driven
+runs: `codex-agentnoise` and `claude-agentnoise`. Older configs that name the
+generic `codex` or `claude` profiles are mapped to the matching
+`*-agentnoise` profile unless `runner.allow_generic_agent_profiles = true` is
+set.
 
 ## Permission Note
 

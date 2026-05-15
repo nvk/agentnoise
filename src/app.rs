@@ -320,6 +320,18 @@ impl AgentApp {
         ))
     }
 
+    pub fn run_ack_text(&self, request: &AgentRequest) -> String {
+        let action = if let Some(session) = request.resume_session.as_deref() {
+            format!("{} resume queued ({session})", request.agent)
+        } else {
+            format!("{} job queued", request.agent)
+        };
+        let workspace = request_workspace_text(request);
+        format!(
+            "Got it: {action}\nWorkspace: {workspace}\nI'll reply here when it finishes. If it goes quiet, send /status or /jobs."
+        )
+    }
+
     pub fn run_request_with_progress(
         &self,
         request: AgentRequest,
@@ -1139,6 +1151,20 @@ fn workspace_text(session: &SessionState) -> String {
     )
 }
 
+fn request_workspace_text(request: &AgentRequest) -> String {
+    if let Some(repo) = request.repo_alias.as_deref() {
+        return format!(
+            "{}:{}",
+            repo,
+            workspace::display_cwd(request.cwd.as_deref().unwrap_or_default())
+        );
+    }
+    if let Some(root) = request.workspace_root.as_deref() {
+        return root.display().to_string();
+    }
+    "selected workspace".to_string()
+}
+
 fn render_ls(alias: &str, path: &Path) -> String {
     if path.is_file() {
         let size = fs::metadata(path)
@@ -1485,6 +1511,34 @@ mod tests {
             RouteAction::Reply(reply) if reply.contains("unknown command")
                 && reply.contains("/help")
         ));
+    }
+
+    #[test]
+    fn run_ack_names_agent_and_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let request = match app
+            .route_message(Some("group-a"), Some("phone"), "/codex work fix it")
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+        let ack = app.run_ack_text(&request);
+
+        assert!(ack.contains("Got it: codex job queued"));
+        assert!(ack.contains("Workspace: work:/"));
+        assert!(ack.contains("/status"));
     }
 
     #[test]

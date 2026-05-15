@@ -530,7 +530,13 @@ pub fn account_logged_in(config: &WhitenoiseConfig) -> Result<bool> {
         return Ok(false);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    account_logged_in_from_stdout(
+        &String::from_utf8_lossy(&output.stdout),
+        config.account.as_deref(),
+    )
+}
+
+fn account_logged_in_from_stdout(stdout: &str, account: Option<&str>) -> Result<bool> {
     let stdout = stdout.trim();
     if stdout.is_empty() {
         return Ok(false);
@@ -538,11 +544,7 @@ pub fn account_logged_in(config: &WhitenoiseConfig) -> Result<bool> {
 
     let value: Value = serde_json::from_str(stdout).context("parsing wn whoami JSON")?;
 
-    if let Some(account) = config
-        .account
-        .as_deref()
-        .filter(|account| !account.trim().is_empty())
-    {
+    if let Some(account) = account.filter(|account| !account.trim().is_empty()) {
         return Ok(json_has_account_pubkey(&value, account));
     }
 
@@ -842,7 +844,7 @@ fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
 fn collect_visible_groups(value: &Value, groups: &mut Vec<VisibleGroup>) {
     match value {
         Value::Object(object) => {
-            if let Some(group_id) = direct_group_id(value) {
+            if let Some(group_id) = direct_visible_group_id(value) {
                 groups.push(VisibleGroup {
                     group_id,
                     peer_pubkey: find_string(
@@ -889,11 +891,25 @@ fn find_group_id(value: &Value) -> Option<String> {
 }
 
 fn direct_group_id(value: &Value) -> Option<String> {
+    direct_group_id_from_keys(
+        value,
+        &["group_id", "groupId", "mls_group_id", "mlsGroupId", "id"],
+    )
+}
+
+fn direct_visible_group_id(value: &Value) -> Option<String> {
+    direct_group_id_from_keys(
+        value,
+        &["group_id", "groupId", "mls_group_id", "mlsGroupId"],
+    )
+}
+
+fn direct_group_id_from_keys(value: &Value, keys: &[&str]) -> Option<String> {
     let Value::Object(object) = value else {
         return None;
     };
-    for key in ["group_id", "groupId", "mls_group_id", "mlsGroupId", "id"] {
-        if let Some(value) = object.get(key)
+    for key in keys {
+        if let Some(value) = object.get(*key)
             && let Some(group_id) = group_id_value(value)
         {
             return Some(group_id);
@@ -1009,6 +1025,24 @@ mod tests {
     }
 
     #[test]
+    fn fixture_contract_whoami_matches_hex_for_configured_npub() {
+        let public_key =
+            PublicKey::parse("da3122fc8de09013bf2fcedeb7eae35f2d37128aaa0e82a1329a76b19e3c88fe")
+                .unwrap();
+        let account_npub = public_key.to_bech32().unwrap();
+        let output = include_str!("../tests/fixtures/wn/whoami/account-hex.json");
+
+        assert!(account_logged_in_from_stdout(output, Some(&account_npub)).unwrap());
+    }
+
+    #[test]
+    fn fixture_contract_whoami_empty_is_not_logged_in() {
+        let output = include_str!("../tests/fixtures/wn/whoami/empty.json");
+
+        assert!(!account_logged_in_from_stdout(output, None).unwrap());
+    }
+
+    #[test]
     fn extracts_group_id_from_nested_json() {
         let output = r#"{"result":{"group":{"mls_group_id":"0123456789abcdef0123456789abcdef"}}}"#;
         assert_eq!(
@@ -1038,6 +1072,39 @@ mod tests {
             groups[0].peer_pubkey.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn fixture_contract_groups_list_parses_nested_vec_shape() {
+        let output = include_str!("../tests/fixtures/wn/groups-list/nested-vec.json");
+
+        let groups = parse_groups_output(output).unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            groups[0].peer_pubkey.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn fixture_contract_groups_list_deduplicates_group_ids() {
+        let output = include_str!("../tests/fixtures/wn/groups-list/duplicate-groups.json");
+
+        let groups = parse_groups_output(output).unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "0123456789abcdef0123456789abcdef");
+    }
+
+    #[test]
+    fn fixture_contract_groups_list_does_not_treat_message_id_as_group_id() {
+        let output = include_str!("../tests/fixtures/wn/groups-list/message-id-only.json");
+
+        let groups = parse_groups_output(output).unwrap();
+
+        assert!(groups.is_empty());
     }
 
     #[test]
@@ -1074,5 +1141,22 @@ mod tests {
             "wss://relay.example",
             "key_package"
         ));
+    }
+
+    #[test]
+    fn fixture_contract_relays_merge_types() {
+        let output = include_str!("../tests/fixtures/wn/relays/merged-types.json");
+
+        let relays = parse_relays_output(output).unwrap();
+
+        assert_eq!(relays.len(), 1);
+        assert_eq!(
+            relays[0].types,
+            vec![
+                "inbox".to_string(),
+                "key_package".to_string(),
+                "nip65".to_string()
+            ]
+        );
     }
 }
