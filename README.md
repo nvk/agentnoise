@@ -22,7 +22,7 @@ such alpha, much wow.
 
 ## Changelog
 
-**Unreleased** - **Startup hello.** Once the listener is up, already-paired
+**v0.1.16** - **Startup hello.** Once the listener is up, already-paired
 control chats get a timestamped `agentnoise is up` message with profile and
 workspace context. First-pairing mode stays quiet until the PIN succeeds.
 

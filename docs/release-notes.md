@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## 0.1.16 - 2026-05-15
 
 - Added a startup hello for already-paired control chats. When agentnoise
   reaches the listener, it posts `agentnoise is up` with an RFC3339 UTC
