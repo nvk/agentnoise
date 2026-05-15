@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.11** - **Pairing identity fix.** Normalized Nostr sender identity
+checks across hex pubkeys and `npub` values. This stops agentnoise from
+treating its own White Noise replies as unpaired inbound messages when the
+desktop identity is stored as `npub` but White Noise reports authors as hex.
+Allowed phone senders also match across both forms.
+
 **v0.1.10** - **Reliability and identity polish.** Bare text, unknown
 commands, unauthorized senders, and startup catch-up events now get explicit
 phone replies instead of silent drops. Added reply send retries,

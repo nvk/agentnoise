@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use nostr::PublicKey;
 use uuid::Uuid;
 
 use crate::approvals::{self, ApprovalStore};
@@ -360,8 +361,14 @@ impl AgentApp {
             return false;
         };
 
-        self.config.whitenoise.bot_sender.as_deref() == Some(sender)
-            || self.config.whitenoise.bot_npub.as_deref() == Some(sender)
+        [
+            self.config.whitenoise.bot_sender.as_deref(),
+            self.config.whitenoise.bot_npub.as_deref(),
+            self.config.whitenoise.account.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|bot| sender_id_matches(bot, sender))
     }
 
     fn should_ignore_sender(&self, sender: Option<&str>) -> bool {
@@ -406,7 +413,7 @@ impl AgentApp {
                 .whitenoise
                 .allowed_senders
                 .iter()
-                .any(|allowed| allowed == sender)
+                .any(|allowed| sender_id_matches(allowed, sender))
             {
                 config.whitenoise.allowed_senders.push(sender.to_string());
                 config.save(config_path)?;
@@ -948,6 +955,31 @@ impl AgentApp {
     }
 }
 
+fn sender_id_matches(configured: &str, sender: &str) -> bool {
+    let configured = configured.trim();
+    let sender = sender.trim();
+    if configured.is_empty() || sender.is_empty() {
+        return false;
+    }
+    if configured == sender {
+        return true;
+    }
+
+    match (
+        nostr_public_key_hex(configured),
+        nostr_public_key_hex(sender),
+    ) {
+        (Some(configured), Some(sender)) => configured == sender,
+        _ => false,
+    }
+}
+
+fn nostr_public_key_hex(value: &str) -> Option<String> {
+    PublicKey::parse(value.trim())
+        .ok()
+        .map(|public_key| public_key.to_hex())
+}
+
 #[derive(Clone)]
 struct AuthState {
     allowed_senders: Arc<Mutex<Vec<String>>>,
@@ -971,7 +1003,9 @@ impl AuthState {
         if allowed.is_empty() {
             return self.pairing_gate.is_some();
         }
-        !allowed.iter().any(|allowed| allowed == sender)
+        !allowed
+            .iter()
+            .any(|allowed| sender_id_matches(allowed, sender))
     }
 
     fn accepts_pairing_pin(&self, sender: &str, text: &str) -> bool {
@@ -990,7 +1024,10 @@ impl AuthState {
                 .allowed_senders
                 .lock()
                 .map_err(|_| anyhow::anyhow!("sender allowlist lock poisoned"))?;
-            if !allowed.iter().any(|allowed| allowed == sender) {
+            if !allowed
+                .iter()
+                .any(|allowed| sender_id_matches(allowed, sender))
+            {
                 allowed.push(sender.to_string());
             }
         }
@@ -1251,6 +1288,13 @@ fn help_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::nips::nip19::ToBech32;
+
+    fn test_public_key_pair() -> (String, String) {
+        let hex = "1111111111111111111111111111111111111111111111111111111111111111";
+        let npub = PublicKey::from_hex(hex).unwrap().to_bech32().unwrap();
+        (hex.to_string(), npub)
+    }
 
     #[test]
     fn pairing_pin_authorizes_sender_and_persists_allowlist() {
@@ -1288,6 +1332,49 @@ mod tests {
 
         let saved = Config::load(&config_path).unwrap();
         assert_eq!(saved.whitenoise.allowed_senders, vec!["phone"]);
+    }
+
+    #[test]
+    fn bot_sender_matches_hex_author_when_configured_as_npub() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let (bot_hex, bot_npub) = test_public_key_pair();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.bot_npub = Some(bot_npub.clone());
+        config.whitenoise.account = Some(bot_npub);
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("group-a"), Some(&bot_hex), "/help")
+                .unwrap(),
+            RouteAction::Ignore
+        ));
+    }
+
+    #[test]
+    fn allowed_sender_matches_hex_author_when_configured_as_npub() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let (phone_hex, phone_npub) = test_public_key_pair();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec![phone_npub];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("group-a"), Some(&phone_hex), "/help")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains("agentnoise commands")
+        ));
     }
 
     #[test]

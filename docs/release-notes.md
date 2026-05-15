@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.11
+
+- Normalized Nostr sender identity checks across hex pubkeys and `npub`
+  values.
+- Fixed the confusing “not paired” replies caused by agentnoise seeing its own
+  outbound White Noise messages as inbound unpaired senders.
+- Kept paired phone allowlist matching compatible with either hex or `npub`
+  sender values.
+
 ## 0.1.10
 
 - Added explicit replies for bare text, unknown commands, unauthorized senders,
