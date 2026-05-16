@@ -50,9 +50,11 @@ just test-e2e-fake
 
 This starts agentnoise with a development burner identity, launches the
 fake-phone harness with its own `wnd` data directory and burner phone `nsec`,
-pairs through the printed SSH PIN, and verifies `/status` and `/help` replies.
-It still depends on the local White Noise binaries and relay reachability, so it
-is intentionally separate from the offline release check.
+pairs through the printed SSH PIN, verifies `/status` and `/help`, then sends
+`/codex Reply with exactly: agentnoise-fake-phone-e2e-ok` and requires both the
+ack and the final job reply. It still depends on local White Noise binaries,
+relay reachability, and a working Codex profile, so it is intentionally separate
+from the offline release check.
 
 Run this live roundtrip once as a pre-release smoke on a workstation. Do not put
 it in a repeat loop on the primary machine. Repeated live relay runs belong on a
@@ -76,8 +78,9 @@ This stays local and does not depend on hosted CI. It runs the fast checks,
 fixture contracts, the offline chat UX smoke, `cargo package --offline`, and
 formula placeholder checks.
 
-Use `release-check` as the main gate. Add one live fake-phone smoke after that
-when the machine is stable and network/relay coverage matters for the release.
+Use `release-check` as the offline gate. Add one live fake-phone job smoke after
+that before shipping changes that affect service startup, White Noise routing,
+agent launching, job lifecycle, or reply formatting.
 
 Manual phone smoke:
 

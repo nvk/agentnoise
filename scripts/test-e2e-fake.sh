@@ -107,11 +107,16 @@ if [ -z "$pin" ]; then
   exit 1
 fi
 
-"$bin" --config "$config" fake-phone roundtrip \
+if ! "$bin" --config "$config" fake-phone roundtrip \
   --root "$tmpdir/fake-phone" \
   --pin "$pin" \
   --timeout-seconds "$timeout_seconds" \
-  /status >"$tmpdir/status.out" 2>"$tmpdir/status.err"
+  /status >"$tmpdir/status.out" 2>"$tmpdir/status.err"; then
+  sed -n '1,200p' "$tmpdir/status.out" >&2 || true
+  sed -n '1,200p' "$tmpdir/status.err" >&2 || true
+  echo "fake-phone /status roundtrip failed" >&2
+  exit 1
+fi
 
 if grep -q "replies: none before timeout" "$tmpdir/status.out"; then
   sed -n '1,200p' "$tmpdir/status.out" >&2
@@ -126,10 +131,15 @@ if ! grep -q "Status: OK" "$tmpdir/status.out"; then
   exit 1
 fi
 
-"$bin" --config "$config" fake-phone roundtrip \
+if ! "$bin" --config "$config" fake-phone roundtrip \
   --root "$tmpdir/fake-phone" \
   --timeout-seconds "$timeout_seconds" \
-  /help >"$tmpdir/help.out" 2>"$tmpdir/help.err"
+  /help >"$tmpdir/help.out" 2>"$tmpdir/help.err"; then
+  sed -n '1,200p' "$tmpdir/help.out" >&2 || true
+  sed -n '1,200p' "$tmpdir/help.err" >&2 || true
+  echo "fake-phone /help roundtrip failed" >&2
+  exit 1
+fi
 
 if grep -q "replies: none before timeout" "$tmpdir/help.out"; then
   sed -n '1,200p' "$tmpdir/help.out" >&2
@@ -141,6 +151,26 @@ if ! grep -q "/status" "$tmpdir/help.out"; then
   sed -n '1,200p' "$tmpdir/help.out" >&2
   sed -n '1,200p' "$tmpdir/help.err" >&2 || true
   echo "fake-phone /help did not receive the command list" >&2
+  exit 1
+fi
+
+codex_phrase="agentnoise-fake-phone-e2e-ok"
+if ! "$bin" --config "$config" fake-phone roundtrip \
+  --root "$tmpdir/fake-phone" \
+  --timeout-seconds "$timeout_seconds" \
+  --min-replies 2 \
+  --require-job-final \
+  --expect "$codex_phrase" \
+  /codex "Reply with exactly: $codex_phrase" >"$tmpdir/codex.out" 2>"$tmpdir/codex.err"; then
+  sed -n '1,240p' "$tmpdir/codex.out" >&2 || true
+  sed -n '1,240p' "$tmpdir/codex.err" >&2 || true
+  echo "fake-phone /codex did not receive ack plus final job reply" >&2
+  exit 1
+fi
+if ! grep -q "$codex_phrase" "$tmpdir/codex.out"; then
+  sed -n '1,240p' "$tmpdir/codex.out" >&2
+  sed -n '1,240p' "$tmpdir/codex.err" >&2 || true
+  echo "fake-phone /codex final reply did not include expected phrase" >&2
   exit 1
 fi
 

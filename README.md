@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.20** - **Fake-phone E2E and Codex launch fix.** The fake-phone harness
+now waits for real command replies and final job output instead of passing on
+startup hellos or unrelated auth replies. Codex jobs also pass
+`--skip-git-repo-check`, which fixes phone-launched jobs in configured
+workspaces that are plain directories.
+
 **v0.1.16** - **Startup hello.** Once the listener is up, already-paired
 control chats get a timestamped `agentnoise is up` message with profile and
 workspace context. First-pairing mode stays quiet until the PIN succeeds.
@@ -565,12 +571,21 @@ touching the real phone identity or the normal agentnoise keychain.
 agentnoise fake-phone plan
 agentnoise fake-phone roundtrip --pin 123456 /status
 agentnoise fake-phone roundtrip /help
+agentnoise fake-phone roundtrip \
+  --timeout-seconds 180 \
+  --min-replies 2 \
+  --require-job-final \
+  --expect agentnoise-e2e-ok \
+  /codex "Reply with exactly: agentnoise-e2e-ok"
 ```
 
 For first-pairing tests, pass the current desktop PIN. After pairing, omit
 `--pin`. The harness resends the test message for the timeout window because a
 running agentnoise service may need one discovery cycle before subscribing to
-the newly-created chat.
+the newly-created chat. With `--expect`, unrelated replies such as startup
+hellos or auth errors do not stop resends. Use `--require-job-final` for
+`/codex`, `/claude`, or `/hermes` tests; otherwise the first ack would be
+enough to pass.
 
 ## Transport Notes
 

@@ -311,6 +311,7 @@ impl Runner {
                 args.extend([
                     "exec".to_string(),
                     "resume".to_string(),
+                    "--skip-git-repo-check".to_string(),
                     "--json".to_string(),
                     session.to_string(),
                     prompt,
@@ -321,6 +322,7 @@ impl Runner {
                 let (_repo_root, workdir) = self.workspace_paths(request)?;
                 args.extend([
                     "exec".to_string(),
+                    "--skip-git-repo-check".to_string(),
                     "--json".to_string(),
                     "-C".to_string(),
                     workdir.display().to_string(),
@@ -914,6 +916,7 @@ mod tests {
         assert_eq!(plan.args[0], "exec");
         assert_eq!(plan.args[1], "codex-agentnoise");
         assert!(plan.args.contains(&"codex".to_string()));
+        assert!(plan.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(plan.args.contains(&"--json".to_string()));
         assert!(plan.args.contains(&"-C".to_string()));
         assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
@@ -1030,6 +1033,7 @@ mod tests {
         assert_eq!(plan.args[0], "exec");
         assert!(!plan.args.contains(&"codex-agentnoise".to_string()));
         assert!(!plan.args.contains(&"bondage".to_string()));
+        assert!(plan.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(plan.args.contains(&"--json".to_string()));
         assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
         let repo_path = repo.path().canonicalize().unwrap();
@@ -1052,6 +1056,7 @@ mod tests {
         let plan = runner.build_command(&request).unwrap();
 
         assert!(plan.args.contains(&"resume".to_string()));
+        assert!(plan.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(plan.args.contains(&"session-1".to_string()));
         let launch_cwd = temp.path().join("data");
         assert_eq!(plan.cwd.as_deref(), Some(launch_cwd.as_path()));

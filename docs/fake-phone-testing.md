@@ -32,19 +32,33 @@ agentnoise fake-phone roundtrip /help
 agentnoise fake-phone roundtrip /agents
 ```
 
+Full job-path test:
+
+```sh
+agentnoise fake-phone roundtrip \
+  --timeout-seconds 180 \
+  --min-replies 2 \
+  --require-job-final \
+  --expect agentnoise-e2e-ok \
+  /codex "Reply with exactly: agentnoise-e2e-ok"
+```
+
 The harness creates a White Noise chat with the configured desktop agentnoise
-`npub`, then resends the requested message for the timeout window. That makes it
-usable with the normal listener discovery loop, which may need one cycle before
-subscribing to the new fake-phone chat.
+`npub`, then resends the requested message until the first useful reply. That
+makes it usable with the normal listener discovery loop, which may need one
+cycle before subscribing to the new fake-phone chat. After the first reply, it
+does not resend the command, so long-running agent jobs are not duplicated.
 
 Useful flags:
 
 ```sh
 agentnoise fake-phone roundtrip --timeout-seconds 120 /status
 agentnoise fake-phone roundtrip --root /tmp/agentnoise-fake-phone /help
+agentnoise fake-phone roundtrip --expect "Status: OK" /status
+agentnoise fake-phone roundtrip --require-job-final --expect done /codex "Reply exactly: done"
 ```
 
-If the command reports no replies before timeout, check:
+If the command reports a timeout, check:
 
 ```sh
 agentnoise status

@@ -33,6 +33,9 @@ pub struct FakePhoneRoundtrip {
     pub message: String,
     pub group_name: String,
     pub timeout: Duration,
+    pub expect: Vec<String>,
+    pub min_replies: usize,
+    pub require_job_final: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +43,8 @@ pub struct FakePhoneResult {
     pub phone_npub: String,
     pub group_id: String,
     pub replies: Vec<String>,
+    pub matched: Vec<String>,
+    pub saw_job_final: bool,
 }
 
 pub fn plan(config: &Config, root: Option<&Path>) -> FakePhonePlan {
@@ -92,11 +97,16 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
         thread::sleep(Duration::from_secs(1));
     }
 
-    let replies = send_until_reply(&client, &group_id, &options.message, options.timeout)?;
+    let outcome = send_until_replies(&client, &group_id, &options)?;
+    if !outcome.satisfied() {
+        bail!("{}", outcome.failure_message());
+    }
     Ok(FakePhoneResult {
         phone_npub,
         group_id,
-        replies,
+        replies: outcome.replies,
+        matched: outcome.matched,
+        saw_job_final: outcome.saw_job_final,
     })
 }
 
@@ -252,12 +262,90 @@ fn create_group(config: &WhitenoiseConfig, name: &str, agent_npub: &str) -> Resu
         .context("White Noise did not return a group id")
 }
 
-fn send_until_reply(
+#[derive(Debug)]
+struct ReplyOutcome {
+    replies: Vec<String>,
+    matched: Vec<String>,
+    expected: Vec<String>,
+    min_replies: usize,
+    require_job_final: bool,
+    saw_job_final: bool,
+}
+
+impl ReplyOutcome {
+    fn new(options: &FakePhoneRoundtrip) -> Self {
+        Self {
+            replies: Vec::new(),
+            matched: Vec::new(),
+            expected: options
+                .expect
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect(),
+            min_replies: options.min_replies.max(1),
+            require_job_final: options.require_job_final,
+            saw_job_final: false,
+        }
+    }
+
+    fn record(&mut self, reply: String) {
+        if is_job_final_reply(&reply) {
+            self.saw_job_final = true;
+        }
+        for expected in &self.expected {
+            if reply.contains(expected) && !self.matched.iter().any(|value| value == expected) {
+                self.matched.push(expected.clone());
+            }
+        }
+        self.replies.push(reply);
+    }
+
+    fn satisfied(&self) -> bool {
+        self.replies.len() >= self.min_replies
+            && self.matched.len() == self.expected.len()
+            && (!self.require_job_final || self.saw_job_final)
+    }
+
+    fn failure_message(&self) -> String {
+        let mut missing = Vec::new();
+        if self.replies.len() < self.min_replies {
+            missing.push(format!(
+                "received {} reply/replies, need {}",
+                self.replies.len(),
+                self.min_replies
+            ));
+        }
+        let unmatched = self
+            .expected
+            .iter()
+            .filter(|expected| !self.matched.iter().any(|matched| matched == *expected))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unmatched.is_empty() {
+            missing.push(format!("missing expected text: {}", unmatched.join(", ")));
+        }
+        if self.require_job_final && !self.saw_job_final {
+            missing.push("missing final job reply".to_string());
+        }
+        let detail = if self.replies.is_empty() {
+            "no replies received".to_string()
+        } else {
+            format!("last reply: {}", self.replies.last().unwrap())
+        };
+        format!(
+            "fake phone roundtrip timed out: {}; {}",
+            missing.join("; "),
+            detail
+        )
+    }
+}
+
+fn send_until_replies(
     client: &WnClient,
     group_id: &str,
-    message: &str,
-    timeout: Duration,
-) -> Result<Vec<String>> {
+    options: &FakePhoneRoundtrip,
+) -> Result<ReplyOutcome> {
     let mut child = client.subscribe_group_with_limit(group_id, 0)?;
     let stdout = child
         .stdout
@@ -265,7 +353,7 @@ fn send_until_reply(
         .context("fake phone subscribe did not expose stdout")?;
     let group_id = group_id.to_string();
     let reader_group_id = group_id.clone();
-    let sent_message = message.to_string();
+    let sent_message = options.message.clone();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for value in WnClient::parse_events_from_reader(stdout) {
@@ -279,7 +367,6 @@ fn send_until_reply(
             for event in WnClient::parse_events_for_group(&value, &reader_group_id) {
                 if is_command_reply(&event.text, &sent_message) {
                     let _ = tx.send(Ok(event.text));
-                    return;
                 }
             }
         }
@@ -287,16 +374,22 @@ fn send_until_reply(
 
     let started = Instant::now();
     let mut last_send = Instant::now() - Duration::from_secs(10);
-    let mut replies = Vec::new();
-    while started.elapsed() < timeout {
-        if last_send.elapsed() >= Duration::from_secs(5) {
-            client.send_to(&group_id, message)?;
+    let mut sent_after_reply = false;
+    let mut outcome = ReplyOutcome::new(options);
+    while started.elapsed() < options.timeout {
+        if !sent_after_reply && last_send.elapsed() >= Duration::from_secs(5) {
+            client.send_to(&group_id, &options.message)?;
             last_send = Instant::now();
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Ok(reply)) => {
-                replies.push(reply);
-                break;
+                if reply_should_stop_resending(&reply, &outcome.expected) {
+                    sent_after_reply = true;
+                }
+                outcome.record(reply);
+                if outcome.satisfied() {
+                    break;
+                }
             }
             Ok(Err(error)) => {
                 child.kill().ok();
@@ -307,7 +400,7 @@ fn send_until_reply(
         }
     }
     child.kill().ok();
-    Ok(replies)
+    Ok(outcome)
 }
 
 fn is_command_reply(text: &str, sent_message: &str) -> bool {
@@ -315,8 +408,37 @@ fn is_command_reply(text: &str, sent_message: &str) -> bool {
     !text.is_empty()
         && text != sent_message.trim()
         && text != "Paired. Send /help for commands."
+        && !text.starts_with("agentnoise is up\n")
         && !is_pairing_pin_message(text)
         && !text.starts_with("I saw this while catching up after startup,")
+}
+
+fn reply_should_stop_resending(reply: &str, expected: &[String]) -> bool {
+    if expected.is_empty() {
+        return true;
+    }
+    expected.iter().any(|expected| reply.contains(expected))
+        || is_job_ack_reply(reply)
+        || is_job_final_reply(reply)
+}
+
+fn is_job_ack_reply(text: &str) -> bool {
+    let text = text.trim();
+    (text.starts_with("Got it: ") && text.contains(" job queued"))
+        || (text.starts_with("Job ") && text.contains(": started"))
+}
+
+fn is_job_final_reply(text: &str) -> bool {
+    let text = text.trim();
+    let Some(first) = text.lines().next().map(str::trim) else {
+        return false;
+    };
+    first.starts_with("Job ")
+        && (first.contains(" succeeded")
+            || first.contains(" failed")
+            || first.contains(" cancelled")
+            || first.contains(" interrupted"))
+        && text.contains("\nDetails: /tail ")
 }
 
 #[cfg(test)]
@@ -365,9 +487,66 @@ mod tests {
             "I saw this while catching up after startup, so I did not run it:\n/status\nSend it again now, or send /help.",
             "/status"
         ));
+        assert!(!is_command_reply(
+            "agentnoise is up\ntimestamp: 2026-05-16T19:31:24Z\nprofile: frontier\nworkspace: sandbox:/\nSend /status or /help.",
+            "/status"
+        ));
         assert!(is_command_reply(
             "agentnoise\nStatus: OK\nSession: default",
             "/status"
         ));
+    }
+
+    #[test]
+    fn fake_phone_only_stops_resending_on_useful_expected_replies() {
+        let expected = vec!["done".to_string()];
+        assert!(!reply_should_stop_resending(
+            "This sender is not paired with agentnoise.",
+            &expected
+        ));
+        assert!(reply_should_stop_resending(
+            "Got it: codex job queued\nWorkspace: sandbox:/",
+            &expected
+        ));
+        assert!(reply_should_stop_resending(
+            "Job an-123 codex: started",
+            &expected
+        ));
+        assert!(reply_should_stop_resending("all done", &expected));
+        assert!(reply_should_stop_resending(
+            "This sender is not paired with agentnoise.",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn fake_phone_detects_final_job_reply() {
+        assert!(!is_job_final_reply("Job an-123 codex: started"));
+        assert!(!is_job_final_reply("Job an-123 codex: succeeded"));
+        assert!(is_job_final_reply(
+            "Job an-123 succeeded\nDetails: /tail an-123\n\nok"
+        ));
+        assert!(is_job_final_reply(
+            "Job an-123 failed\nDetails: /tail an-123\n\nboom"
+        ));
+    }
+
+    #[test]
+    fn fake_phone_outcome_requires_expected_text_and_final_job() {
+        let options = FakePhoneRoundtrip {
+            root: PathBuf::from("/tmp/fake"),
+            pin: None,
+            message: "/codex hi".to_string(),
+            group_name: "test".to_string(),
+            timeout: Duration::from_secs(1),
+            expect: vec!["ok".to_string()],
+            min_replies: 2,
+            require_job_final: true,
+        };
+        let mut outcome = ReplyOutcome::new(&options);
+        outcome.record("Got it: codex job queued".to_string());
+        assert!(!outcome.satisfied());
+        outcome.record("Job an-123 succeeded\nDetails: /tail an-123\n\nok".to_string());
+        assert!(outcome.satisfied());
     }
 }

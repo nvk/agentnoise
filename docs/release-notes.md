@@ -1,5 +1,16 @@
 # Release Notes
 
+## Unreleased
+
+## 0.1.20 - 2026-05-16
+
+- Hardened `agentnoise fake-phone roundtrip` so it can require a final job
+  reply and expected text, not just the initial command ack.
+- Extended the live fake-phone E2E smoke to send a `/codex` command and require
+  both ack and final reply through White Noise.
+- Run Codex jobs with `--skip-git-repo-check` so phone-launched jobs work in
+  configured workspace directories that are not Git repos.
+
 ## 0.1.19 - 2026-05-16
 
 - Added local agent session visibility with `agentnoise local-sessions` and
