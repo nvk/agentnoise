@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## 0.1.19 - 2026-05-16
 
 - Added local agent session visibility with `agentnoise local-sessions` and
   `/agent-sessions`, listing recent Codex/Claude session metadata and explicit
