@@ -106,8 +106,38 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
         "codex-resume" => parse_resume(AgentKind::Codex, rest),
         "claude-resume" => parse_resume(AgentKind::Claude, rest),
         "hermes-resume" => parse_resume(AgentKind::Hermes, rest),
-        _ => bail!("unknown command: /{command}"),
+        _ => parse_profile_command(&command, rest),
     }
+}
+
+fn parse_profile_command(command: &str, rest: &str) -> Result<ChatCommand> {
+    for (prefix, agent) in [
+        ("codex-", AgentKind::Codex),
+        ("claude-", AgentKind::Claude),
+        ("hermes-", AgentKind::Hermes),
+    ] {
+        let Some(name) = command.strip_prefix(prefix) else {
+            continue;
+        };
+        if let Some(name) = name.strip_suffix("-resume") {
+            let (session, prompt) = split_first(rest);
+            if name.is_empty() || session.is_empty() || prompt.trim().is_empty() {
+                bail!("usage: /{}{}-resume <session> <prompt>", prefix, name);
+            }
+            return Ok(ChatCommand::Run(
+                AgentRequest::resume(agent, session.to_string(), prompt.trim().to_string())
+                    .with_profile(name),
+            ));
+        }
+        if name.is_empty() {
+            break;
+        }
+        return parse_run(agent, rest).map(|command| match command {
+            ChatCommand::Run(request) => ChatCommand::Run(request.with_profile(name)),
+            command => command,
+        });
+    }
+    bail!("unknown command: /{command}")
 }
 
 fn parse_worktree(rest: &str) -> Result<ChatCommand> {
@@ -216,6 +246,18 @@ mod tests {
         assert_eq!(
             parse_chat_command("/codex explain the repo").unwrap(),
             ChatCommand::Run(AgentRequest::prompt(AgentKind::Codex, "explain the repo"))
+        );
+        assert_eq!(
+            parse_chat_command("/codex-fix repair the test").unwrap(),
+            ChatCommand::Run(
+                AgentRequest::prompt(AgentKind::Codex, "repair the test").with_profile("fix")
+            )
+        );
+        assert_eq!(
+            parse_chat_command("/codex-unsafe-resume abc123 continue").unwrap(),
+            ChatCommand::Run(
+                AgentRequest::resume(AgentKind::Codex, "abc123", "continue").with_profile("unsafe")
+            )
         );
     }
 

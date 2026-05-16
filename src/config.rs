@@ -8,7 +8,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{default_config_path, default_data_dir, default_log_dir, expand_tilde};
-use crate::runner::AgentKind;
+use crate::runner::{AgentKind, AgentRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -139,6 +139,16 @@ pub struct AgentConfig {
     pub bin: String,
     #[serde(default)]
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<AgentProfileConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProfileConfig {
+    pub name: String,
+    pub profile: String,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,12 +266,14 @@ impl Config {
                     profile: recommended_agentnoise_profile(AgentKind::Codex).to_string(),
                     bin: "codex".to_string(),
                     permission_mode: None,
+                    profiles: Vec::new(),
                 },
                 claude: AgentConfig {
                     enabled: true,
                     profile: recommended_agentnoise_profile(AgentKind::Claude).to_string(),
                     bin: "claude".to_string(),
                     permission_mode: Some("auto".to_string()),
+                    profiles: Vec::new(),
                 },
                 hermes: default_hermes_agent_config(),
             },
@@ -312,6 +324,9 @@ impl Config {
                 bail!("duplicate repo alias: {}", repo.alias);
             }
         }
+        for agent in [AgentKind::Codex, AgentKind::Claude, AgentKind::Hermes] {
+            self.validate_agent_profiles(agent)?;
+        }
         Ok(())
     }
 
@@ -332,6 +347,51 @@ impl Config {
 
     pub fn effective_agent_profile(&self, agent: AgentKind) -> String {
         let configured = self.agent(agent).profile.trim();
+        self.effective_profile_name(agent, configured)
+    }
+
+    pub fn effective_agent_profile_for_request(&self, request: &AgentRequest) -> Result<String> {
+        let agent = self.agent(request.agent);
+        let configured = match request.profile.as_deref() {
+            Some(profile) => self
+                .agent_profile_variant(request.agent, profile)?
+                .profile
+                .trim(),
+            None => agent.profile.trim(),
+        };
+        Ok(self.effective_profile_name(request.agent, configured))
+    }
+
+    pub fn effective_permission_mode_for_request(
+        &self,
+        request: &AgentRequest,
+    ) -> Result<Option<String>> {
+        let agent = self.agent(request.agent);
+        if let Some(profile) = request.profile.as_deref()
+            && let Some(permission_mode) = self
+                .agent_profile_variant(request.agent, profile)?
+                .permission_mode
+                .clone()
+        {
+            return Ok(Some(permission_mode));
+        }
+        Ok(agent.permission_mode.clone())
+    }
+
+    pub fn agent_profile_variant(
+        &self,
+        agent: AgentKind,
+        name: &str,
+    ) -> Result<&AgentProfileConfig> {
+        let normalized = normalize_profile_variant_name(name);
+        self.agent(agent)
+            .profiles
+            .iter()
+            .find(|profile| profile.name == normalized)
+            .with_context(|| format!("unknown {agent} profile variant: {name}"))
+    }
+
+    fn effective_profile_name(&self, agent: AgentKind, configured: &str) -> String {
         if self.runner.launcher == RunnerLauncher::Direct {
             return configured.to_string();
         }
@@ -340,6 +400,32 @@ impl Config {
             return recommended_agentnoise_profile(agent).to_string();
         }
         configured.to_string()
+    }
+
+    fn validate_agent_profiles(&self, agent: AgentKind) -> Result<()> {
+        let mut names = HashSet::new();
+        for profile in &self.agent(agent).profiles {
+            let name = profile.name.trim();
+            if name.is_empty() {
+                bail!("{agent} profile variant name cannot be empty");
+            }
+            if normalize_profile_variant_name(name) != name {
+                bail!(
+                    "{agent} profile variant `{}` must use lowercase letters, digits, and dashes",
+                    profile.name
+                );
+            }
+            if name == "resume" {
+                bail!("{agent} profile variant `resume` is reserved");
+            }
+            if profile.profile.trim().is_empty() {
+                bail!("{agent} profile variant `{name}` has empty bondage profile");
+            }
+            if !names.insert(name.to_string()) {
+                bail!("duplicate {agent} profile variant: {name}");
+            }
+        }
+        Ok(())
     }
 
     pub fn agent_profile_warnings(&self) -> Vec<String> {
@@ -561,6 +647,7 @@ fn default_hermes_agent_config() -> AgentConfig {
         profile: recommended_agentnoise_profile(AgentKind::Hermes).to_string(),
         bin: "hermes".to_string(),
         permission_mode: None,
+        profiles: Vec::new(),
     }
 }
 
@@ -582,6 +669,20 @@ fn generic_agent_profile(agent: AgentKind) -> &'static str {
 
 fn is_generic_agent_profile(agent: AgentKind, profile: &str) -> bool {
     profile == generic_agent_profile(agent)
+}
+
+fn normalize_profile_variant_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter_map(|ch| {
+            let ch = ch.to_ascii_lowercase();
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                Some(ch)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -673,6 +774,39 @@ path = "/tmp"
         config.runner.allow_generic_agent_profiles = true;
         assert_eq!(config.effective_agent_profile(AgentKind::Codex), "codex");
         assert!(config.agent_profile_warnings().is_empty());
+    }
+
+    #[test]
+    fn configured_profile_variants_are_resolved_by_request() {
+        let mut config = Config::template();
+        config.agents.codex.profiles.push(AgentProfileConfig {
+            name: "fix".to_string(),
+            profile: "codex-fix".to_string(),
+            permission_mode: None,
+        });
+        let request = AgentRequest::prompt(AgentKind::Codex, "repair").with_profile("fix");
+
+        assert_eq!(
+            config
+                .effective_agent_profile_for_request(&request)
+                .unwrap(),
+            "codex-fix"
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn unknown_profile_variant_is_rejected() {
+        let config = Config::template();
+        let request = AgentRequest::prompt(AgentKind::Codex, "repair").with_profile("fix");
+
+        assert!(
+            config
+                .effective_agent_profile_for_request(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown codex profile variant")
+        );
     }
 
     #[test]

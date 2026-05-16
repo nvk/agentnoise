@@ -177,6 +177,25 @@ generic `codex` or `claude` profiles are mapped to the matching
 `*-agentnoise` profile unless `runner.allow_generic_agent_profiles = true` is
 set.
 
+Machines can expose additional configured profiles as explicit chat commands.
+For example, this keeps `/codex` on the normal profile while adding
+`/codex-fix` and `/codex-unsafe`:
+
+```toml
+[[agents.codex.profiles]]
+name = "fix"
+profile = "codex-fix"
+
+[[agents.codex.profiles]]
+name = "unsafe"
+profile = "codex-unsafe"
+```
+
+Variant names become command suffixes. A variant named `fix` exposes
+`/codex-fix <prompt>` and `/codex-fix-resume <session> <prompt>`. Profiles
+containing risky words such as `unsafe` still require chat approval before the
+job runs.
+
 When `runner.launcher = "direct"`, the configured profile names are unused and
 Hermes runs directly as `hermes chat ...`.
 

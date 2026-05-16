@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.17 - 2026-05-16
+
+- Added config-driven agent profile variants. A config entry like
+  `[[agents.codex.profiles]] name = "fix"` exposes `/codex-fix` and
+  `/codex-fix-resume` without hardcoding frontier-specific profile names.
+
 ## 0.1.16 - 2026-05-15
 
 - Added a startup hello for already-paired control chats. When agentnoise

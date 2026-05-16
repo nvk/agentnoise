@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::approvals;
-use crate::config::{Config, RunnerLauncher};
+use crate::config::{AgentConfig, Config, RunnerLauncher};
 use crate::runner::{AgentKind, AgentRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub fn capabilities(config: &Config) -> Vec<AgentCapability> {
                 bin: config_agent.bin.clone(),
                 permission_mode: config_agent.permission_mode.clone(),
                 approval_required,
-                commands: commands(agent),
+                commands: commands(agent, config_agent),
             }
         })
         .collect()
@@ -79,8 +79,8 @@ pub fn render_capabilities(config: &Config) -> String {
     format!("Agents\n{lines}")
 }
 
-fn commands(agent: AgentKind) -> Vec<String> {
-    match agent {
+fn commands(agent: AgentKind, config: &AgentConfig) -> Vec<String> {
+    let mut commands = match agent {
         AgentKind::Codex => vec![
             "/codex <prompt>".to_string(),
             "/codex-resume <session> <prompt>".to_string(),
@@ -95,12 +95,21 @@ fn commands(agent: AgentKind) -> Vec<String> {
             "/hermes <prompt>".to_string(),
             "/hermes-resume <session> <prompt>".to_string(),
         ],
+    };
+    for profile in &config.profiles {
+        commands.push(format!("/{agent}-{} <prompt>", profile.name));
+        commands.push(format!(
+            "/{agent}-{}-resume <session> <prompt>",
+            profile.name
+        ));
     }
+    commands
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AgentProfileConfig;
 
     #[test]
     fn hermes_is_reported_disabled_by_default() {
@@ -111,5 +120,20 @@ mod tests {
             .find(|capability| capability.agent == AgentKind::Hermes)
             .unwrap();
         assert!(!hermes.enabled);
+    }
+
+    #[test]
+    fn configured_profile_variants_are_listed_as_commands() {
+        let mut config = Config::template();
+        config.agents.codex.profiles.push(AgentProfileConfig {
+            name: "fix".to_string(),
+            profile: "codex-fix".to_string(),
+            permission_mode: None,
+        });
+
+        let text = render_capabilities(&config);
+
+        assert!(text.contains("/codex-fix <prompt>"));
+        assert!(text.contains("/codex-fix-resume <session> <prompt>"));
     }
 }

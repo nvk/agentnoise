@@ -206,8 +206,14 @@ impl ApprovalStore {
 
 pub fn approval_reason(config: &Config, request: &AgentRequest) -> Option<String> {
     let agent = config.agent(request.agent);
-    let mut risky_values = vec![agent.profile.as_str(), agent.bin.as_str()];
-    if let Some(permission_mode) = agent.permission_mode.as_deref() {
+    let profile = config
+        .effective_agent_profile_for_request(request)
+        .unwrap_or_else(|_| config.effective_agent_profile(request.agent));
+    let permission_mode = config
+        .effective_permission_mode_for_request(request)
+        .unwrap_or_else(|_| agent.permission_mode.clone());
+    let mut risky_values = vec![profile.as_str(), agent.bin.as_str()];
+    if let Some(permission_mode) = permission_mode.as_deref() {
         risky_values.push(permission_mode);
     }
     let risky = risky_values
@@ -320,6 +326,7 @@ fn parse_time(text: &str) -> Option<OffsetDateTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AgentProfileConfig, Config};
 
     #[test]
     fn approval_replays_original_request_once() {
@@ -332,5 +339,21 @@ mod tests {
         assert_eq!(store.pending().len(), 1);
         assert_eq!(store.approve(&approval.id, "group:a").unwrap(), request);
         assert!(store.approve(&approval.id, "group:a").is_err());
+    }
+
+    #[test]
+    fn unsafe_profile_variant_requires_approval() {
+        let mut config = Config::template();
+        config.agents.codex.profiles.push(AgentProfileConfig {
+            name: "unsafe".to_string(),
+            profile: "codex-unsafe".to_string(),
+            permission_mode: None,
+        });
+        let request = AgentRequest::new(AgentKind::Codex, "work", "ship it").with_profile("unsafe");
+
+        assert_eq!(
+            approval_reason(&config, &request),
+            Some("codex profile may run with elevated local permissions".to_string())
+        );
     }
 }

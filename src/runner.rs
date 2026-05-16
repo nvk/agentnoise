@@ -44,6 +44,8 @@ impl fmt::Display for AgentKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRequest {
     pub agent: AgentKind,
+    #[serde(default)]
+    pub profile: Option<String>,
     pub repo_alias: Option<String>,
     pub cwd: Option<String>,
     #[serde(default)]
@@ -56,6 +58,7 @@ impl AgentRequest {
     pub fn new(agent: AgentKind, repo_alias: impl Into<String>, prompt: impl Into<String>) -> Self {
         Self {
             agent,
+            profile: None,
             repo_alias: Some(repo_alias.into()),
             cwd: None,
             workspace_root: None,
@@ -67,6 +70,7 @@ impl AgentRequest {
     pub fn prompt(agent: AgentKind, prompt: impl Into<String>) -> Self {
         Self {
             agent,
+            profile: None,
             repo_alias: None,
             cwd: None,
             workspace_root: None,
@@ -78,6 +82,7 @@ impl AgentRequest {
     pub fn resume(agent: AgentKind, session: impl Into<String>, prompt: impl Into<String>) -> Self {
         Self {
             agent,
+            profile: None,
             repo_alias: None,
             cwd: None,
             workspace_root: None,
@@ -99,6 +104,11 @@ impl AgentRequest {
 
     pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.prompt = prompt.into();
+        self
+    }
+
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
         self
     }
 }
@@ -273,6 +283,7 @@ impl Runner {
         if !agent.enabled {
             bail!("{} is disabled in config", request.agent);
         }
+        let permission_mode = self.config.effective_permission_mode_for_request(request)?;
 
         let prompt = agentnoise_prompt(request);
         let mut args = Vec::new();
@@ -316,7 +327,7 @@ impl Runner {
                     "--output-format".to_string(),
                     "stream-json".to_string(),
                 ]);
-                if let Some(permission_mode) = &agent.permission_mode
+                if let Some(permission_mode) = &permission_mode
                     && !permission_mode.trim().is_empty()
                 {
                     args.extend(["--permission-mode".to_string(), permission_mode.clone()]);
@@ -368,7 +379,7 @@ impl Runner {
         }
 
         let bondage_conf = self.config.resolved_bondage_conf().display().to_string();
-        let agent_profile = self.config.effective_agent_profile(request.agent);
+        let agent_profile = self.config.effective_agent_profile_for_request(request)?;
         let mut wrapped_args = vec![
             "exec".to_string(),
             agent_profile,
@@ -772,7 +783,7 @@ fn looks_like_wiki_prompt(prompt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{AgentProfileConfig, Config};
     use crate::jobs::JobStore;
 
     #[test]
@@ -833,6 +844,36 @@ mod tests {
         assert!(plan.args.contains(&"-C".to_string()));
         assert!(plan.args.contains(&workdir.display().to_string()));
         assert_eq!(plan.cwd.as_deref(), Some(workdir.as_path()));
+    }
+
+    #[test]
+    fn codex_command_uses_configured_profile_variant() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
+        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        config.agents.codex.profiles.push(AgentProfileConfig {
+            name: "fix".to_string(),
+            profile: "codex-fix".to_string(),
+            permission_mode: None,
+        });
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let plan = runner
+            .build_command(
+                &AgentRequest::new(AgentKind::Codex, "work", "hello").with_profile("fix"),
+            )
+            .unwrap();
+
+        assert_eq!(plan.program, "bondage");
+        assert_eq!(plan.args[1], "codex-fix");
     }
 
     #[test]

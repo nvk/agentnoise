@@ -763,6 +763,7 @@ impl AgentApp {
 
     fn prepare_request(&self, sender_key: &str, mut request: AgentRequest) -> Result<AgentRequest> {
         if request.resume_session.is_some() {
+            self.config.effective_agent_profile_for_request(&request)?;
             return Ok(request);
         }
 
@@ -784,6 +785,7 @@ impl AgentApp {
             }
         }
 
+        self.config.effective_agent_profile_for_request(&request)?;
         Ok(request)
     }
 
