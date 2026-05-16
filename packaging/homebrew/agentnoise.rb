@@ -14,6 +14,9 @@ class Agentnoise < Formula
   end
 
   def install
+    ENV["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
+    ENV["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
     system "cargo", "install", *std_cargo_args
 
     resource("whitenoise-rs").stage do
