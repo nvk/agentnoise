@@ -1,5 +1,11 @@
 # Release Notes
 
+## Unreleased
+
+- Added local agent session visibility with `agentnoise local-sessions` and
+  `/agent-sessions`, listing recent Codex/Claude session metadata and explicit
+  resume commands without returning transcript content.
+
 ## 0.1.18 - 2026-05-16
 
 - Added Homebrew caveats with the simple raw Codex/Claude setup path,

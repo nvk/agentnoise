@@ -13,6 +13,7 @@ pub mod fake_phone;
 pub mod identity;
 pub mod jobs;
 pub mod launchd;
+pub mod local_sessions;
 pub mod paths;
 pub mod progress;
 pub mod runner;

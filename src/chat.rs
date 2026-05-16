@@ -7,6 +7,7 @@ pub enum ChatCommand {
     Help,
     Status,
     Agents,
+    AgentSessions { limit: Option<usize> },
     New { name: Option<String> },
     Rename { name: Option<String> },
     Sessions,
@@ -50,6 +51,9 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
         "help" => Ok(ChatCommand::Help),
         "status" => Ok(ChatCommand::Status),
         "agents" => Ok(ChatCommand::Agents),
+        "agent-sessions" | "local-sessions" => Ok(ChatCommand::AgentSessions {
+            limit: optional_limit(rest)?,
+        }),
         "new" => Ok(ChatCommand::New {
             name: optional(rest),
         }),
@@ -210,6 +214,20 @@ fn optional(rest: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+fn optional_limit(rest: &str) -> Result<Option<usize>> {
+    let value = rest.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| anyhow::anyhow!("usage: /agent-sessions [limit]"))?;
+    if limit == 0 {
+        bail!("usage: /agent-sessions [limit]");
+    }
+    Ok(Some(limit))
+}
+
 fn prefixed_prompt(prefix: &str, prompt: &str) -> String {
     let prompt = prompt.trim();
     if prompt == prefix || prompt.starts_with(&format!("{prefix} ")) {
@@ -239,6 +257,10 @@ mod tests {
     fn parses_status() {
         assert_eq!(parse_chat_command("/status").unwrap(), ChatCommand::Status);
         assert_eq!(parse_chat_command("/agents").unwrap(), ChatCommand::Agents);
+        assert_eq!(
+            parse_chat_command("/agent-sessions 12").unwrap(),
+            ChatCommand::AgentSessions { limit: Some(12) }
+        );
     }
 
     #[test]

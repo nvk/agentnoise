@@ -167,6 +167,9 @@ impl AgentApp {
             ChatCommand::Agents => Ok(RouteAction::Reply(capabilities::render_capabilities(
                 &self.config,
             ))),
+            ChatCommand::AgentSessions { limit } => Ok(RouteAction::Reply(
+                crate::local_sessions::render_local_sessions(limit.unwrap_or(8).clamp(1, 20)),
+            )),
             ChatCommand::New { name } => self.new_session_action(&session_key, sender, name),
             ChatCommand::Rename { name } => Ok(RouteAction::Reply(self.rename_text(
                 &session_key,
@@ -1278,6 +1281,7 @@ fn help_text() -> String {
         "Workspace",
         "/status",
         "/agents",
+        "/agent-sessions [limit]",
         "/new [name]",
         "/rename [name]",
         "/list",

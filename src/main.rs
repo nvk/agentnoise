@@ -75,6 +75,8 @@ enum Command {
     Doctor(DoctorArgs),
     #[command(about = "List configured coding-agent capabilities")]
     Agents(AgentsArgs),
+    #[command(about = "List recent local Codex/Claude sessions by metadata")]
+    LocalSessions(LocalSessionsArgs),
     #[command(about = "Run an isolated fake White Noise phone for local testing")]
     FakePhone(FakePhoneArgs),
     Config(ConfigArgs),
@@ -207,6 +209,14 @@ struct DoctorArgs {
 struct AgentsArgs {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct LocalSessionsArgs {
+    #[arg(long)]
+    json: bool,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
 }
 
 #[derive(Debug, Args)]
@@ -500,6 +510,15 @@ fn main() -> Result<()> {
                 );
             } else {
                 println!("{}", agentnoise::capabilities::render_capabilities(&config));
+            }
+        }
+        Command::LocalSessions(args) => {
+            let sessions =
+                agentnoise::local_sessions::discover_local_sessions(args.limit.clamp(1, 100))?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&sessions)?);
+            } else {
+                println!("{}", agentnoise::local_sessions::render_sessions(&sessions));
             }
         }
         Command::FakePhone(args) => {

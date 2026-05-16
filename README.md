@@ -478,6 +478,7 @@ plaintext burner identity and avoids Secret Service setup.
 
 - `/status`
 - `/agents`
+- `/agent-sessions [limit]`
 - `/new [name]`
 - `/rename [name]`
 - `/list`
@@ -585,14 +586,22 @@ This keeps production message send/subscribe behavior on the stable upstream
 CLI while giving us a tested JSON-line Unix socket client for future direct
 `wnd` work.
 
-### Maybe Later: Local Agent Session Visibility
+### Local Agent Session Visibility
 
-agentnoise currently shows only sessions and jobs it owns. A future opt-in
-local visibility mode could expose metadata for Codex, Claude, or Hermes
-sessions that were started elsewhere on the same machine, then let the phone
-explicitly import one into the current White Noise chat. The default should
-remain conservative: metadata first, no transcript scraping, no process/env
-inspection, and no silent exposure of unrelated local agent work.
+`/agent-sessions` shows recent local Codex and Claude session metadata from the
+same user account, including sessions started outside agentnoise. It returns
+session ids, update times, cwd when available, and the explicit resume command
+to use next:
+
+```text
+/agent-sessions
+/codex-resume <session> continue
+/claude-resume <session> continue
+```
+
+This is intentionally conservative: it does not return transcript content,
+inspect process environments, or silently attach unrelated local work to a
+White Noise chat. The phone user must explicitly resume a listed session.
 
 ## Optional Hermes Support
 
