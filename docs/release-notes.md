@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.18 - 2026-05-16
+
+- Added Homebrew caveats with the simple raw Codex/Claude setup path,
+  background service command, and config discovery commands.
+- Added a configuration guide with raw CLI, `bondage`, repo alias, identity,
+  and agent profile variant examples.
+- Improved missing profile errors so users get a direct-mode fallback and a
+  manual link instead of a bare launcher failure.
+
 ## 0.1.17 - 2026-05-16
 
 - Added config-driven agent profile variants. A config entry like

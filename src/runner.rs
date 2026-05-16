@@ -1,7 +1,7 @@
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -378,8 +378,10 @@ impl Runner {
             });
         }
 
-        let bondage_conf = self.config.resolved_bondage_conf().display().to_string();
         let agent_profile = self.config.effective_agent_profile_for_request(request)?;
+        let bondage_conf_path = self.config.resolved_bondage_conf();
+        ensure_bondage_profile_exists(&bondage_conf_path, &agent_profile)?;
+        let bondage_conf = bondage_conf_path.display().to_string();
         let mut wrapped_args = vec![
             "exec".to_string(),
             agent_profile,
@@ -473,6 +475,22 @@ impl Runner {
             .with_context(|| format!("writing {}", job.log_path.display()))?;
         Ok(())
     }
+}
+
+fn ensure_bondage_profile_exists(config_path: &Path, profile: &str) -> Result<()> {
+    let text = fs::read_to_string(config_path)
+        .with_context(|| format!("reading bondage config {}", config_path.display()))?;
+    let profile_header = format!("[profile \"{profile}\"]");
+    if text.lines().any(|line| line.trim() == profile_header) {
+        return Ok(());
+    }
+    bail!(
+        "bondage profile `{profile}` was not found in {}\n\n\
+         Simple raw Codex/Claude setup:\n  agentnoise config launcher direct\n\n\
+         Or add the missing bondage profile and restart agentnoise.\n\
+         Manual: https://github.com/nvk/agentnoise/blob/main/docs/configuration.md#agent-launcher",
+        config_path.display()
+    )
 }
 
 fn copy_stream_to_log(
@@ -786,6 +804,15 @@ mod tests {
     use crate::config::{AgentProfileConfig, Config};
     use crate::jobs::JobStore;
 
+    fn write_bondage_profiles(path: &str, profiles: &[&str]) {
+        let text = profiles
+            .iter()
+            .map(|profile| format!("[profile \"{profile}\"]\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, text).unwrap();
+    }
+
     #[test]
     fn codex_command_uses_bondage_and_repo_alias() {
         let temp = tempfile::tempdir().unwrap();
@@ -794,7 +821,7 @@ mod tests {
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
-        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        write_bondage_profiles(&config.runner.bondage_conf, &["codex-agentnoise"]);
         config.repos[0].alias = "work".to_string();
         config.repos[0].path = repo.path().display().to_string();
 
@@ -827,7 +854,7 @@ mod tests {
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
-        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        write_bondage_profiles(&config.runner.bondage_conf, &["codex-agentnoise"]);
         config.repos[0].alias = "work".to_string();
         config.repos[0].path = repo.path().display().to_string();
 
@@ -854,7 +881,7 @@ mod tests {
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
-        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        write_bondage_profiles(&config.runner.bondage_conf, &["codex-fix"]);
         config.agents.codex.profiles.push(AgentProfileConfig {
             name: "fix".to_string(),
             profile: "codex-fix".to_string(),
@@ -874,6 +901,31 @@ mod tests {
 
         assert_eq!(plan.program, "bondage");
         assert_eq!(plan.args[1], "codex-fix");
+    }
+
+    #[test]
+    fn missing_bondage_profile_gets_setup_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
+        std::fs::write(&config.runner.bondage_conf, "[profile \"other\"]\n").unwrap();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let error = runner
+            .build_command(&AgentRequest::new(AgentKind::Codex, "work", "hello"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("bondage profile `codex-agentnoise` was not found"));
+        assert!(error.contains("agentnoise config launcher direct"));
+        assert!(error.contains("docs/configuration.md#agent-launcher"));
     }
 
     #[test]
@@ -911,7 +963,7 @@ mod tests {
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
-        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        write_bondage_profiles(&config.runner.bondage_conf, &["claude-agentnoise"]);
 
         let jobs =
             JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
@@ -950,7 +1002,7 @@ mod tests {
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
-        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        write_bondage_profiles(&config.runner.bondage_conf, &["hermes-agentnoise"]);
         config.agents.hermes.enabled = true;
         config.repos[0].alias = "work".to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -992,7 +1044,7 @@ mod tests {
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
-        std::fs::write(&config.runner.bondage_conf, "").unwrap();
+        write_bondage_profiles(&config.runner.bondage_conf, &["hermes-agentnoise"]);
         config.agents.hermes.enabled = true;
 
         let jobs =

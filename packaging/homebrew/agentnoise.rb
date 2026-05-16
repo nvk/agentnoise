@@ -36,6 +36,27 @@ class Agentnoise < Formula
     error_log_path var/"log/agentnoise.err.log"
   end
 
+  def caveats
+    <<~EOS
+      Quick start with raw Codex/Claude:
+        agentnoise up --direct-agents
+
+      Then keep it running in the background:
+        brew services start nvk/tap/agentnoise
+
+      Use agentnoise up anytime as the local console. If the service is already
+      running, it attaches instead of starting a second listener.
+
+      Config:
+        agentnoise config path
+        agentnoise config print-template
+        agentnoise doctor
+
+      If you use bondage profiles instead of raw CLIs, omit --direct-agents and
+      provide codex-agentnoise / claude-agentnoise profiles.
+    EOS
+  end
+
   test do
     assert_match "agentnoise 0.1.17", shell_output("#{bin}/agentnoise --version")
   end

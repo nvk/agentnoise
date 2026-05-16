@@ -388,7 +388,13 @@ impl Config {
             .profiles
             .iter()
             .find(|profile| profile.name == normalized)
-            .with_context(|| format!("unknown {agent} profile variant: {name}"))
+            .with_context(|| {
+                format!(
+                    "unknown {agent} profile variant: {name}\n\n\
+                     Send /agents to see configured commands, or add an [[agents.{agent}.profiles]] entry.\n\
+                     Manual: https://github.com/nvk/agentnoise/blob/main/docs/configuration.md#agent-profile-variants"
+                )
+            })
     }
 
     fn effective_profile_name(&self, agent: AgentKind, configured: &str) -> String {
@@ -806,6 +812,13 @@ path = "/tmp"
                 .unwrap_err()
                 .to_string()
                 .contains("unknown codex profile variant")
+        );
+        assert!(
+            config
+                .effective_agent_profile_for_request(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("docs/configuration.md#agent-profile-variants")
         );
     }
 

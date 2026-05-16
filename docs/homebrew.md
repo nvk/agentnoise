@@ -18,8 +18,8 @@ Local tap install shape:
 
 ```sh
 brew install nvk/tap/agentnoise
+agentnoise up --direct-agents
 brew services start nvk/tap/agentnoise
-agentnoise up
 ```
 
 The formula builds and installs `agentnoise`, `wn`, and `wnd` under the same
@@ -35,6 +35,17 @@ running, an interactive `agentnoise up` attaches to the existing engine and
 follows logs instead of starting a second listener. If the service is not
 running, it takes the foreground engine lock and behaves like the service until
 the terminal exits.
+
+For config examples:
+
+```sh
+agentnoise config path
+agentnoise config print-template
+agentnoise doctor
+```
+
+See [Configuration](configuration.md) for raw Codex/Claude mode, `bondage`
+profile mode, repo aliases, and profile variants such as `/codex-fix`.
 
 For development-only installs where keychain prompts are noise, run:
 

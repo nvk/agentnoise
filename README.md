@@ -147,6 +147,10 @@ agentnoise config launcher direct
 agentnoise config launcher bondage
 ```
 
+See [Configuration](docs/configuration.md) for copy/paste examples covering
+raw Codex/Claude mode, `bondage` profiles, repo aliases, and extra commands
+like `/codex-fix`.
+
 ## Security Stack
 
 agentnoise is the phone and White Noise control plane. It does not try to make
@@ -247,6 +251,7 @@ Useful local diagnostics:
 agentnoise status
 agentnoise doctor
 agentnoise agents
+agentnoise config path
 agentnoise identity status
 agentnoise identity rename agentnoise-mbp
 agentnoise fake-phone plan
