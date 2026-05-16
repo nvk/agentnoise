@@ -28,6 +28,7 @@ Simple setup for raw Codex/Claude:
 ```toml
 [runner]
 launcher = "direct"
+job_timeout_seconds = 1800
 
 [agents.codex]
 enabled = true
@@ -56,6 +57,7 @@ Policy-boundary setup with `bondage`:
 launcher = "bondage"
 bondage_bin = "bondage"
 bondage_conf = "~/.config/bondage/bondage.conf"
+job_timeout_seconds = 1800
 
 [agents.codex]
 enabled = true
@@ -81,6 +83,10 @@ Your `bondage.conf` must contain matching profile sections:
 
 If a profile is missing, either add it to `bondage.conf` or switch to direct
 mode.
+
+`job_timeout_seconds` keeps phone-triggered jobs from staying `running`
+forever if a launcher or agent process wedges before returning output. Set it
+to `0` only if you intentionally want no timeout.
 
 ## Agent Profile Variants
 

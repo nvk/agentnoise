@@ -2,9 +2,10 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -164,6 +165,8 @@ impl Runner {
         let mut command = Command::new(&plan.program);
         command.args(&plan.args);
         if let Some(cwd) = &plan.cwd {
+            fs::create_dir_all(cwd)
+                .with_context(|| format!("creating job cwd {}", cwd.display()))?;
             command.current_dir(cwd);
         }
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -224,11 +227,20 @@ impl Runner {
             )
         });
 
-        let status = child
-            .wait()
-            .with_context(|| format!("waiting for job {}", job.id))?;
+        let (status, timed_out) =
+            wait_for_child(&mut child, &job.id, self.config.runner.job_timeout_seconds)?;
         join_log_thread(stdout_thread)?;
         join_log_thread(stderr_thread)?;
+        if timed_out {
+            let mut log = log_file
+                .lock()
+                .map_err(|_| anyhow::anyhow!("log file lock poisoned"))?;
+            writeln!(
+                log,
+                "\nagentnoise: job timed out after {} seconds and was terminated",
+                self.config.runner.job_timeout_seconds
+            )?;
+        }
 
         let stdout = stdout_bytes
             .lock()
@@ -238,13 +250,19 @@ impl Runner {
             .lock()
             .map_err(|_| anyhow::anyhow!("stderr lock poisoned"))?
             .to_lossy_string();
-        let summary = summarize(
+        let mut summary = summarize(
             request.agent,
             &stdout,
             &stderr,
             status.success(),
             self.config.runner.max_output_chars,
         );
+        if timed_out {
+            summary = format!(
+                "job timed out after {} seconds and was terminated.\n\n{}",
+                self.config.runner.job_timeout_seconds, summary
+            );
+        }
         let record = self.jobs.finish(&job.id, status.code(), summary)?;
         if let Some(progress_callback) = &progress_callback {
             progress_callback(progress::finished(
@@ -287,6 +305,7 @@ impl Runner {
 
         let prompt = agentnoise_prompt(request);
         let mut args = Vec::new();
+        let stable_launch_cwd = self.config.resolved_data_dir();
         let cwd = match (request.agent, request.resume_session.as_deref()) {
             (AgentKind::Codex, Some(session)) => {
                 args.extend([
@@ -296,7 +315,7 @@ impl Runner {
                     session.to_string(),
                     prompt,
                 ]);
-                None
+                Some(stable_launch_cwd)
             }
             (AgentKind::Codex, None) => {
                 let (_repo_root, workdir) = self.workspace_paths(request)?;
@@ -307,7 +326,11 @@ impl Runner {
                     workdir.display().to_string(),
                     prompt,
                 ]);
-                Some(workdir)
+                if self.config.runner.launcher == RunnerLauncher::Bondage {
+                    Some(stable_launch_cwd)
+                } else {
+                    Some(workdir)
+                }
             }
             (AgentKind::Claude, Some(session)) => {
                 args.extend([
@@ -475,6 +498,61 @@ impl Runner {
             .with_context(|| format!("writing {}", job.log_path.display()))?;
         Ok(())
     }
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    job_id: &str,
+    timeout_seconds: u64,
+) -> Result<(ExitStatus, bool)> {
+    if timeout_seconds == 0 {
+        return child
+            .wait()
+            .with_context(|| format!("waiting for job {job_id}"))
+            .map(|status| (status, false));
+    }
+
+    let timeout = Duration::from_secs(timeout_seconds);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("polling job {job_id}"))?
+        {
+            return Ok((status, false));
+        }
+        if started.elapsed() >= timeout {
+            terminate_child(child)
+                .with_context(|| format!("terminating timed out job {job_id}"))?;
+            let status = child
+                .wait()
+                .with_context(|| format!("waiting for timed out job {job_id}"))?;
+            return Ok((status, true));
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut Child) -> Result<()> {
+    let pgid = child.id().to_string();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(format!("-{pgid}"))
+        .status();
+    thread::sleep(Duration::from_secs(2));
+    if child.try_wait()?.is_none() {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pgid}"))
+            .status();
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut Child) -> Result<()> {
+    child.kill().context("killing child process")
 }
 
 fn ensure_bondage_profile_exists(config_path: &Path, profile: &str) -> Result<()> {
@@ -841,8 +919,9 @@ mod tests {
         assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
         assert!(plan.args.last().unwrap().contains("User request:\nhello"));
         let repo_path = repo.path().canonicalize().unwrap();
+        let launch_cwd = temp.path().join("data");
         assert!(plan.args.contains(&repo_path.display().to_string()));
-        assert_eq!(plan.cwd.as_deref(), Some(repo_path.as_path()));
+        assert_eq!(plan.cwd.as_deref(), Some(launch_cwd.as_path()));
     }
 
     #[test]
@@ -868,9 +947,10 @@ mod tests {
             .unwrap();
 
         let workdir = repo.path().join("src").canonicalize().unwrap();
+        let launch_cwd = temp.path().join("data");
         assert!(plan.args.contains(&"-C".to_string()));
         assert!(plan.args.contains(&workdir.display().to_string()));
-        assert_eq!(plan.cwd.as_deref(), Some(workdir.as_path()));
+        assert_eq!(plan.cwd.as_deref(), Some(launch_cwd.as_path()));
     }
 
     #[test]
@@ -954,6 +1034,66 @@ mod tests {
         assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
         let repo_path = repo.path().canonicalize().unwrap();
         assert_eq!(plan.cwd.as_deref(), Some(repo_path.as_path()));
+    }
+
+    #[test]
+    fn codex_resume_uses_stable_launcher_cwd_for_bondage() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
+        write_bondage_profiles(&config.runner.bondage_conf, &["codex-agentnoise"]);
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let request = AgentRequest::resume(AgentKind::Codex, "session-1", "continue");
+        let plan = runner.build_command(&request).unwrap();
+
+        assert!(plan.args.contains(&"resume".to_string()));
+        assert!(plan.args.contains(&"session-1".to_string()));
+        let launch_cwd = temp.path().join("data");
+        assert_eq!(plan.cwd.as_deref(), Some(launch_cwd.as_path()));
+    }
+
+    #[test]
+    fn direct_jobs_time_out_and_fail() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("sleepy-agent");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&bin, permissions).unwrap();
+        }
+
+        let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.job_timeout_seconds = 1;
+        config.agents.codex.bin = bin.display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let record = runner
+            .run_blocking(AgentRequest::new(AgentKind::Codex, "work", "hello"))
+            .unwrap();
+
+        assert_eq!(record.status, crate::jobs::JobStatus::Failed);
+        assert!(
+            record
+                .summary
+                .unwrap()
+                .contains("job timed out after 1 seconds")
+        );
     }
 
     #[test]

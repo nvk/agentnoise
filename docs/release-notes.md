@@ -5,6 +5,11 @@
 - Added local agent session visibility with `agentnoise local-sessions` and
   `/agent-sessions`, listing recent Codex/Claude session metadata and explicit
   resume commands without returning transcript content.
+- Added a configurable job timeout so wedged launcher/agent processes are
+  terminated and reported instead of staying `running` forever.
+- Run Codex-through-bondage from the agentnoise data dir while still passing
+  the selected repo through `codex exec -C`, avoiding fragile launcher `getcwd`
+  behavior in iCloud-backed workspaces.
 
 ## 0.1.18 - 2026-05-16
 
