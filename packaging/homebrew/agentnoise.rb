@@ -15,7 +15,7 @@ class Agentnoise < Formula
 
   def install
     ENV["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
-    ENV["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    ENV["GIT_CONFIG_GLOBAL"] = File::NULL
 
     system "cargo", "install", *std_cargo_args
 
