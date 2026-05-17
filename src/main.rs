@@ -1705,7 +1705,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                         &wn,
                                         &event_journal,
                                         group_id,
-                                        &request.created_text(),
+                                        &request.created_text_for_group(&new_group_id),
                                     ),
                                     Err(error) => {
                                         try_send_reply_recorded(
@@ -1714,7 +1714,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                             group_id,
                                             &format!(
                                                 "{}\nWarning: failed to send the ready message to the new chat: {error:#}",
-                                                request.created_text()
+                                                request.created_text_for_group(&new_group_id)
                                             ),
                                         );
                                     }

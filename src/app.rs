@@ -56,6 +56,15 @@ impl NewSessionRequest {
             self.group_name()
         )
     }
+
+    pub fn created_text_for_group(&self, group_id: &str) -> String {
+        format!(
+            "Created session: {}\nI opened a new White Noise chat named \"{}\" and sent a ready message there.\nOpen: {}\nContinue in that chat, or send /list.",
+            self.name,
+            self.group_name(),
+            white_noise_chat_uri(group_id)
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -548,18 +557,19 @@ impl AgentApp {
             .map(|(index, entry)| {
                 let status = session_status_label(entry.key == sender_key, entry.state.closed);
                 format!(
-                    "{}. {}{}\n   chat: {}\n   workspace: {}",
+                    "{}. {}{}\n   chat: {}\n   open: {}\n   workspace: {}",
                     index + 1,
                     entry.name,
                     status,
                     short_group_id(&entry.group_id),
+                    white_noise_chat_uri(&entry.group_id),
                     workspace_text(&entry.state),
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        format!("Sessions\n{lines}\nSend /resume <number|name|id>.")
+        format!("Sessions\n{lines}\nSend /jump <number|name|id>.")
     }
 
     fn resume_session_action(
@@ -583,7 +593,7 @@ impl AgentApp {
                     .filter(|group_id| !group_id.is_empty())
                 else {
                     return Ok(RouteAction::Reply(
-                        "Usage: /resume <number|name|id>".to_string(),
+                        "Usage: /jump <number|name|id>".to_string(),
                     ));
                 };
                 let key = session_key(Some(group_id), None);
@@ -596,13 +606,21 @@ impl AgentApp {
         state.closed = false;
         self.sessions.set(&entry.key, state.clone())?;
 
-        let target_text = format!(
-            "Session: {}\nWorkspace: {}\nResumed here. Send /pwd or /codex <prompt>.",
-            entry.name,
-            workspace_text(&state)
-        );
-
         let current_group_id = current_group_id.map(str::trim).unwrap_or_default();
+        let target_text = if current_group_id.is_empty() || current_group_id == entry.group_id {
+            format!(
+                "Session: {}\nWorkspace: {}\nResumed here. Send /pwd or /codex <prompt>.",
+                entry.name,
+                workspace_text(&state)
+            )
+        } else {
+            format!(
+                "Session: {}\nWorkspace: {}\nResumed here. Send /pwd or /codex <prompt>.\nBack: {}",
+                entry.name,
+                workspace_text(&state),
+                white_noise_chat_uri(current_group_id)
+            )
+        };
         if current_group_id == entry.group_id {
             return Ok(RouteAction::Reply(target_text));
         }
@@ -610,9 +628,10 @@ impl AgentApp {
         Ok(RouteAction::ResumeSession(ResumeSessionRequest {
             group_id: entry.group_id.clone(),
             reply_text: format!(
-                "Resumed session: {}\nI sent a ready message to chat id:{}.\nContinue in that chat, or send /list.",
+                "Resumed session: {}\nI sent a ready message to chat id:{}.\nOpen: {}\nContinue in that chat, or send /list.",
                 entry.name,
-                short_group_id(&entry.group_id)
+                short_group_id(&entry.group_id),
+                white_noise_chat_uri(&entry.group_id)
             ),
             target_text,
         }))
@@ -666,7 +685,7 @@ impl AgentApp {
         let name = session_display_name(sender_key, &session);
         self.sessions.set(sender_key, session)?;
         Ok(format!(
-            "Closed session: {name}\nSend /list to switch sessions, or /resume {name} to reopen it."
+            "Closed session: {name}\nSend /list to switch sessions, or /jump {name} to reopen it."
         ))
     }
 
@@ -1123,7 +1142,11 @@ fn normalize_session_name(name: Option<&str>) -> Option<String> {
 }
 
 fn short_group_id(group_id: &str) -> String {
-    group_id.chars().take(6).collect()
+    group_id.chars().take(5).collect()
+}
+
+fn white_noise_chat_uri(group_id: &str) -> String {
+    format!("whitenoise://chat/{}", group_id.trim())
 }
 
 fn session_status_label(current: bool, closed: bool) -> &'static str {
@@ -1145,7 +1168,7 @@ fn session_display_name(key: &str, session: &SessionState) -> String {
         return name.to_string();
     }
     if let Some(group_id) = key.strip_prefix("group:") {
-        let short = group_id.chars().take(6).collect::<String>();
+        let short = short_group_id(group_id);
         if !short.is_empty() {
             return format!("s-{short}");
         }
@@ -1288,6 +1311,7 @@ fn help_text() -> String {
         "/new [name]",
         "/rename [name]",
         "/list",
+        "/jump <number|name|id>",
         "/resume <number|name|id>",
         "/close",
         "/repos",
@@ -1665,7 +1689,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             app.route_message(Some("group-a"), Some("phone"), "/sessions")
                 .unwrap(),
             RouteAction::Reply(reply) if reply.contains("main (current)")
-                && reply.contains("chat: group-")
+                && reply.contains("chat: group")
+                && reply.contains("open: whitenoise://chat/group-a")
         ));
     }
 
@@ -1692,15 +1717,19 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
                 .unwrap(),
             RouteAction::Reply(reply) if reply.contains("1. bugfix")
                 && reply.contains("2. main (current)")
-                && reply.contains("Send /resume <number|name|id>.")
+                && reply.contains("chat: group")
+                && reply.contains("open: whitenoise://chat/group-b")
+                && reply.contains("Send /jump <number|name|id>.")
         ));
         assert!(matches!(
-            app.route_message(Some("group-a"), Some("phone"), "/resume bugfix")
+            app.route_message(Some("group-a"), Some("phone"), "/jump bugfix")
                 .unwrap(),
             RouteAction::ResumeSession(request) if request.group_id == "group-b"
                 && request.reply_text.contains("Resumed session: bugfix")
+                && request.reply_text.contains("Open: whitenoise://chat/group-b")
                 && request.reply_text.contains("Continue in that chat")
                 && request.target_text.contains("Session: bugfix")
+                && request.target_text.contains("Back: whitenoise://chat/group-a")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/resume 2")
