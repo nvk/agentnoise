@@ -630,6 +630,8 @@ Product screenshots and Open Graph assets are generated from a dedicated
 [Screenshots](docs/screenshots.md) for the exact commands and privacy checklist
 before using a real phone or terminal capture.
 
+![agentnoise product screenshot](https://agentnoise.org/shots/desktop.png)
+
 ## Transport Notes
 
 The default White Noise transport remains the tested `wn` CLI path. Setting
