@@ -3,7 +3,10 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -197,6 +200,16 @@ impl Runner {
         let capture_limit = capture_max_bytes(self.config.runner.max_output_chars);
         let stdout_bytes = Arc::new(Mutex::new(CaptureBuffer::new(capture_limit)));
         let stderr_bytes = Arc::new(Mutex::new(CaptureBuffer::new(capture_limit)));
+        let last_activity = Arc::new(Mutex::new(Instant::now()));
+        let heartbeat = progress_callback.as_ref().and_then(|progress_callback| {
+            start_silence_heartbeat(
+                request.agent,
+                job.id.clone(),
+                self.config.runner.silence_ping_seconds,
+                Arc::clone(&last_activity),
+                Arc::clone(progress_callback),
+            )
+        });
         let progress_observer = progress_callback.clone().map(|progress_callback| {
             let agent = request.agent;
             let job_id = job.id.clone();
@@ -214,6 +227,7 @@ impl Runner {
                 stdout,
                 Arc::clone(&log_file),
                 Arc::clone(&stdout_bytes),
+                Some(Arc::clone(&last_activity)),
                 progress_observer.clone(),
             )
         });
@@ -223,12 +237,15 @@ impl Runner {
                 stderr,
                 Arc::clone(&log_file),
                 Arc::clone(&stderr_bytes),
+                Some(Arc::clone(&last_activity)),
                 None,
             )
         });
 
-        let (status, timed_out) =
-            wait_for_child(&mut child, &job.id, self.config.runner.job_timeout_seconds)?;
+        let wait_result =
+            wait_for_child(&mut child, &job.id, self.config.runner.job_timeout_seconds);
+        stop_silence_heartbeat(heartbeat);
+        let (status, timed_out) = wait_result?;
         join_log_thread(stdout_thread)?;
         join_log_thread(stderr_thread)?;
         if timed_out {
@@ -535,6 +552,69 @@ fn wait_for_child(
     }
 }
 
+struct SilenceHeartbeat {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+fn start_silence_heartbeat(
+    agent: AgentKind,
+    job_id: String,
+    silence_ping_seconds: u64,
+    last_activity: Arc<Mutex<Instant>>,
+    progress_callback: ProgressCallback,
+) -> Option<SilenceHeartbeat> {
+    if silence_ping_seconds == 0 {
+        return None;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let interval = Duration::from_secs(silence_ping_seconds.max(1));
+        let tick = interval.min(Duration::from_secs(1));
+        let started = Instant::now();
+        let mut last_ping = started;
+
+        loop {
+            if stop_thread.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(tick);
+            if stop_thread.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let now = Instant::now();
+            let idle = last_activity
+                .lock()
+                .map(|last_activity| now.saturating_duration_since(*last_activity))
+                .unwrap_or_default();
+            if idle < interval || now.saturating_duration_since(last_ping) < interval {
+                continue;
+            }
+
+            progress_callback(progress::still_running(
+                agent,
+                &job_id,
+                now.saturating_duration_since(started).as_secs(),
+                idle.as_secs(),
+            ));
+            last_ping = now;
+        }
+    });
+
+    Some(SilenceHeartbeat { stop, handle })
+}
+
+fn stop_silence_heartbeat(heartbeat: Option<SilenceHeartbeat>) {
+    let Some(heartbeat) = heartbeat else {
+        return;
+    };
+    heartbeat.stop.store(true, Ordering::Relaxed);
+    let _ = heartbeat.handle.join();
+}
+
 #[cfg(unix)]
 fn terminate_child(child: &mut Child) -> Result<()> {
     let pgid = child.id().to_string();
@@ -578,6 +658,7 @@ fn copy_stream_to_log(
     mut reader: impl Read + Send + 'static,
     log_file: Arc<Mutex<File>>,
     captured: Arc<Mutex<CaptureBuffer>>,
+    last_activity: Option<Arc<Mutex<Instant>>>,
     line_observer: Option<LineObserver>,
 ) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || {
@@ -596,6 +677,11 @@ fn copy_stream_to_log(
                     .lock()
                     .map_err(|_| anyhow::anyhow!("{label} capture lock poisoned"))?;
                 captured.extend_from_slice(&buffer[..n]);
+            }
+            if let Some(last_activity) = &last_activity
+                && let Ok(mut last_activity) = last_activity.lock()
+            {
+                *last_activity = Instant::now();
             }
 
             {
@@ -1099,6 +1185,59 @@ mod tests {
                 .unwrap()
                 .contains("job timed out after 1 seconds")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quiet_direct_jobs_emit_still_running_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("quiet-agent");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+sleep 2
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'
+"#,
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&bin, permissions).unwrap();
+        }
+
+        let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.progress_interval_seconds = 1;
+        config.runner.silence_ping_seconds = 1;
+        config.runner.job_timeout_seconds = 10;
+        config.agents.codex.bin = bin.display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_callback = Arc::clone(&events);
+        let record = runner
+            .run_blocking_with_progress(
+                AgentRequest::new(AgentKind::Codex, "work", "hello"),
+                Arc::new(move |event| {
+                    events_callback.lock().unwrap().push(event);
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(record.status, crate::jobs::JobStatus::Succeeded);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| event.label == "started"));
+        assert!(events.iter().any(|event| event.label == "still running"));
+        assert!(events.iter().any(|event| event.label == "succeeded"));
     }
 
     #[test]

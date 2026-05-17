@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.21** - **Quiet-job chat pings.** Running jobs now send a visible
+`still running` message when Codex, Claude, Hermes, or the launcher stays alive
+but produces no new output. The ping includes `/tail <job>` and `/cancel <job>`
+so a phone user can inspect or stop the job instead of staring at an accepted
+command with no follow-up.
+
 **v0.1.20** - **Fake-phone E2E and Codex launch fix.** The fake-phone harness
 now waits for real command replies and final job output instead of passing on
 startup hellos or unrelated auth replies. Codex jobs also pass
@@ -542,7 +548,9 @@ message does not look like a dead daemon.
 Codex and Claude JSON streams are converted into occasional progress messages
 while a job runs. The default interval is conservative
 (`runner.progress_interval_seconds = 15`) so the phone chat does not become
-unreadable. Final job output still arrives as one normal reply, with `/tail
+unreadable. If a running job goes quiet, agentnoise sends a "still running"
+ping after `runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel
+<job>` hints. Final job output still arrives as one normal reply, with `/tail
 <job>` for logs.
 
 If a configured agent profile looks intentionally elevated, for example a

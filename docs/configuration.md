@@ -28,6 +28,8 @@ Simple setup for raw Codex/Claude:
 ```toml
 [runner]
 launcher = "direct"
+progress_interval_seconds = 15
+silence_ping_seconds = 60
 job_timeout_seconds = 1800
 
 [agents.codex]
@@ -57,6 +59,8 @@ Policy-boundary setup with `bondage`:
 launcher = "bondage"
 bondage_bin = "bondage"
 bondage_conf = "~/.config/bondage/bondage.conf"
+progress_interval_seconds = 15
+silence_ping_seconds = 60
 job_timeout_seconds = 1800
 
 [agents.codex]
@@ -87,6 +91,11 @@ mode.
 `job_timeout_seconds` keeps phone-triggered jobs from staying `running`
 forever if a launcher or agent process wedges before returning output. Set it
 to `0` only if you intentionally want no timeout.
+
+`silence_ping_seconds` controls the "still running" chat ping for a job that
+has produced no new output. Set it to `0` to disable those pings. The default
+keeps the phone chat alive when Codex, Claude, Hermes, or a launcher is still
+running but quiet.
 
 ## Agent Profile Variants
 

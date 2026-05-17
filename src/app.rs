@@ -332,7 +332,7 @@ impl AgentApp {
         };
         let workspace = request_workspace_text(request);
         format!(
-            "Got it: {action}\nWorkspace: {workspace}\nI'll reply here when it finishes. If it goes quiet, send /status or /jobs."
+            "Got it: {action}\nWorkspace: {workspace}\nNext: I will send the job id, progress pings while it is quiet, then the final reply. If it misbehaves, use /jobs, /tail <job>, or /cancel <job>."
         )
     }
 
@@ -1555,7 +1555,10 @@ mod tests {
 
         assert!(ack.contains("Got it: codex job queued"));
         assert!(ack.contains("Workspace: work:/"));
-        assert!(ack.contains("/status"));
+        assert!(ack.contains("progress pings"));
+        assert!(ack.contains("/jobs"));
+        assert!(ack.contains("/tail <job>"));
+        assert!(ack.contains("/cancel <job>"));
     }
 
     #[test]

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.21 - 2026-05-16
+
+- Added chat-visible "still running" pings for jobs that are alive but have
+  produced no new output, with `/tail <job>` and `/cancel <job>` hints.
+- Added `runner.silence_ping_seconds` so quiet-job pings can be tuned or
+  disabled.
+
 ## 0.1.20 - 2026-05-16
 
 - Hardened `agentnoise fake-phone roundtrip` so it can require a final job

@@ -77,6 +77,28 @@ pub fn finished(agent: AgentKind, job_id: &str, status: &str) -> ProgressEvent {
     }
 }
 
+pub fn still_running(
+    agent: AgentKind,
+    job_id: &str,
+    elapsed_seconds: u64,
+    idle_seconds: u64,
+) -> ProgressEvent {
+    ProgressEvent {
+        kind: ProgressKind::Step,
+        agent,
+        job_id: Some(job_id.to_string()),
+        label: "still running".to_string(),
+        detail: Some(format!(
+            "Running {}; no new output for {}. Use /tail {} for logs or /cancel {} to stop it.",
+            format_duration(elapsed_seconds),
+            format_duration(idle_seconds),
+            job_id,
+            job_id
+        )),
+        final_event: false,
+    }
+}
+
 pub fn parse_progress_line(agent: AgentKind, line: &str) -> Option<ProgressEvent> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
     match agent {
@@ -103,6 +125,20 @@ pub fn render_progress(event: &ProgressEvent) -> String {
         .map(|detail| format!("\n{detail}"))
         .unwrap_or_default();
     format!("{job}{}: {}{detail}", event.agent, event.label)
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    if seconds == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
 }
 
 fn parse_codex(value: &Value) -> Option<ProgressEvent> {

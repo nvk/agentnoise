@@ -89,6 +89,8 @@ pub struct RunnerConfig {
     pub max_output_chars: usize,
     #[serde(default = "default_progress_interval_seconds")]
     pub progress_interval_seconds: u64,
+    #[serde(default = "default_silence_ping_seconds")]
+    pub silence_ping_seconds: u64,
     #[serde(default = "default_job_timeout_seconds")]
     pub job_timeout_seconds: u64,
     #[serde(default = "default_approval_ttl_seconds")]
@@ -258,6 +260,7 @@ impl Config {
                 max_prompt_chars: default_max_prompt_chars(),
                 max_output_chars: default_max_output_chars(),
                 progress_interval_seconds: default_progress_interval_seconds(),
+                silence_ping_seconds: default_silence_ping_seconds(),
                 job_timeout_seconds: default_job_timeout_seconds(),
                 approval_ttl_seconds: default_approval_ttl_seconds(),
                 worktree_dir: default_worktree_dir_string(),
@@ -644,6 +647,10 @@ fn default_max_output_chars() -> usize {
 
 fn default_progress_interval_seconds() -> u64 {
     15
+}
+
+fn default_silence_ping_seconds() -> u64 {
+    60
 }
 
 fn default_job_timeout_seconds() -> u64 {
