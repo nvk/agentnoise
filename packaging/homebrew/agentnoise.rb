@@ -1,8 +1,8 @@
 class Agentnoise < Formula
   desc "Chat with local coding agents through White Noise"
   homepage "https://agentnoise.org"
-  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.21.tar.gz"
-  sha256 "19b7c3f32ecab4e5876831e66a01d151075c0164c2d45cfc9bcea1ec101a4c4e"
+  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.22.tar.gz"
+  sha256 "8ff654f6ac11ae78983c649f1e0ba12ea7ce42c1c0dc35df5c7e65c3268fad35"
   license "MIT"
   head "https://github.com/nvk/agentnoise.git", branch: "main"
 
@@ -41,8 +41,12 @@ class Agentnoise < Formula
       Quick start with raw Codex/Claude:
         agentnoise up --direct-agents
 
-      Then keep it running in the background:
+      To keep setup/pairing alive in the background:
         brew services start nvk/tap/agentnoise
+
+      Current Codex CLI builds do not run reliably from macOS launchd. For
+      /codex jobs on macOS, run agentnoise from a login shell or tmux:
+        agentnoise up --no-daemon
 
       Use agentnoise up anytime as the local console. If the service is already
       running, it attaches instead of starting a second listener.
@@ -58,6 +62,6 @@ class Agentnoise < Formula
   end
 
   test do
-    assert_match "agentnoise 0.1.21", shell_output("#{bin}/agentnoise --version")
+    assert_match "agentnoise 0.1.22", shell_output("#{bin}/agentnoise --version")
   end
 end
