@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `whitenoise://chat/<group>` open links to session list, new-session,
+  and cross-session resume replies, shortened chat refs to five characters, and
+  added `/jump <session>` as a friendlier `/resume` alias.
+
 ## 0.1.22 - 2026-05-17
 
 - Added a startup no-output watchdog for agent launches. If Codex, Claude,

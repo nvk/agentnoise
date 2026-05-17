@@ -61,7 +61,7 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
             name: optional(rest),
         }),
         "sessions" | "list" => Ok(ChatCommand::Sessions),
-        "resume" => Ok(ChatCommand::Resume {
+        "resume" | "jump" => Ok(ChatCommand::Resume {
             target: optional(rest),
         }),
         "close" => Ok(ChatCommand::Close),
@@ -330,6 +330,12 @@ mod tests {
             parse_chat_command("/resume 2").unwrap(),
             ChatCommand::Resume {
                 target: Some("2".to_string())
+            }
+        );
+        assert_eq!(
+            parse_chat_command("/jump bugfix").unwrap(),
+            ChatCommand::Resume {
+                target: Some("bugfix".to_string())
             }
         );
         assert_eq!(parse_chat_command("/close").unwrap(), ChatCommand::Close);

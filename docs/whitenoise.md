@@ -285,8 +285,9 @@ You can also create multiple White Noise chats with the agentnoise desktop
 identity manually. White Noise gives each chat a different MLS group id, and
 agentnoise keeps `/use`, `/cd`, and prompt context separate per group id. Use
 `/rename <name>` to name a manually-created chat, `/list` to list known
-sessions, and `/resume <number|name|id>` to ping a saved session from that list.
-`/sessions` and `/here <name>` remain accepted as compatibility aliases.
+sessions with short chat refs and `whitenoise://chat/...` open links, and
+`/jump <number|name|id>` to ping a saved session from that list. `/resume`,
+`/sessions`, and `/here <name>` remain accepted as compatibility aliases.
 
 ## Sender Allowlist
 

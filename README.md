@@ -514,6 +514,7 @@ plaintext burner identity and avoids Secret Service setup.
 - `/new [name]`
 - `/rename [name]`
 - `/list`
+- `/jump <number|name|id>`
 - `/resume <number|name|id>`
 - `/close`
 - `/repos`
@@ -550,9 +551,10 @@ plaintext burner identity and avoids Secret Service setup.
 Each White Noise chat is one agentnoise session. `/new bugfix-ui` creates a new
 parallel White Noise chat with the paired phone identity and clones the current
 workspace into it. `/rename main` names the current chat, `/list` shows known
-sessions, `/resume 2` resumes a session from that list, and `/close` marks the
-current session closed locally. `/sessions` remains accepted as a readable alias
-for `/list`.
+sessions with short chat refs and `whitenoise://chat/...` open links, `/jump 2`
+or `/resume 2` resumes a session from that list, and `/close` marks the current
+session closed locally. `/sessions` remains accepted as a readable alias for
+`/list`.
 
 Repos are aliases from the config, not arbitrary paths. `/use` selects a repo
 for the session, `/cd ..` moves within that selected repo, and plain `/codex` or
