@@ -18,7 +18,7 @@ Local tap install shape:
 
 ```sh
 brew install nvk/tap/agentnoise
-agentnoise up --direct-agents
+agentnoise init
 brew services start nvk/tap/agentnoise
 ```
 
@@ -35,6 +35,20 @@ running, an interactive `agentnoise up` attaches to the existing engine and
 follows logs instead of starting a second listener. If the service is not
 running, it takes the foreground engine lock and behaves like the service until
 the terminal exits.
+
+Current macOS Codex CLI builds can hang before producing output when launched
+directly by launchd. Use Homebrew services for setup, pairing, White Noise
+startup, status, and boot. For phone-launched `/codex` jobs on macOS, stop the
+service and run the listener from a login shell or tmux:
+
+```sh
+brew services stop nvk/tap/agentnoise
+agentnoise up --no-daemon
+```
+
+```sh
+tmux new -s agentnoise 'agentnoise up --no-daemon'
+```
 
 For config examples:
 

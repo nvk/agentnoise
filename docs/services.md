@@ -35,9 +35,11 @@ Current Codex CLI releases do not run reliably when `codex exec` is launched
 directly by launchd. They can start and then produce no output forever. The
 macOS service is still useful for White Noise daemon/login startup, pairing,
 status, and non-Codex commands, but Codex jobs should be run from a login-shell
-engine until agentnoise grows a dedicated worker mode:
+engine until agentnoise grows a dedicated worker mode. Stop the service first
+so the login-shell process owns the listener:
 
 ```sh
+brew services stop nvk/tap/agentnoise
 agentnoise up --no-daemon
 ```
 

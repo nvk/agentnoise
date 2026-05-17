@@ -217,23 +217,35 @@ For an existing config:
 agentnoise config launcher direct
 ```
 
-Then start it. For normal desktop use, run it as a Homebrew service:
+Then start it. Homebrew services are the simple setup and boot path:
 
 ```sh
 brew services start nvk/tap/agentnoise
 ```
 
-Then open the local console:
+The service starts White Noise, repairs login when needed, discovers chats,
+handles pairing, and keeps non-Codex commands available after reboot.
+
+For `/codex` jobs on macOS, run the engine from a login shell instead of the
+Homebrew/launchd service. Current Codex CLI builds can hang before producing
+output when launched directly by launchd:
 
 ```sh
-agentnoise up
+brew services stop nvk/tap/agentnoise
+agentnoise up --no-daemon
 ```
 
-`agentnoise up` is safe to run while the Homebrew service is enabled. If the
-service already owns the listener, `up` attaches as the terminal UI and follows
-the service logs. If no listener is running, `up` takes the foreground lock and
-runs the same engine itself. Non-interactive service starts wait for that lock,
-so the service can take over after a foreground troubleshooting run exits.
+Over SSH, keep that foreground engine alive with tmux:
+
+```sh
+tmux new -s agentnoise 'agentnoise up --no-daemon'
+```
+
+`agentnoise up` is still safe to run while the Homebrew service is enabled. If
+the service already owns the listener, `up` attaches as the terminal UI and
+follows the service logs. It cannot move `/codex` jobs out of the launchd-owned
+service process, so stop the service first when you want phone-launched Codex
+jobs on macOS.
 
 On first run, agentnoise creates the desktop identity, stores its `nsec` in the
 OS keychain, starts White Noise, publishes the profile/key package, and opens
@@ -611,6 +623,15 @@ hellos or auth errors do not stop resends. Use `--require-job-final` for
 `/codex`, `/claude`, or `/hermes` tests; otherwise the first ack would be
 enough to pass.
 
+## Screenshots
+
+Website screenshots, README-safe images, and Open Graph assets are generated
+from the static `agentnoise.org` repo. See [Screenshots](docs/screenshots.md)
+for the exact commands and the privacy checklist before using a real phone or
+terminal capture.
+
+![agentnoise desktop screenshot](https://agentnoise.org/shots/desktop.png)
+
 ## Transport Notes
 
 The default White Noise transport remains the tested `wn` CLI path. Setting
@@ -716,6 +737,7 @@ defaults to 30 seconds.
 - [Remote SSH pairing](docs/remote-ssh.md)
 - [Fake phone testing](docs/fake-phone-testing.md)
 - [Testing](docs/testing.md)
+- [Screenshots](docs/screenshots.md)
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)
 - [Homebrew packaging](docs/homebrew.md)
