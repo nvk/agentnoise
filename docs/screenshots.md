@@ -1,26 +1,30 @@
 # Screenshots
 
-Use reproducible screenshots instead of ad hoc desktop captures. The website
-repo owns the visual assets under `shots/*.png` so the app repo does not
-duplicate large binaries.
+Use reproducible product screenshots instead of ad hoc desktop captures. Do not
+use marketing-site viewport screenshots in the docs; they look like page crops
+and do not explain the app.
 
-## Website Captures
+The sibling `agentnoise.org` repo owns a dedicated `shots.html` staging page
+and the generated `shots/*.png` assets so the app repo does not duplicate large
+binaries.
+
+## Product Captures
 
 From the sibling `agentnoise.org` repo:
 
 ```sh
 python3 -m http.server 4177
-scripts/site-shot http://127.0.0.1:4177 shots/desktop.png 1800 1440
-scripts/site-shot http://127.0.0.1:4177 shots/mobile.png 390 900
-scripts/site-shot http://127.0.0.1:4177 shots/mobile-long.png 390 1900
+scripts/site-shot http://127.0.0.1:4177/shots.html shots/desktop.png 1600 1200
+scripts/site-shot http://127.0.0.1:4177/shots.html shots/mobile.png 390 900
+scripts/site-shot http://127.0.0.1:4177/shots.html shots/mobile-long.png 390 1200
 ```
 
 If the global `site-shot` service is preferred:
 
 ```sh
 site-shotd start
-site-shot -w 1800 -h 1440 --retina http://127.0.0.1:4177 shots/desktop.png
-site-shot -w 390 -h 900 --retina http://127.0.0.1:4177 shots/mobile.png
+site-shot -w 1600 -h 1200 --retina http://127.0.0.1:4177/shots.html shots/desktop.png
+site-shot -w 390 -h 900 --retina http://127.0.0.1:4177/shots.html shots/mobile.png
 ```
 
 ## Open Graph Image
@@ -33,7 +37,7 @@ magick -background none assets/og-agentnoise.svg assets/og-agentnoise.png
 
 ## README Images
 
-Prefer site-hosted images in Markdown so screenshots stay in one place:
+If a README needs an image, use only the product-stage captures:
 
 ```md
 ![agentnoise desktop](https://agentnoise.org/shots/desktop.png)

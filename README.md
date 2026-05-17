@@ -625,12 +625,10 @@ enough to pass.
 
 ## Screenshots
 
-Website screenshots, README-safe images, and Open Graph assets are generated
-from the static `agentnoise.org` repo. See [Screenshots](docs/screenshots.md)
-for the exact commands and the privacy checklist before using a real phone or
-terminal capture.
-
-![agentnoise desktop screenshot](https://agentnoise.org/shots/desktop.png)
+Product screenshots and Open Graph assets are generated from a dedicated
+`agentnoise.org/shots.html` staging page, not from the marketing site. See
+[Screenshots](docs/screenshots.md) for the exact commands and privacy checklist
+before using a real phone or terminal capture.
 
 ## Transport Notes
 
