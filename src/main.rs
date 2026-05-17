@@ -14,6 +14,7 @@ use agentnoise::doctor::render_doctor;
 use agentnoise::events::EventJournal;
 use agentnoise::identity;
 use agentnoise::launchd;
+use agentnoise::local_sessions::{self, LocalAgentSession};
 use agentnoise::runner::{AgentKind, AgentRequest};
 use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo, RuntimePairingPin};
 use agentnoise::secrets;
@@ -22,7 +23,7 @@ use agentnoise::setup::{self, SetupOptions, SetupResult};
 use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
 use agentnoise::wn::WnClient;
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use zeroize::Zeroize;
@@ -252,6 +253,23 @@ enum ConfigCommand {
     Launcher {
         launcher: RunnerLauncher,
     },
+    #[command(about = "Enable or disable opt-in local agent session notifications")]
+    LocalSessionsWatch {
+        enabled: ConfigToggle,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum ConfigToggle {
+    On,
+    Off,
+}
+
+impl ConfigToggle {
+    fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -541,6 +559,19 @@ fn main() -> Result<()> {
                 config.runner.launcher = launcher;
                 config.save(&config_path)?;
                 println!("agent launcher: {}", config.runner.launcher);
+            }
+            ConfigCommand::LocalSessionsWatch { enabled } => {
+                let mut config = Config::load_or_template(&config_path)?;
+                config.local_sessions.watch = enabled.enabled();
+                config.save(&config_path)?;
+                println!(
+                    "local session watch: {}",
+                    if config.local_sessions.watch {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
             }
         },
         Command::Parse { message } => {
@@ -1548,6 +1579,8 @@ enum StreamItem {
     },
     Discovered(Vec<String>),
     DiscoveryError(String),
+    LocalSessionsChanged(Vec<LocalAgentSession>),
+    LocalSessionsWatchError(String),
 }
 
 fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<()> {
@@ -1582,6 +1615,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
         }
     }
     spawn_group_discovery(Arc::clone(&wn), tx.clone());
+    spawn_local_session_watcher(app.config(), tx.clone());
     println!("agentnoise listening");
 
     let ignore_initial = app.config().whitenoise.ignore_initial_messages;
@@ -1616,6 +1650,19 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
             }
             StreamItem::DiscoveryError(message) => {
                 eprintln!("agentnoise: group discovery failed: {message}");
+            }
+            StreamItem::LocalSessionsChanged(sessions) => {
+                if let Some(group_id) = local_session_notification_group(app.config()) {
+                    let notice = local_sessions::render_new_session_notice(&sessions);
+                    try_send_reply_recorded(&wn, &event_journal, &group_id, &notice);
+                } else {
+                    eprintln!(
+                        "agentnoise: local sessions changed, but no paired primary chat is configured"
+                    );
+                }
+            }
+            StreamItem::LocalSessionsWatchError(message) => {
+                eprintln!("agentnoise: local session watch failed: {message}");
             }
             StreamItem::StreamError { group_id, message } => {
                 eprintln!("agentnoise: wn stream error for {group_id}: {message}");
@@ -2132,6 +2179,80 @@ fn spawn_group_discovery(wn: Arc<WnClient>, tx: mpsc::Sender<StreamItem>) {
     });
 }
 
+fn spawn_local_session_watcher(config: &Config, tx: mpsc::Sender<StreamItem>) {
+    if !config.local_sessions.watch {
+        return;
+    }
+
+    let interval = Duration::from_secs(config.local_sessions.watch_interval_seconds.max(1));
+    let notify_limit = config.local_sessions.notify_limit.clamp(1, 20);
+    println!(
+        "agentnoise local session watcher enabled; notifying up to {notify_limit} new sessions"
+    );
+
+    thread::spawn(move || {
+        let mut seen: Option<HashSet<String>> = None;
+        let mut last_error: Option<String> = None;
+
+        loop {
+            match local_sessions::discover_all_local_sessions() {
+                Ok(sessions) => {
+                    last_error = None;
+                    match &mut seen {
+                        Some(seen_keys) => {
+                            let mut new_sessions = sessions
+                                .into_iter()
+                                .filter(|session| {
+                                    seen_keys.insert(local_sessions::local_session_key(session))
+                                })
+                                .collect::<Vec<_>>();
+                            if !new_sessions.is_empty() {
+                                new_sessions.truncate(notify_limit);
+                                if tx
+                                    .send(StreamItem::LocalSessionsChanged(new_sessions))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        None => {
+                            seen = Some(
+                                sessions
+                                    .iter()
+                                    .map(local_sessions::local_session_key)
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    if last_error.as_deref() != Some(message.as_str()) {
+                        if tx
+                            .send(StreamItem::LocalSessionsWatchError(message.clone()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        last_error = Some(message);
+                    }
+                }
+            }
+
+            thread::sleep(interval);
+        }
+    });
+}
+
+fn local_session_notification_group(config: &Config) -> Option<String> {
+    if !config.local_sessions.watch || config.whitenoise.allowed_senders.is_empty() {
+        return None;
+    }
+    let group_id = config.whitenoise.group_id.trim();
+    (!group_id.is_empty()).then(|| group_id.to_string())
+}
+
 fn remove_subscribed_group(subscribed: &Arc<Mutex<HashSet<String>>>, group_id: &str) -> Result<()> {
     subscribed
         .lock()
@@ -2203,6 +2324,27 @@ mod tests {
                 2
             ) > send_retry_delay("temporary transport failure", 2)
         );
+    }
+
+    #[test]
+    fn local_session_notifications_are_opt_in_and_primary_chat_only() {
+        let mut config = Config::template();
+        config.whitenoise.group_id = "group-a".to_string();
+        config
+            .whitenoise
+            .allowed_senders
+            .push("npub1pairedphone".to_string());
+
+        assert_eq!(local_session_notification_group(&config), None);
+
+        config.local_sessions.watch = true;
+        assert_eq!(
+            local_session_notification_group(&config),
+            Some("group-a".to_string())
+        );
+
+        config.whitenoise.group_id.clear();
+        assert_eq!(local_session_notification_group(&config), None);
     }
 
     #[test]

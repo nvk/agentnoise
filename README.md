@@ -663,6 +663,24 @@ This is intentionally conservative: it does not return transcript content,
 inspect process environments, or silently attach unrelated local work to a
 White Noise chat. The phone user must explicitly resume a listed session.
 
+Automatic local session notifications are disabled by default. Enable them only
+on machines where it is okay to send same-account Codex/Claude session metadata
+to the primary paired White Noise chat:
+
+```sh
+agentnoise config local-sessions-watch on
+brew services restart nvk/tap/agentnoise
+```
+
+The watcher baselines existing sessions at startup, then reports newly seen
+local session ids, update times, and cwd metadata. It still does not read
+transcripts or attach automatically. To turn it off:
+
+```sh
+agentnoise config local-sessions-watch off
+brew services restart nvk/tap/agentnoise
+```
+
 ## Optional Hermes Support
 
 Hermes support is disabled by default. agentnoise does not run the Hermes Agent
@@ -728,6 +746,8 @@ defaults to 30 seconds.
 - Keep repos as configured aliases.
 - Keep agent execution behind [`bondage`](https://agentbondage.org/).
 - Store the bot `nsec` in the OS keychain for normal use, not in `config.toml`.
+- Keep automatic local-session notifications off unless that machine is meant
+  to expose same-account Codex/Claude metadata to the paired chat.
 - Use `--dev-burner-nsec` only for throwaway development identities.
 
 ## More

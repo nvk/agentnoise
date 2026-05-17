@@ -26,6 +26,10 @@ pub fn discover_local_sessions(limit: usize) -> Result<Vec<LocalAgentSession>> {
     discover_local_sessions_in(&codex_home(), &claude_home(), limit)
 }
 
+pub fn discover_all_local_sessions() -> Result<Vec<LocalAgentSession>> {
+    discover_local_sessions_in(&codex_home(), &claude_home(), usize::MAX)
+}
+
 pub fn discover_local_sessions_in(
     codex_home: &Path,
     claude_home: &Path,
@@ -51,48 +55,73 @@ pub fn render_local_sessions(limit: usize) -> String {
     }
 }
 
+pub fn local_session_key(session: &LocalAgentSession) -> String {
+    format!("{}:{}", session.agent, session.id)
+}
+
 pub fn render_sessions(sessions: &[LocalAgentSession]) -> String {
     if sessions.is_empty() {
         return "No local Codex or Claude sessions found.".to_string();
     }
 
-    let lines = sessions
-        .iter()
-        .enumerate()
-        .map(|(index, session)| {
-            let title = session
-                .title
-                .as_deref()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or("untitled");
-            let cwd = session
-                .cwd
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let updated = session.updated_at.as_deref().unwrap_or("unknown");
-            let resume = match session.agent {
-                AgentKind::Codex => "/codex-resume",
-                AgentKind::Claude => "/claude-resume",
-                AgentKind::Hermes => "/hermes-resume",
-            };
-            format!(
-                "{}. {} {}\n   id: {}\n   updated: {}\n   cwd: {}\n   resume: {} {} <prompt>",
-                index + 1,
-                session.agent,
-                compact_text(title, 64),
-                session.id,
-                updated,
-                compact_text(&cwd, 96),
-                resume,
-                session.id
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let lines = render_session_list(sessions);
 
     format!(
         "Local Agent Sessions\n{lines}\nOnly metadata is shown. Resume explicitly with the command above."
+    )
+}
+
+pub fn render_new_session_notice(sessions: &[LocalAgentSession]) -> String {
+    if sessions.is_empty() {
+        return "No new local Codex or Claude sessions found.".to_string();
+    }
+
+    let noun = if sessions.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    format!(
+        "Local agent {noun} detected\n{}\nOnly metadata is shown. agentnoise did not read transcript content or attach automatically. Resume explicitly with the command above.",
+        render_session_list(sessions)
+    )
+}
+
+fn render_session_list(sessions: &[LocalAgentSession]) -> String {
+    sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| render_session_entry(index + 1, session))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_session_entry(index: usize, session: &LocalAgentSession) -> String {
+    let title = session
+        .title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or("untitled");
+    let cwd = session
+        .cwd
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let updated = session.updated_at.as_deref().unwrap_or("unknown");
+    let resume = match session.agent {
+        AgentKind::Codex => "/codex-resume",
+        AgentKind::Claude => "/claude-resume",
+        AgentKind::Hermes => "/hermes-resume",
+    };
+    format!(
+        "{index}. {} {}\n   id: {}\n   updated: {}\n   cwd: {}\n   resume: {} {} <prompt>",
+        session.agent,
+        compact_text(title, 64),
+        session.id,
+        updated,
+        compact_text(&cwd, 96),
+        resume,
+        session.id
     )
 }
 
@@ -328,5 +357,38 @@ mod tests {
             render_sessions(&[]),
             "No local Codex or Claude sessions found."
         );
+    }
+
+    #[test]
+    fn new_session_notice_is_metadata_only() {
+        let session = LocalAgentSession {
+            agent: AgentKind::Codex,
+            id: "c-123456".to_string(),
+            title: Some("private title".to_string()),
+            cwd: Some(PathBuf::from("/tmp/work")),
+            updated_at: Some("2026-05-17T12:00:00Z".to_string()),
+            source_path: PathBuf::from("/tmp/index.jsonl"),
+        };
+
+        let rendered = render_new_session_notice(&[session]);
+
+        assert!(rendered.contains("Local agent session detected"));
+        assert!(rendered.contains("/codex-resume c-123456 <prompt>"));
+        assert!(rendered.contains("did not read transcript content"));
+        assert!(!rendered.contains("private prompt"));
+    }
+
+    #[test]
+    fn local_session_key_includes_agent_and_id() {
+        let session = LocalAgentSession {
+            agent: AgentKind::Claude,
+            id: "abc".to_string(),
+            title: None,
+            cwd: None,
+            updated_at: None,
+            source_path: PathBuf::from("/tmp/abc.jsonl"),
+        };
+
+        assert_eq!(local_session_key(&session), "claude:abc");
     }
 }

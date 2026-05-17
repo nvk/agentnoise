@@ -14,6 +14,8 @@ use crate::runner::{AgentKind, AgentRequest};
 pub struct Config {
     pub whitenoise: WhitenoiseConfig,
     pub runner: RunnerConfig,
+    #[serde(default)]
+    pub local_sessions: LocalSessionsConfig,
     pub agents: AgentsConfig,
     pub repos: Vec<RepoConfig>,
 }
@@ -103,6 +105,26 @@ pub struct RunnerConfig {
     pub worktree_dir: String,
     #[serde(default)]
     pub allow_generic_agent_profiles: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalSessionsConfig {
+    #[serde(default)]
+    pub watch: bool,
+    #[serde(default = "default_local_sessions_watch_interval_seconds")]
+    pub watch_interval_seconds: u64,
+    #[serde(default = "default_local_sessions_notify_limit")]
+    pub notify_limit: usize,
+}
+
+impl Default for LocalSessionsConfig {
+    fn default() -> Self {
+        Self {
+            watch: false,
+            watch_interval_seconds: default_local_sessions_watch_interval_seconds(),
+            notify_limit: default_local_sessions_notify_limit(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ValueEnum)]
@@ -272,6 +294,7 @@ impl Config {
                 worktree_dir: default_worktree_dir_string(),
                 allow_generic_agent_profiles: false,
             },
+            local_sessions: LocalSessionsConfig::default(),
             agents: AgentsConfig {
                 codex: AgentConfig {
                     enabled: true,
@@ -308,6 +331,12 @@ impl Config {
         }
         if self.runner.approval_ttl_seconds < 30 {
             bail!("runner.approval_ttl_seconds must be at least 30");
+        }
+        if self.local_sessions.watch_interval_seconds == 0 {
+            bail!("local_sessions.watch_interval_seconds must be greater than zero");
+        }
+        if self.local_sessions.notify_limit == 0 {
+            bail!("local_sessions.notify_limit must be greater than zero");
         }
         if self.whitenoise.pairing_pin_seconds < 10 {
             bail!("whitenoise.pairing_pin_seconds must be at least 10");
@@ -675,6 +704,14 @@ fn default_approval_ttl_seconds() -> u64 {
     600
 }
 
+fn default_local_sessions_watch_interval_seconds() -> u64 {
+    60
+}
+
+fn default_local_sessions_notify_limit() -> usize {
+    5
+}
+
 fn default_hermes_agent_config() -> AgentConfig {
     AgentConfig {
         enabled: false,
@@ -791,8 +828,39 @@ path = "/tmp"
         assert_eq!(config.agents.hermes.profile, "hermes-agentnoise");
         assert_eq!(config.agents.hermes.bin, "hermes");
         assert_eq!(config.runner.launcher, RunnerLauncher::Bondage);
+        assert!(!config.local_sessions.watch);
+        assert_eq!(config.local_sessions.watch_interval_seconds, 60);
+        assert_eq!(config.local_sessions.notify_limit, 5);
         assert_eq!(config.whitenoise.profile_name, "agentnoise");
         assert_eq!(config.whitenoise.profile_display_name, "agentnoise desktop");
+    }
+
+    #[test]
+    fn local_session_watch_is_opt_in_and_validated() {
+        let mut config = Config::template();
+
+        assert!(!config.local_sessions.watch);
+        assert!(config.validate().is_ok());
+
+        config.local_sessions.watch = true;
+        config.local_sessions.watch_interval_seconds = 0;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("local_sessions.watch_interval_seconds")
+        );
+
+        config.local_sessions.watch_interval_seconds = 60;
+        config.local_sessions.notify_limit = 0;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("local_sessions.notify_limit")
+        );
     }
 
     #[test]

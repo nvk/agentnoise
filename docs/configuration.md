@@ -169,6 +169,34 @@ Use from White Noise:
 /codex fix the failing test
 ```
 
+## Local Session Visibility
+
+Manual session lookup is available from chat with `/agent-sessions`. It lists
+recent same-account Codex/Claude metadata and explicit resume commands without
+returning transcript content.
+
+Background notifications are a separate opt-in. Leave this off on machines
+where local session names or cwd paths are sensitive:
+
+```toml
+[local_sessions]
+watch = false
+watch_interval_seconds = 60
+notify_limit = 5
+```
+
+Enable it from the CLI on machines where that metadata exposure is acceptable:
+
+```sh
+agentnoise config local-sessions-watch on
+brew services restart nvk/tap/agentnoise
+```
+
+When enabled, agentnoise baselines existing sessions at listener startup and
+then sends newly seen local session ids, update times, cwd when available, and
+resume commands to the primary paired White Noise chat. It does not read
+transcripts, inspect process environments, or attach automatically.
+
 ## White Noise Identity
 
 The desktop helper uses its own White Noise/Nostr identity. The public `npub`

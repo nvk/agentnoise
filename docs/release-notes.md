@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added an opt-in local session watcher. `agentnoise config local-sessions-watch
+  on` makes the listener notify the primary paired chat when new same-account
+  Codex/Claude session metadata appears, while the default remains off for
+  privacy.
+
 ## 0.1.22 - 2026-05-17
 
 - Added a startup no-output watchdog for agent launches. If Codex, Claude,
