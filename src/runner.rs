@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use crate::config::{Config, RunnerLauncher};
 use crate::jobs::{JobRecord, JobStore};
+use crate::paths::is_gui_backed_workspace_path;
 use crate::progress::{self, ProgressEvent};
 use crate::text::format_chat_text;
 use crate::workspace;
@@ -161,103 +162,158 @@ impl Runner {
 
         let plan = self.build_command(&request)?;
         let job = self.jobs.create(&request)?;
-        if let Some(progress_callback) = &progress_callback {
-            progress_callback(progress::started(request.agent, &job.id));
-        }
-
-        let mut command = Command::new(&plan.program);
-        command.args(&plan.args);
-        if let Some(cwd) = &plan.cwd {
-            fs::create_dir_all(cwd)
-                .with_context(|| format!("creating job cwd {}", cwd.display()))?;
-            command.current_dir(cwd);
-        }
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(unix)]
-        command.process_group(0);
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                let summary = format!("failed to spawn {}: {error}", plan.program);
-                self.write_log(&job, &plan, "", &summary)?;
-                if let Some(progress_callback) = &progress_callback {
-                    progress_callback(ProgressEvent {
-                        kind: progress::ProgressKind::Error,
-                        agent: request.agent,
-                        job_id: Some(job.id.clone()),
-                        label: "spawn failed".to_string(),
-                        detail: Some(summary.clone()),
-                        final_event: true,
-                    });
-                }
-                return self.jobs.mark_failed(&job.id, summary);
-            }
-        };
-
-        self.jobs.mark_running(&job.id, child.id())?;
         let log_file = self.create_log(&job, &plan)?;
         let capture_limit = capture_max_bytes(self.config.runner.max_output_chars);
         let stdout_bytes = Arc::new(Mutex::new(CaptureBuffer::new(capture_limit)));
         let stderr_bytes = Arc::new(Mutex::new(CaptureBuffer::new(capture_limit)));
-        let last_activity = Arc::new(Mutex::new(Instant::now()));
-        let heartbeat = progress_callback.as_ref().and_then(|progress_callback| {
-            start_silence_heartbeat(
-                request.agent,
-                job.id.clone(),
-                self.config.runner.silence_ping_seconds,
-                Arc::clone(&last_activity),
-                Arc::clone(progress_callback),
-            )
-        });
-        let progress_observer = progress_callback.clone().map(|progress_callback| {
-            let agent = request.agent;
-            let job_id = job.id.clone();
-            Arc::new(move |line: &str| {
-                if let Some(mut event) = progress::parse_progress_line(agent, line) {
-                    event.job_id = Some(job_id.clone());
-                    progress_callback(event);
+        let total_attempts = self.config.runner.startup_retry_attempts.saturating_add(1);
+        let mut final_status = None;
+        let mut final_outcome = WaitOutcome::Exited;
+
+        for attempt_index in 0..total_attempts {
+            let attempt_number = attempt_index + 1;
+            if attempt_index == 0
+                && let Some(progress_callback) = &progress_callback
+            {
+                progress_callback(progress::started(request.agent, &job.id));
+            }
+            log_attempt(&log_file, attempt_number, total_attempts)?;
+
+            let mut command = Command::new(&plan.program);
+            command.args(&plan.args);
+            if let Some(cwd) = &plan.cwd {
+                fs::create_dir_all(cwd)
+                    .with_context(|| format!("creating job cwd {}", cwd.display()))?;
+                command.current_dir(cwd);
+            }
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            #[cfg(unix)]
+            command.process_group(0);
+
+            let mut child = match command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let summary = format!("failed to spawn {}: {error}", plan.program);
+                    log_note(&log_file, &summary)?;
+                    if let Some(progress_callback) = &progress_callback {
+                        progress_callback(ProgressEvent {
+                            kind: progress::ProgressKind::Error,
+                            agent: request.agent,
+                            job_id: Some(job.id.clone()),
+                            label: "spawn failed".to_string(),
+                            detail: Some(summary.clone()),
+                            final_event: true,
+                        });
+                    }
+                    return self.jobs.mark_failed(&job.id, summary);
                 }
-            }) as LineObserver
-        });
+            };
 
-        let stdout_thread = child.stdout.take().map(|stdout| {
-            copy_stream_to_log(
-                "stdout",
-                stdout,
-                Arc::clone(&log_file),
-                Arc::clone(&stdout_bytes),
-                Some(Arc::clone(&last_activity)),
-                progress_observer.clone(),
-            )
-        });
-        let stderr_thread = child.stderr.take().map(|stderr| {
-            copy_stream_to_log(
-                "stderr",
-                stderr,
-                Arc::clone(&log_file),
-                Arc::clone(&stderr_bytes),
-                Some(Arc::clone(&last_activity)),
-                None,
-            )
-        });
+            self.jobs.mark_running(&job.id, child.id())?;
+            let last_activity = Arc::new(Mutex::new(Instant::now()));
+            let saw_output = Arc::new(AtomicBool::new(false));
+            let heartbeat = progress_callback.as_ref().and_then(|progress_callback| {
+                start_silence_heartbeat(
+                    request.agent,
+                    job.id.clone(),
+                    self.config.runner.silence_ping_seconds,
+                    Arc::clone(&last_activity),
+                    Arc::clone(progress_callback),
+                )
+            });
+            let progress_observer = progress_callback.clone().map(|progress_callback| {
+                let agent = request.agent;
+                let job_id = job.id.clone();
+                Arc::new(move |line: &str| {
+                    if let Some(mut event) = progress::parse_progress_line(agent, line) {
+                        event.job_id = Some(job_id.clone());
+                        progress_callback(event);
+                    }
+                }) as LineObserver
+            });
 
-        let wait_result =
-            wait_for_child(&mut child, &job.id, self.config.runner.job_timeout_seconds);
-        stop_silence_heartbeat(heartbeat);
-        let (status, timed_out) = wait_result?;
-        join_log_thread(stdout_thread)?;
-        join_log_thread(stderr_thread)?;
-        if timed_out {
-            let mut log = log_file
-                .lock()
-                .map_err(|_| anyhow::anyhow!("log file lock poisoned"))?;
-            writeln!(
-                log,
-                "\nagentnoise: job timed out after {} seconds and was terminated",
-                self.config.runner.job_timeout_seconds
-            )?;
+            let stdout_thread = child.stdout.take().map(|stdout| {
+                copy_stream_to_log(
+                    "stdout",
+                    stdout,
+                    Arc::clone(&log_file),
+                    Arc::clone(&stdout_bytes),
+                    Some(Arc::clone(&last_activity)),
+                    Some(Arc::clone(&saw_output)),
+                    progress_observer.clone(),
+                )
+            });
+            let stderr_thread = child.stderr.take().map(|stderr| {
+                copy_stream_to_log(
+                    "stderr",
+                    stderr,
+                    Arc::clone(&log_file),
+                    Arc::clone(&stderr_bytes),
+                    Some(Arc::clone(&last_activity)),
+                    Some(Arc::clone(&saw_output)),
+                    None,
+                )
+            });
+
+            let wait_result = wait_for_child(
+                &mut child,
+                &job.id,
+                self.config.runner.job_timeout_seconds,
+                self.config.runner.startup_silence_timeout_seconds,
+                Arc::clone(&saw_output),
+            );
+            stop_silence_heartbeat(heartbeat);
+            let (status, outcome) = wait_result?;
+            join_log_thread(stdout_thread)?;
+            join_log_thread(stderr_thread)?;
+
+            match outcome {
+                WaitOutcome::TimedOut => {
+                    log_note(
+                        &log_file,
+                        &format!(
+                            "agentnoise: job timed out after {} seconds and was terminated",
+                            self.config.runner.job_timeout_seconds
+                        ),
+                    )?;
+                }
+                WaitOutcome::StartupSilent => {
+                    log_note(
+                        &log_file,
+                        &format!(
+                            "agentnoise: launch attempt {attempt_number}/{total_attempts} produced no output for {} seconds and was terminated",
+                            self.config.runner.startup_silence_timeout_seconds
+                        ),
+                    )?;
+                    if attempt_number < total_attempts {
+                        if let Some(progress_callback) = &progress_callback {
+                            progress_callback(progress::retrying_after_silence(
+                                request.agent,
+                                &job.id,
+                                self.config.runner.startup_silence_timeout_seconds,
+                                attempt_number + 1,
+                                total_attempts,
+                            ));
+                        }
+                        continue;
+                    }
+                }
+                WaitOutcome::Exited => {}
+            }
+
+            final_status = Some(status);
+            final_outcome = outcome;
+            break;
         }
+
+        let Some(status) = final_status else {
+            let summary = "job ended without a recorded status".to_string();
+            log_note(&log_file, &summary)?;
+            return self.jobs.mark_failed(&job.id, summary);
+        };
 
         let stdout = stdout_bytes
             .lock()
@@ -274,11 +330,24 @@ impl Runner {
             status.success(),
             self.config.runner.max_output_chars,
         );
-        if timed_out {
-            summary = format!(
-                "job timed out after {} seconds and was terminated.\n\n{}",
-                self.config.runner.job_timeout_seconds, summary
-            );
+        match final_outcome {
+            WaitOutcome::TimedOut => {
+                summary = format!(
+                    "job timed out after {} seconds and was terminated.\n\n{}",
+                    self.config.runner.job_timeout_seconds, summary
+                );
+            }
+            WaitOutcome::StartupSilent => {
+                summary = format!(
+                    "agent produced no output for {} seconds after {} launch attempt(s), so agentnoise terminated it.\n\n{}",
+                    self.config.runner.startup_silence_timeout_seconds, total_attempts, summary
+                );
+                if let Some(hint) = launch_silence_hint(&plan) {
+                    summary.push_str("\n\n");
+                    summary.push_str(&hint);
+                }
+            }
+            WaitOutcome::Exited => {}
         }
         let record = self.jobs.finish(&job.id, status.code(), summary)?;
         if let Some(progress_callback) = &progress_callback {
@@ -318,6 +387,11 @@ impl Runner {
         if !agent.enabled {
             bail!("{} is disabled in config", request.agent);
         }
+        if request.agent == AgentKind::Codex && launchd_service_context() {
+            bail!(
+                "Codex jobs cannot run reliably from macOS launchd/brew services: `codex exec` can start but never produce output. Start agentnoise from a login shell instead, for example `tmux new -s agentnoise 'agentnoise up --no-daemon'` after the White Noise daemon is running. Manual: https://github.com/nvk/agentnoise/blob/main/docs/services.md#macos"
+            );
+        }
         let permission_mode = self.config.effective_permission_mode_for_request(request)?;
 
         let prompt = agentnoise_prompt(request);
@@ -345,11 +419,7 @@ impl Runner {
                     workdir.display().to_string(),
                     prompt,
                 ]);
-                if self.config.runner.launcher == RunnerLauncher::Bondage {
-                    Some(stable_launch_cwd)
-                } else {
-                    Some(workdir)
-                }
+                Some(stable_launch_cwd)
             }
             (AgentKind::Claude, Some(session)) => {
                 args.extend([
@@ -485,68 +555,53 @@ impl Runner {
         writeln!(file)?;
         Ok(Arc::new(Mutex::new(file)))
     }
+}
 
-    fn write_log(
-        &self,
-        job: &JobRecord,
-        plan: &CommandPlan,
-        stdout: &str,
-        stderr: &str,
-    ) -> Result<()> {
-        let mut text = String::new();
-        text.push_str(&format!("job: {}\n", job.id));
-        text.push_str(&format!("agent: {}\n", job.agent));
-        text.push_str(&format!(
-            "repo: {}\n",
-            job.repo_alias.as_deref().unwrap_or("-")
-        ));
-        if let Some(cwd) = &plan.cwd {
-            text.push_str(&format!("cwd: {}\n", cwd.display()));
-        }
-        text.push_str(&format!("program: {}\n", plan.program));
-        text.push_str(&format!("args: {:?}\n", plan.args));
-        text.push_str("\n--- stdout ---\n");
-        text.push_str(stdout);
-        text.push_str("\n--- stderr ---\n");
-        text.push_str(stderr);
-
-        if let Some(parent) = job.log_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(&job.log_path, text)
-            .with_context(|| format!("writing {}", job.log_path.display()))?;
-        Ok(())
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitOutcome {
+    Exited,
+    TimedOut,
+    StartupSilent,
 }
 
 fn wait_for_child(
     child: &mut Child,
     job_id: &str,
     timeout_seconds: u64,
-) -> Result<(ExitStatus, bool)> {
-    if timeout_seconds == 0 {
-        return child
-            .wait()
-            .with_context(|| format!("waiting for job {job_id}"))
-            .map(|status| (status, false));
-    }
-
-    let timeout = Duration::from_secs(timeout_seconds);
+    startup_silence_timeout_seconds: u64,
+    saw_output: Arc<AtomicBool>,
+) -> Result<(ExitStatus, WaitOutcome)> {
+    let timeout = (timeout_seconds > 0).then(|| Duration::from_secs(timeout_seconds));
+    let startup_silence_timeout = (startup_silence_timeout_seconds > 0)
+        .then(|| Duration::from_secs(startup_silence_timeout_seconds));
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("polling job {job_id}"))?
         {
-            return Ok((status, false));
+            return Ok((status, WaitOutcome::Exited));
         }
-        if started.elapsed() >= timeout {
+        if let Some(timeout) = timeout
+            && started.elapsed() >= timeout
+        {
             terminate_child(child)
                 .with_context(|| format!("terminating timed out job {job_id}"))?;
             let status = child
                 .wait()
                 .with_context(|| format!("waiting for timed out job {job_id}"))?;
-            return Ok((status, true));
+            return Ok((status, WaitOutcome::TimedOut));
+        }
+        if let Some(timeout) = startup_silence_timeout
+            && !saw_output.load(Ordering::Relaxed)
+            && started.elapsed() >= timeout
+        {
+            terminate_child(child)
+                .with_context(|| format!("terminating silent startup job {job_id}"))?;
+            let status = child
+                .wait()
+                .with_context(|| format!("waiting for silent startup job {job_id}"))?;
+            return Ok((status, WaitOutcome::StartupSilent));
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -615,6 +670,49 @@ fn stop_silence_heartbeat(heartbeat: Option<SilenceHeartbeat>) {
     let _ = heartbeat.handle.join();
 }
 
+fn log_attempt(
+    log_file: &Arc<Mutex<File>>,
+    attempt_number: usize,
+    total_attempts: usize,
+) -> Result<()> {
+    let mut log = log_file
+        .lock()
+        .map_err(|_| anyhow::anyhow!("log file lock poisoned"))?;
+    writeln!(log, "\n--- attempt {attempt_number}/{total_attempts} ---")?;
+    Ok(())
+}
+
+fn log_note(log_file: &Arc<Mutex<File>>, note: &str) -> Result<()> {
+    let mut log = log_file
+        .lock()
+        .map_err(|_| anyhow::anyhow!("log file lock poisoned"))?;
+    writeln!(log, "\n{note}")?;
+    Ok(())
+}
+
+fn launch_silence_hint(plan: &CommandPlan) -> Option<String> {
+    let workspace = plan.args.windows(2).find_map(|args| {
+        (args[0] == "-C" && is_gui_backed_workspace_path(Path::new(&args[1])))
+            .then(|| args[1].clone())
+    })?;
+    Some(format!(
+        "Launch hint: the selected workspace is under a GUI-backed sync folder ({workspace}). Codex can hang there when started by launchd/brew services before it writes any output. Move this repo outside iCloud Drive/CloudDocs for service use, or run `agentnoise up` from an interactive terminal for this workspace."
+    ))
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn launchd_service_context() -> bool {
+    if std::env::var_os("AGENTNOISE_ALLOW_LAUNCHD_CODEX").is_some() {
+        return false;
+    }
+    std::env::var_os("XPC_SERVICE_NAME").is_some() && std::env::var_os("TMUX").is_none()
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn launchd_service_context() -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn terminate_child(child: &mut Child) -> Result<()> {
     let pgid = child.id().to_string();
@@ -659,6 +757,7 @@ fn copy_stream_to_log(
     log_file: Arc<Mutex<File>>,
     captured: Arc<Mutex<CaptureBuffer>>,
     last_activity: Option<Arc<Mutex<Instant>>>,
+    saw_output: Option<Arc<AtomicBool>>,
     line_observer: Option<LineObserver>,
 ) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || {
@@ -670,6 +769,9 @@ fn copy_stream_to_log(
                 .with_context(|| format!("reading {label}"))?;
             if n == 0 {
                 break;
+            }
+            if let Some(saw_output) = &saw_output {
+                saw_output.store(true, Ordering::Relaxed);
             }
 
             {
@@ -1123,7 +1225,10 @@ mod tests {
         assert!(plan.args.contains(&"--json".to_string()));
         assert!(plan.args.last().unwrap().contains("Agentnoise context:"));
         let repo_path = repo.path().canonicalize().unwrap();
-        assert_eq!(plan.cwd.as_deref(), Some(repo_path.as_path()));
+        assert!(plan.args.contains(&"-C".to_string()));
+        assert!(plan.args.contains(&repo_path.display().to_string()));
+        let launch_cwd = temp.path().join("data");
+        assert_eq!(plan.cwd.as_deref(), Some(launch_cwd.as_path()));
     }
 
     #[test]
@@ -1238,6 +1343,81 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         assert!(events.iter().any(|event| event.label == "started"));
         assert!(events.iter().any(|event| event.label == "still running"));
         assert!(events.iter().any(|event| event.label == "succeeded"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_startup_retries_once_and_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("first-attempt");
+        let bin = temp.path().join("flaky-agent");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nif [ ! -f {marker:?} ]; then touch {marker:?}; sleep 10; exit 0; fi\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"retried ok\"}}}}'\n",
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&bin, permissions).unwrap();
+        }
+
+        let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.runner.progress_interval_seconds = 1;
+        config.runner.silence_ping_seconds = 1;
+        config.runner.startup_silence_timeout_seconds = 1;
+        config.runner.startup_retry_attempts = 1;
+        config.runner.job_timeout_seconds = 20;
+        config.agents.codex.bin = bin.display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_callback = Arc::clone(&events);
+        let record = runner
+            .run_blocking_with_progress(
+                AgentRequest::new(AgentKind::Codex, "work", "hello"),
+                Arc::new(move |event| {
+                    events_callback.lock().unwrap().push(event);
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(record.status, crate::jobs::JobStatus::Succeeded);
+        assert_eq!(record.summary.as_deref(), Some("retried ok"));
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| event.label == "retrying"));
+        assert!(events.iter().any(|event| event.label == "succeeded"));
+    }
+
+    #[test]
+    fn silent_launch_hint_mentions_gui_backed_workspace() {
+        let plan = CommandPlan {
+            program: "codex".to_string(),
+            args: vec![
+                "exec".to_string(),
+                "-C".to_string(),
+                "/Users/user/Library/Mobile Documents/com~apple~CloudDocs/project".to_string(),
+                "hello".to_string(),
+            ],
+            cwd: None,
+        };
+
+        let hint = launch_silence_hint(&plan).unwrap();
+
+        assert!(hint.contains("GUI-backed sync folder"));
+        assert!(hint.contains("iCloud Drive"));
+        assert!(hint.contains("agentnoise up"));
     }
 
     #[test]

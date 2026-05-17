@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const APP_NAME: &str = "agentnoise";
 
@@ -85,4 +85,9 @@ pub fn local_checkout_whitenoise_bin(name: &str) -> Option<PathBuf> {
         .join(".local-whitenoise/bin")
         .join(name);
     path.is_file().then_some(path)
+}
+
+pub fn is_gui_backed_workspace_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.contains("/Library/Mobile Documents/") || text.contains("/CloudDocs/")
 }

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, RunnerLauncher};
-use crate::paths::{expand_tilde, find_on_path};
+use crate::paths::{expand_tilde, find_on_path, is_gui_backed_workspace_path};
 use crate::runner::{AgentKind, AgentRequest};
 use crate::whitenoise_cli;
 
@@ -137,10 +137,17 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
     }
 
     for repo in &config.repos {
-        checks.push(path_check(
-            &format!("repo {}", repo.alias),
-            &expand_tilde(&repo.path),
-        ));
+        let repo_path = expand_tilde(&repo.path);
+        checks.push(path_check(&format!("repo {}", repo.alias), &repo_path));
+        if is_gui_backed_workspace_path(&repo_path) {
+            checks.push(Check {
+                level: Level::Warn,
+                name: format!("repo {} service path", repo.alias),
+                detail:
+                    "under iCloud Drive/CloudDocs; Codex may hang when run from launchd/brew services. Move the repo outside iCloud or run `agentnoise up` interactively."
+                        .to_string(),
+            });
+        }
     }
 
     checks.push(path_check("event log", &config.resolved_event_log_path()));
@@ -373,5 +380,21 @@ mod tests {
         assert!(output.contains("codex-agentnoise missing from bondage.conf"));
         assert!(output.contains("agentnoise config launcher direct"));
         assert!(output.contains("docs/configuration.md#agent-launcher"));
+    }
+
+    #[test]
+    fn doctor_warns_about_icloud_repos_for_services() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path =
+            "/Users/user/Library/Mobile Documents/com~apple~CloudDocs/project".to_string();
+
+        let output = render_doctor(&temp.path().join("config.toml"), &config);
+
+        assert!(output.contains("[warn] repo sandbox service path"));
+        assert!(output.contains("Codex may hang"));
+        assert!(output.contains("agentnoise up"));
     }
 }

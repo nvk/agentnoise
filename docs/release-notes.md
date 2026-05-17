@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.1.22 - 2026-05-17
+
+- Added a startup no-output watchdog for agent launches. If Codex, Claude,
+  Hermes, or the launcher emits no stdout/stderr during startup, agentnoise
+  terminates that launch, retries once by default, then reports a clear failure
+  instead of leaving the phone chat with a permanently running job.
+- Changed direct Codex launches to start from agentnoise's stable data
+  directory while still passing the selected workspace through `codex -C`.
+  This avoids service-launched children stalling when the repo lives under
+  iCloud Drive or another GUI-backed folder.
+- Added doctor/runtime hints for iCloud Drive and CloudDocs repo paths, because
+  Codex itself can hang under launchd before writing output when `-C` points
+  there.
+- Added a macOS launchd guard for Codex jobs. When agentnoise is running as a
+  launchd/brew service, `/codex` now fails immediately with a service-mode
+  explanation instead of accepting a job that will not produce output.
+- Made reply send failures non-fatal for the listener and limited startup
+  hellos to the primary configured chat, avoiding restart loops and historical
+  group spam when White Noise reports pending MLS proposals.
+- Filtered removed/self-removed White Noise groups during discovery and
+  automatically accepted pending control-chat confirmations from the paired
+  sender, so stale fake-phone groups and unconfirmed DMs do not leave the phone
+  seeing an accepted job with no useful follow-up.
+
 ## 0.1.21 - 2026-05-16
 
 - Added chat-visible "still running" pings for jobs that are alive but have

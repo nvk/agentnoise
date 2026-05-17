@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -24,11 +25,15 @@ pub struct MessageEvent {
 #[derive(Clone)]
 pub struct WnClient {
     config: WhitenoiseConfig,
+    send_lock: Arc<Mutex<()>>,
 }
 
 impl WnClient {
     pub fn new(config: WhitenoiseConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            send_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn configured_group_ids(&self) -> Vec<String> {
@@ -36,10 +41,11 @@ impl WnClient {
     }
 
     pub fn discover_group_ids(&self) -> Result<Vec<String>> {
-        Ok(whitenoise_cli::list_groups(&self.config)?
-            .into_iter()
-            .map(|group| group.group_id)
-            .collect())
+        let groups = whitenoise_cli::list_groups(&self.config)?;
+        if let Err(error) = whitenoise_cli::accept_pending_groups(&self.config, &groups) {
+            eprintln!("agentnoise: failed to accept pending White Noise group(s): {error:#}");
+        }
+        Ok(groups.into_iter().map(|group| group.group_id).collect())
     }
 
     pub fn subscribe(&self) -> Result<Child> {
@@ -86,6 +92,10 @@ impl WnClient {
         if group_id.is_empty() {
             bail!("White Noise group id is empty");
         }
+        let _send_guard = self
+            .send_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("White Noise send lock poisoned"))?;
         let mut command = Command::new(whitenoise_cli::resolve_wn(&self.config.wn_bin));
         self.add_socket_arg(&mut command);
         command.arg("messages").arg("send").arg("--json");

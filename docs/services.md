@@ -31,6 +31,25 @@ agentnoise service uninstall --target launchd --unload
 
 `agentnoise launchd ...` remains as a macOS-specific compatibility command.
 
+Current Codex CLI releases do not run reliably when `codex exec` is launched
+directly by launchd. They can start and then produce no output forever. The
+macOS service is still useful for White Noise daemon/login startup, pairing,
+status, and non-Codex commands, but Codex jobs should be run from a login-shell
+engine until agentnoise grows a dedicated worker mode:
+
+```sh
+agentnoise up --no-daemon
+```
+
+For SSH sessions, keep that foreground engine alive with tmux:
+
+```sh
+tmux new -s agentnoise 'agentnoise up --no-daemon'
+```
+
+If you intentionally want to test launchd-launched Codex anyway, set
+`AGENTNOISE_ALLOW_LAUNCHD_CODEX=1` in that service environment.
+
 ## Linux
 
 Use a user systemd service:

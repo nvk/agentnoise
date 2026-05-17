@@ -91,6 +91,10 @@ pub struct RunnerConfig {
     pub progress_interval_seconds: u64,
     #[serde(default = "default_silence_ping_seconds")]
     pub silence_ping_seconds: u64,
+    #[serde(default = "default_startup_silence_timeout_seconds")]
+    pub startup_silence_timeout_seconds: u64,
+    #[serde(default = "default_startup_retry_attempts")]
+    pub startup_retry_attempts: usize,
     #[serde(default = "default_job_timeout_seconds")]
     pub job_timeout_seconds: u64,
     #[serde(default = "default_approval_ttl_seconds")]
@@ -261,6 +265,8 @@ impl Config {
                 max_output_chars: default_max_output_chars(),
                 progress_interval_seconds: default_progress_interval_seconds(),
                 silence_ping_seconds: default_silence_ping_seconds(),
+                startup_silence_timeout_seconds: default_startup_silence_timeout_seconds(),
+                startup_retry_attempts: default_startup_retry_attempts(),
                 job_timeout_seconds: default_job_timeout_seconds(),
                 approval_ttl_seconds: default_approval_ttl_seconds(),
                 worktree_dir: default_worktree_dir_string(),
@@ -651,6 +657,14 @@ fn default_progress_interval_seconds() -> u64 {
 
 fn default_silence_ping_seconds() -> u64 {
     60
+}
+
+fn default_startup_silence_timeout_seconds() -> u64 {
+    90
+}
+
+fn default_startup_retry_attempts() -> usize {
+    1
 }
 
 fn default_job_timeout_seconds() -> u64 {

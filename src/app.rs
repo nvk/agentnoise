@@ -13,7 +13,7 @@ use crate::capabilities;
 use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
 use crate::config::{Config, RepoConfig};
 use crate::jobs::JobStore;
-use crate::progress::{ProgressRateLimiter, render_progress};
+use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
 use crate::wn::MessageEvent;
@@ -343,6 +343,9 @@ impl AgentApp {
     ) -> Result<String> {
         let mut limiter = ProgressRateLimiter::new(self.config.runner.progress_interval_seconds);
         let callback = Arc::new(Mutex::new(move |event: crate::progress::ProgressEvent| {
+            if event.kind == ProgressKind::Finished {
+                return;
+            }
             if limiter.should_send(&event) {
                 send_progress(render_progress(&event));
             }
@@ -1559,6 +1562,55 @@ mod tests {
         assert!(ack.contains("/jobs"));
         assert!(ack.contains("/tail <job>"));
         assert!(ack.contains("/cancel <job>"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_request_progress_does_not_duplicate_final_reply() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("agent");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done once"}}'
+"#,
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&bin, permissions).unwrap();
+        }
+
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.launcher = crate::config::RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.agents.codex.bin = bin.display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let progress_callback = Arc::clone(&progress);
+        let reply = app
+            .run_request_with_progress(
+                crate::runner::AgentRequest::new(crate::runner::AgentKind::Codex, "work", "hello"),
+                move |text| progress_callback.lock().unwrap().push(text),
+            )
+            .unwrap();
+
+        assert!(reply.contains("Job an-"));
+        assert!(reply.contains("succeeded"));
+        assert!(reply.contains("done once"));
+        let progress = progress.lock().unwrap();
+        assert!(progress.iter().any(|text| text.contains("started")));
+        assert!(!progress.iter().any(|text| text.contains("succeeded")));
     }
 
     #[test]

@@ -1287,6 +1287,7 @@ fn discover_group(config: &mut Config, config_path: &Path) -> Result<GroupDiscov
         return Ok(GroupDiscovery::NeedsPairing);
     }
 
+    whitenoise_cli::accept_pending_groups(&config.whitenoise, &groups)?;
     for group in groups {
         config.whitenoise.add_control_group_id(&group.group_id);
     }
@@ -1647,7 +1648,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                     match app.route_initial_history_event(&event)? {
                         RouteAction::Ignore => {}
                         RouteAction::Reply(reply) => {
-                            send_reply_recorded(&wn, &event_journal, group_id, &reply)?;
+                            try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
                         }
                         RouteAction::NewSession(_)
                         | RouteAction::ResumeSession(_)
@@ -1665,7 +1666,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                     match action {
                         RouteAction::Ignore => {}
                         RouteAction::Reply(reply) => {
-                            send_reply_recorded(&wn, &event_journal, group_id, &reply)?;
+                            try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
                         }
                         RouteAction::NewSession(_)
                         | RouteAction::ResumeSession(_)
@@ -1681,7 +1682,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                 )? {
                     RouteAction::Ignore => {}
                     RouteAction::Reply(reply) => {
-                        send_reply_recorded(&wn, &event_journal, group_id, &reply)?;
+                        try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
                     }
                     RouteAction::NewSession(request) => {
                         match create_parallel_session(
@@ -1700,14 +1701,14 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                     &new_group_id,
                                     &request.ready_text(),
                                 ) {
-                                    Ok(()) => send_reply_recorded(
+                                    Ok(()) => try_send_reply_recorded(
                                         &wn,
                                         &event_journal,
                                         group_id,
                                         &request.created_text(),
-                                    )?,
+                                    ),
                                     Err(error) => {
-                                        send_reply_recorded(
+                                        try_send_reply_recorded(
                                             &wn,
                                             &event_journal,
                                             group_id,
@@ -1715,17 +1716,17 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                                 "{}\nWarning: failed to send the ready message to the new chat: {error:#}",
                                                 request.created_text()
                                             ),
-                                        )?;
+                                        );
                                     }
                                 }
                             }
                             Err(error) => {
-                                send_reply_recorded(
+                                try_send_reply_recorded(
                                     &wn,
                                     &event_journal,
                                     group_id,
                                     &format!("Error: failed to create session: {error:#}"),
-                                )?;
+                                );
                             }
                         }
                     }
@@ -1740,12 +1741,12 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         ) {
                             Ok(()) => {
                                 if request.group_id == group_id {
-                                    send_reply_recorded(
+                                    try_send_reply_recorded(
                                         &wn,
                                         &event_journal,
                                         group_id,
                                         &request.target_text,
-                                    )?;
+                                    );
                                 } else {
                                     match send_reply_recorded(
                                         &wn,
@@ -1753,42 +1754,42 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                         &request.group_id,
                                         &request.target_text,
                                     ) {
-                                        Ok(()) => send_reply_recorded(
+                                        Ok(()) => try_send_reply_recorded(
                                             &wn,
                                             &event_journal,
                                             group_id,
                                             &request.reply_text,
-                                        )?,
+                                        ),
                                         Err(error) => {
-                                            send_reply_recorded(
+                                            try_send_reply_recorded(
                                                 &wn,
                                                 &event_journal,
                                                 group_id,
                                                 &format!(
                                                     "Error: resumed session locally, but failed to message the target chat: {error:#}"
                                                 ),
-                                            )?;
+                                            );
                                         }
                                     }
                                 }
                             }
                             Err(error) => {
-                                send_reply_recorded(
+                                try_send_reply_recorded(
                                     &wn,
                                     &event_journal,
                                     group_id,
                                     &format!("Error: failed to resume session: {error:#}"),
-                                )?;
+                                );
                             }
                         }
                     }
                     RouteAction::Run(request) => {
-                        send_reply_recorded(
+                        try_send_reply_recorded(
                             &wn,
                             &event_journal,
                             group_id,
                             &app.run_ack_text(&request),
-                        )?;
+                        );
                         let app = Arc::clone(&app);
                         let wn = Arc::clone(&wn);
                         let event_journal = Arc::clone(&event_journal);
@@ -1847,7 +1848,10 @@ fn send_startup_hello_if_needed(
 
 fn should_send_startup_hello(config: &Config, sent: &mut HashSet<String>, group_id: &str) -> bool {
     let group_id = group_id.trim();
+    let primary_group = config.whitenoise.group_id.trim();
     !group_id.is_empty()
+        && !primary_group.is_empty()
+        && group_id == primary_group
         && !config.whitenoise.allowed_senders.is_empty()
         && sent.insert(group_id.to_string())
 }
@@ -1883,7 +1887,7 @@ fn send_reply_recorded(
     group_id: &str,
     text: &str,
 ) -> Result<()> {
-    const ATTEMPTS: usize = 3;
+    const ATTEMPTS: usize = 5;
 
     if let Ok(mut journal) = event_journal.lock()
         && let Err(error) = journal.record_outbound_queued(group_id, text)
@@ -1909,7 +1913,7 @@ fn send_reply_recorded(
                     eprintln!(
                         "agentnoise: send reply failed, retrying ({attempt}/{ATTEMPTS}): {detail}"
                     );
-                    thread::sleep(Duration::from_millis(500 * attempt as u64));
+                    thread::sleep(send_retry_delay(&detail, attempt));
                 }
                 last_error = Some(detail);
             }
@@ -1924,6 +1928,25 @@ fn send_reply_recorded(
         eprintln!("agentnoise: failed to record outbound event: {error:#}");
     }
     bail!("failed to send reply after {ATTEMPTS} attempts: {detail}")
+}
+
+fn try_send_reply_recorded(
+    wn: &WnClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    text: &str,
+) {
+    if let Err(error) = send_reply_recorded(wn, event_journal, group_id, text) {
+        eprintln!("agentnoise: failed to send reply to {group_id}: {error:#}");
+    }
+}
+
+fn send_retry_delay(detail: &str, attempt: usize) -> Duration {
+    let attempt = attempt as u64;
+    if detail.contains("pending proposal") {
+        return Duration::from_millis(750 * attempt * attempt);
+    }
+    Duration::from_millis(500 * attempt)
 }
 
 fn listener_subscribe_limit(config: &Config) -> u32 {
@@ -1981,12 +2004,21 @@ fn persist_control_group_id(config_path: &Path, group_id: &str) -> Result<()> {
 }
 
 fn initial_group_ids(wn: &WnClient) -> Vec<String> {
-    let mut group_ids = wn.configured_group_ids();
     match wn.discover_group_ids() {
-        Ok(discovered) => extend_unique(&mut group_ids, discovered),
-        Err(error) => eprintln!("agentnoise: group discovery failed: {error:#}"),
+        Ok(discovered) => merge_initial_group_ids(wn.configured_group_ids(), discovered),
+        Err(error) => {
+            eprintln!("agentnoise: group discovery failed: {error:#}");
+            wn.configured_group_ids()
+        }
     }
-    group_ids
+}
+
+fn merge_initial_group_ids(configured: Vec<String>, discovered: Vec<String>) -> Vec<String> {
+    let discovered = unique_group_ids(discovered);
+    if discovered.is_empty() {
+        return unique_group_ids(configured);
+    }
+    discovered
 }
 
 fn subscribe_group_if_needed(
@@ -2117,6 +2149,12 @@ fn extend_unique(group_ids: &mut Vec<String>, more: impl IntoIterator<Item = Str
     }
 }
 
+fn unique_group_ids(group_ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut output = Vec::new();
+    extend_unique(&mut output, group_ids);
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2139,8 +2177,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_hello_requires_pairing_and_deduplicates_per_group() {
+    fn startup_hello_requires_pairing_and_only_targets_primary_group() {
         let mut config = Config::template();
+        config.whitenoise.group_id = "group-a".to_string();
         let mut sent = HashSet::new();
 
         assert!(!should_send_startup_hello(&config, &mut sent, "group-a"));
@@ -2152,7 +2191,41 @@ mod tests {
 
         assert!(should_send_startup_hello(&config, &mut sent, "group-a"));
         assert!(!should_send_startup_hello(&config, &mut sent, "group-a"));
-        assert!(should_send_startup_hello(&config, &mut sent, "group-b"));
+        assert!(!should_send_startup_hello(&config, &mut sent, "group-b"));
         assert!(!should_send_startup_hello(&config, &mut sent, " "));
+    }
+
+    #[test]
+    fn pending_proposal_send_retries_back_off_more() {
+        assert!(
+            send_retry_delay(
+                "MDK error: Can't create message because a pending proposal exists.",
+                2
+            ) > send_retry_delay("temporary transport failure", 2)
+        );
+    }
+
+    #[test]
+    fn initial_group_merge_uses_discovered_groups_when_available() {
+        let groups = merge_initial_group_ids(
+            vec!["stale".to_string(), "active".to_string()],
+            vec!["active".to_string()],
+        );
+
+        assert_eq!(groups, vec!["active".to_string()]);
+    }
+
+    #[test]
+    fn initial_group_merge_falls_back_to_configured_groups_without_discovery() {
+        let groups = merge_initial_group_ids(
+            vec![
+                "configured".to_string(),
+                "configured".to_string(),
+                " ".to_string(),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(groups, vec!["configured".to_string()]);
     }
 }

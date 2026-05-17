@@ -30,6 +30,8 @@ Simple setup for raw Codex/Claude:
 launcher = "direct"
 progress_interval_seconds = 15
 silence_ping_seconds = 60
+startup_silence_timeout_seconds = 90
+startup_retry_attempts = 1
 job_timeout_seconds = 1800
 
 [agents.codex]
@@ -61,6 +63,8 @@ bondage_bin = "bondage"
 bondage_conf = "~/.config/bondage/bondage.conf"
 progress_interval_seconds = 15
 silence_ping_seconds = 60
+startup_silence_timeout_seconds = 90
+startup_retry_attempts = 1
 job_timeout_seconds = 1800
 
 [agents.codex]
@@ -96,6 +100,22 @@ to `0` only if you intentionally want no timeout.
 has produced no new output. Set it to `0` to disable those pings. The default
 keeps the phone chat alive when Codex, Claude, Hermes, or a launcher is still
 running but quiet.
+
+`startup_silence_timeout_seconds` handles a different failure mode: a launcher
+or agent process starts but emits no stdout/stderr at all. agentnoise
+terminates that launch after the timeout and retries
+`startup_retry_attempts` times before returning a clear failure to the chat.
+
+For direct Codex launches, agentnoise starts the child process from its stable
+data directory and passes the selected workspace with `codex -C`. This keeps
+launchd services away from fragile GUI-backed cwd paths such as iCloud Drive
+while preserving the repo/cwd chosen in chat.
+
+Codex itself can still hang under launchd when the selected `-C` workspace is
+inside iCloud Drive/CloudDocs. `agentnoise doctor` warns about those repo paths.
+For Homebrew service use, keep configured repos in normal local directories
+such as `~/src` or `~/src-repo`. If you must work inside iCloud Drive, run
+`agentnoise up` from an interactive terminal instead of a background service.
 
 ## Agent Profile Variants
 

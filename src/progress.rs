@@ -99,6 +99,28 @@ pub fn still_running(
     }
 }
 
+pub fn retrying_after_silence(
+    agent: AgentKind,
+    job_id: &str,
+    silence_seconds: u64,
+    next_attempt: usize,
+    total_attempts: usize,
+) -> ProgressEvent {
+    ProgressEvent {
+        kind: ProgressKind::Step,
+        agent,
+        job_id: Some(job_id.to_string()),
+        label: "retrying".to_string(),
+        detail: Some(format!(
+            "No output after {}. Restarting launch attempt {}/{}.",
+            format_duration(silence_seconds),
+            next_attempt,
+            total_attempts
+        )),
+        final_event: false,
+    }
+}
+
 pub fn parse_progress_line(agent: AgentKind, line: &str) -> Option<ProgressEvent> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
     match agent {

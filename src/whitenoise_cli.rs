@@ -38,6 +38,7 @@ pub struct CreatedGroup {
 pub struct VisibleGroup {
     pub group_id: String,
     pub peer_pubkey: Option<String>,
+    pub needs_accept: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +358,34 @@ pub fn list_groups(config: &WhitenoiseConfig) -> Result<Vec<VisibleGroup>> {
 
     let text = checked_output(command, &wn, "groups list")?;
     parse_groups_output(&text)
+}
+
+pub fn accept_group(config: &WhitenoiseConfig, group_id: &str) -> Result<()> {
+    let group_id = group_id.trim();
+    if group_id.is_empty() {
+        return Ok(());
+    }
+    let wn = resolve_wn(&config.wn_bin);
+    let mut command = Command::new(&wn);
+    add_socket_arg(&mut command, config.resolved_socket().as_deref());
+    command.arg("groups").arg("accept").arg("--json");
+    add_account_arg(&mut command, config.account.as_deref());
+    command.arg(group_id);
+
+    checked_output(command, &wn, "groups accept").map(|_| ())
+}
+
+pub fn accept_pending_groups(config: &WhitenoiseConfig, groups: &[VisibleGroup]) -> Result<usize> {
+    let mut accepted = 0;
+    for group in groups {
+        if !should_accept_pending_group(config, group) {
+            continue;
+        }
+        accept_group(config, &group.group_id)
+            .with_context(|| format!("accepting pending White Noise group {}", group.group_id))?;
+        accepted += 1;
+    }
+    Ok(accepted)
 }
 
 pub fn list_relays(config: &WhitenoiseConfig) -> Result<Vec<RelayStatus>> {
@@ -902,6 +931,9 @@ fn collect_visible_groups(value: &Value, groups: &mut Vec<VisibleGroup>) {
     match value {
         Value::Object(object) => {
             if let Some(group_id) = direct_visible_group_id(value) {
+                if group_is_removed(value) {
+                    return;
+                }
                 groups.push(VisibleGroup {
                     group_id,
                     peer_pubkey: find_string(
@@ -917,6 +949,7 @@ fn collect_visible_groups(value: &Value, groups: &mut Vec<VisibleGroup>) {
                             "from",
                         ],
                     ),
+                    needs_accept: group_needs_accept(value),
                 });
                 return;
             }
@@ -930,6 +963,45 @@ fn collect_visible_groups(value: &Value, groups: &mut Vec<VisibleGroup>) {
             }
         }
         _ => {}
+    }
+}
+
+fn group_is_removed(value: &Value) -> bool {
+    find_bool(value, &["self_removed", "removed"]).unwrap_or(false)
+        || value
+            .get("removed_at")
+            .is_some_and(|removed_at| !removed_at.is_null())
+}
+
+fn group_needs_accept(value: &Value) -> bool {
+    find_bool(value, &["pending_confirmation"]).unwrap_or(false)
+        || value.get("user_confirmation").is_some_and(Value::is_null)
+}
+
+fn should_accept_pending_group(config: &WhitenoiseConfig, group: &VisibleGroup) -> bool {
+    if !group.needs_accept {
+        return false;
+    }
+    if config.allowed_senders.is_empty() {
+        return true;
+    }
+    group.peer_pubkey.as_deref().is_some_and(|peer| {
+        config
+            .allowed_senders
+            .iter()
+            .any(|allowed| pubkeys_match(peer, allowed))
+    })
+}
+
+fn pubkeys_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    if left.eq_ignore_ascii_case(right) {
+        return true;
+    }
+    match (public_key_hex(left), public_key_hex(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -1020,6 +1092,21 @@ fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
             object.values().find_map(|value| find_string(value, keys))
         }
         Value::Array(values) => values.iter().find_map(|value| find_string(value, keys)),
+        _ => None,
+    }
+}
+
+fn find_bool(value: &Value, keys: &[&str]) -> Option<bool> {
+    match value {
+        Value::Object(object) => {
+            for key in keys {
+                if let Some(Value::Bool(value)) = object.get(*key) {
+                    return Some(*value);
+                }
+            }
+            object.values().find_map(|value| find_bool(value, keys))
+        }
+        Value::Array(values) => values.iter().find_map(|value| find_bool(value, keys)),
         _ => None,
     }
 }
@@ -1162,6 +1249,61 @@ mod tests {
         let groups = parse_groups_output(output).unwrap();
 
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn groups_list_filters_removed_groups_and_marks_pending_confirmation() {
+        let output = r#"{
+          "result": [
+            {
+              "dm_peer_pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "mls_group_id": "11111111111111111111111111111111",
+              "removed_at": null,
+              "self_removed": false,
+              "user_confirmation": null
+            },
+            {
+              "dm_peer_pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "mls_group_id": "22222222222222222222222222222222",
+              "removed_at": "2026-05-16T20:02:31.246Z",
+              "self_removed": false,
+              "user_confirmation": null
+            },
+            {
+              "dm_peer_pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "mls_group_id": "33333333333333333333333333333333",
+              "removed_at": null,
+              "self_removed": true,
+              "user_confirmation": null
+            }
+          ]
+        }"#;
+
+        let groups = parse_groups_output(output).unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "11111111111111111111111111111111");
+        assert!(groups[0].needs_accept);
+    }
+
+    #[test]
+    fn pending_group_accept_respects_allowed_senders() {
+        let peer = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let other = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let group = VisibleGroup {
+            group_id: "11111111111111111111111111111111".to_string(),
+            peer_pubkey: Some(peer.to_string()),
+            needs_accept: true,
+        };
+        let mut config = crate::config::Config::template().whitenoise;
+
+        assert!(should_accept_pending_group(&config, &group));
+
+        config.allowed_senders = vec![peer.to_string()];
+        assert!(should_accept_pending_group(&config, &group));
+
+        config.allowed_senders = vec![other.to_string()];
+        assert!(!should_accept_pending_group(&config, &group));
     }
 
     #[test]

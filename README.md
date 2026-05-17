@@ -22,6 +22,14 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.22** - **Service-mode and White Noise delivery fix.** Codex jobs now
+fail fast with a clear explanation when launched from macOS launchd/brew
+service contexts that make Codex hang before producing output. Direct Codex
+launches use a stable agentnoise data dir while still passing the selected
+workspace through `codex -C`, startup has a no-output watchdog/retry, removed
+White Noise groups are ignored, pending paired control chats are accepted, and
+reply send failures no longer kill the listener.
+
 **v0.1.21** - **Quiet-job chat pings.** Running jobs now send a visible
 `still running` message when Codex, Claude, Hermes, or the launcher stays alive
 but produces no new output. The ping includes `/tail <job>` and `/cancel <job>`
@@ -550,14 +558,22 @@ while a job runs. The default interval is conservative
 (`runner.progress_interval_seconds = 15`) so the phone chat does not become
 unreadable. If a running job goes quiet, agentnoise sends a "still running"
 ping after `runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel
-<job>` hints. Final job output still arrives as one normal reply, with `/tail
-<job>` for logs.
+<job>` hints. If a new launch emits no output at all for
+`runner.startup_silence_timeout_seconds = 90`, agentnoise terminates that
+attempt and retries once by default. Final job output still arrives as one
+normal reply, with `/tail <job>` for logs.
 
 If a configured agent profile looks intentionally elevated, for example a
 profile or permission mode containing `unsafe`, agentnoise creates an approval
 object instead of launching immediately. Approvals are bound to the same White
 Noise chat that requested them and expire after
 `runner.approval_ttl_seconds`.
+
+For Homebrew service use, keep configured repos outside iCloud Drive/CloudDocs.
+Codex can hang under launchd before writing output when `-C` points at those
+GUI-backed sync folders. `agentnoise doctor` warns about this; run
+`agentnoise up` from an interactive terminal if you must use an iCloud
+workspace.
 
 Images and files sent by the phone are not handed to coding agents yet.
 agentnoise saves the metadata it can see, replies with an attachment id, and
