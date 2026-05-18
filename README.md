@@ -22,6 +22,15 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.24** - **Mobile chat cleanup and opt-in local session watch.** White
+Noise replies are shorter and more phone-readable: compact startup hellos,
+queue/final job replies, progress pings, status, help, session lists, and local
+agent session metadata. Job ids and local session ids can be referenced by
+short unique prefixes for `/tail`, `/cancel`, and `*-resume` commands. Added
+the opt-in local session watcher so `agentnoise config local-sessions-watch on`
+can notify the primary paired chat when same-account Codex/Claude metadata
+appears, while staying off by default for privacy.
+
 **v0.1.23** - **Inbox sessions and stale group cleanup.** The primary paired
 chat now acts as an inbox: new `/codex`, `/claude`, `/hermes`, and `/wiki`
 jobs from that chat open a fresh White Noise work session named from the

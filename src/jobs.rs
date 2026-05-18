@@ -201,8 +201,16 @@ impl JobStore {
     }
 
     pub fn tail(&self, id: &str, max_bytes: usize) -> Result<Option<String>> {
-        let Some(job) = self.get(id) else {
-            return Ok(None);
+        let job = {
+            let jobs = self
+                .inner
+                .jobs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("job store lock poisoned"))?;
+            let Some(index) = matching_job_index(&jobs, id)? else {
+                return Ok(None);
+            };
+            jobs[index].clone()
         };
         let bytes = fs::read(&job.log_path)
             .with_context(|| format!("reading {}", job.log_path.display()))?;
@@ -214,14 +222,18 @@ impl JobStore {
         let Ok(jobs) = self.inner.jobs.lock() else {
             return None;
         };
-        jobs.iter().find(|job| job.id == id).cloned()
+        let Ok(Some(index)) = matching_job_index(&jobs, id) else {
+            return None;
+        };
+        Some(jobs[index].clone())
     }
 
     fn update(&self, id: &str, update: impl FnOnce(&mut JobRecord)) -> Result<()> {
         self.with_jobs(|jobs| {
-            let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(index) = matching_job_index(jobs, id)? else {
                 bail!("no such job {id}");
             };
+            let job = &mut jobs[index];
             update(job);
             Ok(())
         })?
@@ -262,6 +274,27 @@ impl JobStore {
 fn short_id() -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("an-{}", &uuid[..8])
+}
+
+fn matching_job_index(jobs: &[JobRecord], id: &str) -> Result<Option<usize>> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    if let Some(index) = jobs.iter().position(|job| job.id == id) {
+        return Ok(Some(index));
+    }
+
+    let matches = jobs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, job)| job.id.starts_with(id).then_some(index))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => bail!("ambiguous job id {id}; use more characters"),
+    }
 }
 
 fn preview(text: &str, max: usize) -> String {
@@ -315,5 +348,17 @@ mod tests {
         assert_eq!(recovered_job.status, JobStatus::Interrupted);
         assert_eq!(recovered_job.pid, None);
         assert!(recovered_job.finished_at.is_some());
+    }
+
+    #[test]
+    fn short_job_prefixes_find_unique_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("jobs.json");
+        let log_dir = temp.path().join("logs");
+        let store = JobStore::open(&path, &log_dir).unwrap();
+        let request = AgentRequest::new(AgentKind::Codex, "work", "hello");
+        let job = store.create(&request).unwrap();
+
+        assert_eq!(store.get(&job.id[..8]).unwrap().id, job.id);
     }
 }

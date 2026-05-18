@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.24 - 2026-05-18
+
+- Cleaned up White Noise chat output for phones. Startup hellos, job accepted
+  messages, final replies, progress pings, `/status`, `/help`, session lists,
+  and local agent session metadata now use shorter plain-text blocks that avoid
+  Markdown/table assumptions.
+- Added short unique references for jobs and local agent sessions. `/tail`,
+  `/cancel`, and `*-resume` commands can use compact ids like `an-ba257` or the
+  displayed local session prefix when the prefix is unambiguous.
 - Added an opt-in local session watcher. `agentnoise config local-sessions-watch
   on` makes the listener notify the primary paired chat when new same-account
   Codex/Claude session metadata appears, while the default remains off for

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::runner::AgentKind;
+use crate::text::short_ref;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -89,11 +90,11 @@ pub fn still_running(
         job_id: Some(job_id.to_string()),
         label: "still running".to_string(),
         detail: Some(format!(
-            "Running {}; no new output for {}. Use /tail {} for logs or /cancel {} to stop it.",
+            "{} elapsed, quiet {}\n/tail {}  /cancel {}",
             format_duration(elapsed_seconds),
             format_duration(idle_seconds),
-            job_id,
-            job_id
+            short_ref(job_id),
+            short_ref(job_id)
         )),
         final_event: false,
     }
@@ -112,7 +113,7 @@ pub fn retrying_after_silence(
         job_id: Some(job_id.to_string()),
         label: "retrying".to_string(),
         detail: Some(format!(
-            "No output after {}. Restarting launch attempt {}/{}.",
+            "quiet {}\nretry {}/{}",
             format_duration(silence_seconds),
             next_attempt,
             total_attempts
@@ -138,15 +139,32 @@ pub fn render_progress(event: &ProgressEvent) -> String {
     let job = event
         .job_id
         .as_deref()
-        .map(|id| format!("Job {id} "))
-        .unwrap_or_else(|| "Job ".to_string());
+        .map(short_ref)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| "job".to_string());
     let detail = event
         .detail
         .as_deref()
         .filter(|detail| !detail.trim().is_empty())
-        .map(|detail| format!("\n{detail}"))
+        .map(|detail| format!("\n{}", detail.trim()))
         .unwrap_or_default();
-    format!("{job}{}: {}{detail}", event.agent, event.label)
+    match event.kind {
+        ProgressKind::Started => format!("{job} started\n{}", event.agent),
+        ProgressKind::Approval => format!("{job} approval needed{detail}"),
+        ProgressKind::Error => format!("{job} error{detail}"),
+        ProgressKind::Tool => {
+            let label = event.label.replace('_', " ");
+            format!("{job} working\n{label}{detail}")
+        }
+        ProgressKind::Step if event.label == "still running" => {
+            format!("{job} still running{detail}")
+        }
+        ProgressKind::Step => {
+            let label = event.label.replace('_', " ");
+            format!("{job} {label}{detail}")
+        }
+        ProgressKind::Finished => format!("{job} {}", event.label),
+    }
 }
 
 fn format_duration(seconds: u64) -> String {
@@ -251,5 +269,15 @@ mod tests {
         let mut limiter = ProgressRateLimiter::new(60);
         let event = finished(AgentKind::Codex, "an-1", "succeeded");
         assert!(limiter.should_send(&event));
+    }
+
+    #[test]
+    fn renders_mobile_progress() {
+        let event = still_running(AgentKind::Codex, "an-ba257469", 75, 60);
+
+        assert_eq!(
+            render_progress(&event),
+            "an-ba257 still running\n1m 15s elapsed, quiet 1m\n/tail an-ba257  /cancel an-ba257"
+        );
     }
 }

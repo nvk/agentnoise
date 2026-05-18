@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::runner::AgentKind;
+use crate::text::{compact_text, compact_timestamp, short_ref};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalAgentSession {
@@ -59,6 +60,30 @@ pub fn local_session_key(session: &LocalAgentSession) -> String {
     format!("{}:{}", session.agent, session.id)
 }
 
+pub fn resolve_session_id(agent: AgentKind, target: &str) -> Result<Option<String>> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(None);
+    }
+    let sessions = discover_all_local_sessions()?;
+    if let Some(exact) = sessions
+        .iter()
+        .find(|session| session.agent == agent && session.id == target)
+    {
+        return Ok(Some(exact.id.clone()));
+    }
+
+    let matches = sessions
+        .iter()
+        .filter(|session| session.agent == agent && session.id.starts_with(target))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [session] => Ok(Some(session.id.clone())),
+        _ => anyhow::bail!("ambiguous {agent} session id {target}; use more characters"),
+    }
+}
+
 pub fn render_sessions(sessions: &[LocalAgentSession]) -> String {
     if sessions.is_empty() {
         return "No local Codex or Claude sessions found.".to_string();
@@ -66,9 +91,7 @@ pub fn render_sessions(sessions: &[LocalAgentSession]) -> String {
 
     let lines = render_session_list(sessions);
 
-    format!(
-        "Local Agent Sessions\n{lines}\nOnly metadata is shown. Resume explicitly with the command above."
-    )
+    format!("local sessions\n{lines}\nmetadata only")
 }
 
 pub fn render_new_session_notice(sessions: &[LocalAgentSession]) -> String {
@@ -82,7 +105,7 @@ pub fn render_new_session_notice(sessions: &[LocalAgentSession]) -> String {
         "sessions"
     };
     format!(
-        "Local agent {noun} detected\n{}\nOnly metadata is shown. agentnoise does not send transcript content or attach automatically. Resume explicitly with the command above.",
+        "new local {noun}\n{}\nmetadata only",
         render_session_list(sessions)
     )
 }
@@ -105,23 +128,23 @@ fn render_session_entry(index: usize, session: &LocalAgentSession) -> String {
     let cwd = session
         .cwd
         .as_ref()
-        .map(|path| path.display().to_string())
+        .map(|path| compact_path(path, 36))
         .unwrap_or_else(|| "unknown".to_string());
-    let updated = session.updated_at.as_deref().unwrap_or("unknown");
+    let updated = session
+        .updated_at
+        .as_deref()
+        .map(compact_timestamp)
+        .unwrap_or_else(|| "unknown".to_string());
     let resume = match session.agent {
         AgentKind::Codex => "/codex-resume",
         AgentKind::Claude => "/claude-resume",
         AgentKind::Hermes => "/hermes-resume",
     };
+    let id = short_ref(&session.id);
     format!(
-        "{index}. {} {}\n   id: {}\n   updated: {}\n   cwd: {}\n   resume: {} {} <prompt>",
+        "{index}. {} {id} - {}\n   {updated} | {cwd}\n   {resume} {id} <prompt>",
         session.agent,
-        compact_text(title, 64),
-        session.id,
-        updated,
-        compact_text(&cwd, 96),
-        resume,
-        session.id
+        compact_text(title, 54),
     )
 }
 
@@ -283,8 +306,8 @@ fn format_system_time(time: SystemTime) -> Option<String> {
     OffsetDateTime::from(time).format(&Rfc3339).ok()
 }
 
-fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+fn short_id(id: &str) -> String {
+    short_ref(id)
 }
 
 fn claude_project_title(path: &Path) -> Option<String> {
@@ -303,14 +326,11 @@ fn claude_project_title(path: &Path) -> Option<String> {
     (!project.is_empty()).then(|| project.to_string())
 }
 
-fn compact_text(value: &str, max_chars: usize) -> String {
-    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= max_chars {
-        return collapsed;
-    }
-    let mut output = collapsed.chars().take(max_chars).collect::<String>();
-    output.push_str("...");
-    output
+fn compact_path(path: &Path, max_chars: usize) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| compact_text(name, max_chars))
+        .unwrap_or_else(|| compact_text(&path.display().to_string(), max_chars))
 }
 
 #[cfg(test)]
@@ -348,6 +368,7 @@ mod tests {
         let rendered = render_sessions(&sessions);
         assert!(rendered.contains("/claude-resume claude-1 <prompt>"));
         assert!(rendered.contains("/codex-resume c-1 <prompt>"));
+        assert!(rendered.contains("11:00Z | work"));
         assert!(!rendered.contains("private prompt"));
     }
 
@@ -372,9 +393,9 @@ mod tests {
 
         let rendered = render_new_session_notice(&[session]);
 
-        assert!(rendered.contains("Local agent session detected"));
-        assert!(rendered.contains("/codex-resume c-123456 <prompt>"));
-        assert!(rendered.contains("does not send transcript content"));
+        assert!(rendered.contains("new local session"));
+        assert!(rendered.contains("/codex-resume c-12345 <prompt>"));
+        assert!(rendered.contains("metadata only"));
         assert!(!rendered.contains("private prompt"));
     }
 

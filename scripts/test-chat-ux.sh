@@ -42,45 +42,43 @@ expect() {
 }
 
 send_msg alpha111111 "/status"
-expect "Status: OK"
-expect "Sessions:"
+expect "running | direct"
+expect "jobs: 0 active"
+expect "repos: 1"
 
 send_msg alpha111111 "/rename main"
-expect "Session: main"
-expect "Workspace: sandbox:/"
+expect "session main"
+expect "sandbox:/"
 
 send_msg alpha111111 "/cd src"
-expect "Workspace: sandbox:/src"
+expect "workspace sandbox:/src"
 
 send_msg alpha111111 "/list"
 expect "main (current)"
-expect "workspace: sandbox:/src"
-expect "Send /jump <number|name|id>."
+expect "g-alpha"
+expect "/jump 1"
 
 send_msg alpha111111 "/new bugfix ui"
-expect "Created session: bugfix-ui"
-expect "I opened a new White Noise chat named \"agentnoise: bugfix-ui\""
-expect "This chat is ready."
+expect "created bugfix-ui"
+expect "continue in the new chat"
 
 send_msg beta222222 "/rename bugfix"
-expect "Session: bugfix"
-expect "Workspace: sandbox:/"
+expect "session bugfix"
+expect "sandbox:/"
 
 send_msg alpha111111 "/list"
 expect "1. bugfix"
 expect "2. main (current)"
-expect "chat: beta2"
-expect "chat: alpha"
+expect "g-beta2"
+expect "g-alpha"
 
 send_msg alpha111111 "/resume bugfix"
-expect "Resumed session: bugfix"
-expect "chat id:beta2"
-expect "Continue in that chat"
-expect "Session: bugfix"
-expect "Resumed here"
+expect "resumed bugfix"
+expect "open: whitenoise://chat/beta222222"
+expect "continue there"
 
 send_msg beta222222 "/close"
-expect "Closed session: bugfix"
+expect "closed bugfix"
 expect "/jump bugfix"
 
 send_msg alpha111111 "/list"

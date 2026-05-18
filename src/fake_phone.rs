@@ -449,7 +449,8 @@ fn is_command_reply(text: &str, sent_message: &str) -> bool {
     !text.is_empty()
         && text != sent_message.trim()
         && text != "Paired. Send /help for commands."
-        && !text.starts_with("agentnoise is up\n")
+        && text != "paired\nsend /help"
+        && !text.starts_with("agentnoise up ")
         && !is_pairing_pin_message(text)
         && !text.starts_with("I saw this while catching up after startup,")
 }
@@ -466,13 +467,18 @@ fn reply_should_stop_resending(reply: &str, expected: &[String]) -> bool {
 
 fn is_job_session_started_reply(text: &str) -> bool {
     let text = text.trim();
-    text.starts_with("Started session: ") && text.contains("whitenoise://chat/")
+    (text.starts_with("Started session: ") || text.starts_with("started "))
+        && text.contains("whitenoise://chat/")
 }
 
 fn is_job_ack_reply(text: &str) -> bool {
     let text = text.trim();
     ((text.starts_with("Got it: ") || text.contains("\nGot it: ")) && text.contains(" job queued"))
         || (text.starts_with("Job ") && text.contains(": started"))
+        || text
+            .lines()
+            .next()
+            .is_some_and(|line| line.ends_with(" queued") || line.ends_with(" started"))
 }
 
 fn extract_chat_uri_group_id(text: &str) -> Option<String> {
@@ -489,12 +495,13 @@ fn is_job_final_reply(text: &str) -> bool {
     let Some(first) = text.lines().next().map(str::trim) else {
         return false;
     };
-    first.starts_with("Job ")
-        && (first.contains(" succeeded")
+    (first.starts_with("Job ") || first.starts_with("an-"))
+        && (first.contains(" done")
+            || first.contains(" succeeded")
             || first.contains(" failed")
             || first.contains(" cancelled")
             || first.contains(" interrupted"))
-        && text.contains("\nDetails: /tail ")
+        && text.contains("\n/tail ")
 }
 
 #[cfg(test)]
@@ -539,16 +546,17 @@ mod tests {
             " Paired. Send /help for commands. ",
             "/status"
         ));
+        assert!(!is_command_reply("paired\nsend /help", "/status"));
         assert!(!is_command_reply(
             "I saw this while catching up after startup, so I did not run it:\n/status\nSend it again now, or send /help.",
             "/status"
         ));
         assert!(!is_command_reply(
-            "agentnoise is up\ntimestamp: 2026-05-16T19:31:24Z\nprofile: frontier\nworkspace: sandbox:/\nSend /status or /help.",
+            "agentnoise up 19:31Z\nfrontier\nsandbox:/\n/status /help",
             "/status"
         ));
         assert!(is_command_reply(
-            "agentnoise\nStatus: OK\nSession: default",
+            "running | bondage\nmain | sandbox:/",
             "/status"
         ));
     }
@@ -561,15 +569,15 @@ mod tests {
             &expected
         ));
         assert!(reply_should_stop_resending(
-            "Got it: codex job queued\nWorkspace: sandbox:/",
+            "codex queued\nsandbox:/\nI'll reply here when done.",
             &expected
         ));
         assert!(reply_should_stop_resending(
-            "Job an-123 codex: started",
+            "an-12345 started\ncodex",
             &expected
         ));
         assert!(reply_should_stop_resending(
-            "Started session: m5-research\nOpen: whitenoise://chat/abcdef0123456789\nI will send progress and the final reply there.",
+            "started m5-research\nopen: whitenoise://chat/abcdef0123456789\ncontinue there",
             &expected
         ));
         assert!(reply_should_stop_resending("all done", &expected));
@@ -583,11 +591,9 @@ mod tests {
     fn fake_phone_detects_final_job_reply() {
         assert!(!is_job_final_reply("Job an-123 codex: started"));
         assert!(!is_job_final_reply("Job an-123 codex: succeeded"));
+        assert!(is_job_final_reply("an-12345 done\nok\n\n/tail an-12345"));
         assert!(is_job_final_reply(
-            "Job an-123 succeeded\nDetails: /tail an-123\n\nok"
-        ));
-        assert!(is_job_final_reply(
-            "Job an-123 failed\nDetails: /tail an-123\n\nboom"
+            "an-12345 failed\nboom\n\n/tail an-12345"
         ));
     }
 
@@ -616,9 +622,9 @@ mod tests {
             require_job_final: true,
         };
         let mut outcome = ReplyOutcome::new(&options);
-        outcome.record("Got it: codex job queued".to_string());
+        outcome.record("codex queued".to_string());
         assert!(!outcome.satisfied());
-        outcome.record("Job an-123 succeeded\nDetails: /tail an-123\n\nok".to_string());
+        outcome.record("an-12345 done\nok\n\n/tail an-12345".to_string());
         assert!(outcome.satisfied());
     }
 }

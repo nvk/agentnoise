@@ -20,6 +20,7 @@ use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo, Ru
 use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
+use agentnoise::text::compact_timestamp;
 use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
 use agentnoise::wn::WnClient;
 use anyhow::{Context, Result, bail};
@@ -2047,15 +2048,12 @@ fn render_startup_hello(config: &Config, timestamp: &str) -> String {
         .default_repo_alias()
         .map(|alias| format!("{alias}:/"))
         .unwrap_or_else(|| "none".to_string());
-    let mut lines = vec![
-        "agentnoise is up".to_string(),
-        format!("timestamp: {timestamp}"),
-    ];
+    let mut lines = vec![format!("agentnoise up {}", compact_timestamp(timestamp))];
     if !profile.is_empty() {
-        lines.push(format!("profile: {profile}"));
+        lines.push(profile.to_string());
     }
-    lines.push(format!("workspace: {workspace}"));
-    lines.push("Send /status or /help.".to_string());
+    lines.push(workspace);
+    lines.push("/status /help".to_string());
     lines.join("\n")
 }
 
@@ -2433,11 +2431,10 @@ mod tests {
 
         assert_eq!(
             text,
-            "agentnoise is up\n\
-             timestamp: 2026-05-15T20:00:00Z\n\
-             profile: m5\n\
-             workspace: sandbox:/\n\
-             Send /status or /help."
+            "agentnoise up 20:00Z\n\
+             m5\n\
+             sandbox:/\n\
+             /status /help"
         );
     }
 

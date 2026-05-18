@@ -13,10 +13,11 @@ use crate::auth::{PairingGate, is_pairing_pin_message};
 use crate::capabilities;
 use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
 use crate::config::{Config, RepoConfig};
-use crate::jobs::JobStore;
+use crate::jobs::{JobRecord, JobStatus, JobStore};
 use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
+use crate::text::short_ref;
 use crate::wn::MessageEvent;
 use crate::workspace;
 use crate::worktrees::{self, WorktreeStore};
@@ -45,31 +46,27 @@ impl NewSessionRequest {
 
     pub fn ready_text(&self) -> String {
         format!(
-            "Session: {}\nWorkspace: {}\nThis chat is ready. Send /pwd or /codex <prompt>.",
+            "session {}\n{}\nready: /pwd /codex <prompt>",
             self.name,
             workspace_text(&self.state)
         )
     }
 
     pub fn created_text(&self) -> String {
-        format!(
-            "Created session: {}\nI opened a new White Noise chat named \"{}\" and sent a ready message there.\nContinue in that chat, or send /list.",
-            self.name, self.group_name
-        )
+        format!("created {}\ncontinue in the new chat\n/list", self.name)
     }
 
     pub fn created_text_for_group(&self, group_id: &str) -> String {
         format!(
-            "Created session: {}\nI opened a new White Noise chat named \"{}\" and sent a ready message there.\nOpen: {}\nContinue in that chat, or send /list.",
+            "created {}\nopen: {}\ncontinue there",
             self.name,
-            self.group_name,
             white_noise_chat_uri(group_id)
         )
     }
 
     pub fn job_started_text_for_group(&self, group_id: &str) -> String {
         format!(
-            "Started session: {}\nOpen: {}\nI will send progress and the final reply there.",
+            "started {}\nopen: {}\ncontinue there",
             self.name,
             white_noise_chat_uri(group_id)
         )
@@ -77,7 +74,7 @@ impl NewSessionRequest {
 
     pub fn job_ready_text(&self, ack: &str) -> String {
         format!(
-            "Session: {}\nWorkspace: {}\n{}",
+            "session {}\n{}\n{}",
             self.name,
             workspace_text(&self.state),
             ack
@@ -340,27 +337,27 @@ impl AgentApp {
 
     pub fn run_request(&self, request: AgentRequest) -> Result<String> {
         let record = self.runner.run_blocking(request)?;
-        Ok(format!(
-            "Job {} {}\nDetails: /tail {}\n\n{}",
-            record.id,
-            record.status,
-            record.id,
-            record
-                .summary
-                .unwrap_or_else(|| "no output captured".to_string())
-        ))
+        Ok(render_job_reply(&record))
     }
 
     pub fn run_ack_text(&self, request: &AgentRequest) -> String {
-        let action = if let Some(session) = request.resume_session.as_deref() {
-            format!("{} resume queued ({session})", request.agent)
-        } else {
-            format!("{} job queued", request.agent)
-        };
+        if let Some(session) = request.resume_session.as_deref() {
+            return format!(
+                "{} resume queued\nsession: {}\nI'll reply here when done.",
+                request.agent,
+                short_ref(session)
+            );
+        }
+
         let workspace = request_workspace_text(request);
-        format!(
-            "Got it: {action}\nWorkspace: {workspace}\nNext: I will send the job id, progress pings while it is quiet, then the final reply. If it misbehaves, use /jobs, /tail <job>, or /cancel <job>."
-        )
+        if workspace == "selected workspace" {
+            format!("{} queued\nI'll reply here when done.", request.agent)
+        } else {
+            format!(
+                "{} queued\n{}\nI'll reply here when done.",
+                request.agent, workspace
+            )
+        }
     }
 
     pub fn run_request_with_progress(
@@ -385,15 +382,7 @@ impl AgentApp {
                 }
             }),
         )?;
-        Ok(format!(
-            "Job {} {}\nDetails: /tail {}\n\n{}",
-            record.id,
-            record.status,
-            record.id,
-            record
-                .summary
-                .unwrap_or_else(|| "no output captured".to_string())
-        ))
+        Ok(render_job_reply(&record))
     }
 
     pub fn create_session_record(&self, group_id: &str, state: SessionState) -> Result<String> {
@@ -466,7 +455,7 @@ impl AgentApp {
             }
         }
 
-        Ok(Some("Paired. Send /help for commands.".to_string()))
+        Ok(Some("paired\nsend /help".to_string()))
     }
 
     fn status_text(&self, sender_key: &str) -> String {
@@ -484,13 +473,6 @@ impl AgentApp {
             .control_group_ids()
             .len()
             .max(stored_group_count);
-        let groups = if group_count == 0 {
-            "none".to_string()
-        } else if group_count == 1 {
-            "1 group".to_string()
-        } else {
-            format!("{group_count} groups")
-        };
         let session = self.session(sender_key).ok();
         let session_name = session
             .as_ref()
@@ -502,7 +484,10 @@ impl AgentApp {
             .unwrap_or_else(|| "none".to_string());
 
         format!(
-            "agentnoise\nStatus: OK\nSession: {session_name}\nSessions: {groups}\nWorkspace: {workspace}\nJobs: {active} active\nRepos: {}",
+            "running | {}\n{} | {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
+            self.config.runner.launcher,
+            session_name,
+            workspace,
             self.config.repos.len()
         )
     }
@@ -596,10 +581,7 @@ impl AgentApp {
         session.closed = false;
         self.sessions.set(sender_key, session.clone())?;
 
-        Ok(format!(
-            "Session: {name}\nWorkspace: {}",
-            workspace_text(&session)
-        ))
+        Ok(format!("session {name}\n{}", workspace_text(&session)))
     }
 
     fn sessions_text(&self, sender_key: &str) -> String {
@@ -614,19 +596,19 @@ impl AgentApp {
             .map(|(index, entry)| {
                 let status = session_status_label(entry.key == sender_key, entry.state.closed);
                 format!(
-                    "{}. {}{}\n   chat: {}\n   open: {}\n   workspace: {}",
+                    "{}. {}{}\n   g-{} | {}\n   /jump {}",
                     index + 1,
                     entry.name,
                     status,
                     short_group_id(&entry.group_id),
-                    white_noise_chat_uri(&entry.group_id),
                     workspace_text(&entry.state),
+                    index + 1,
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        format!("Sessions\n{lines}\nSend /jump <number|name|id>.")
+        format!("sessions\n{lines}")
     }
 
     fn resume_session_action(
@@ -666,13 +648,13 @@ impl AgentApp {
         let current_group_id = current_group_id.map(str::trim).unwrap_or_default();
         let target_text = if current_group_id.is_empty() || current_group_id == entry.group_id {
             format!(
-                "Session: {}\nWorkspace: {}\nResumed here. Send /pwd or /codex <prompt>.",
+                "session {}\n{}\nready: /pwd /codex <prompt>",
                 entry.name,
                 workspace_text(&state)
             )
         } else {
             format!(
-                "Session: {}\nWorkspace: {}\nResumed here. Send /pwd or /codex <prompt>.\nBack: {}",
+                "session {}\n{}\nready: /pwd /codex <prompt>\nback: {}",
                 entry.name,
                 workspace_text(&state),
                 white_noise_chat_uri(current_group_id)
@@ -685,9 +667,8 @@ impl AgentApp {
         Ok(RouteAction::ResumeSession(ResumeSessionRequest {
             group_id: entry.group_id.clone(),
             reply_text: format!(
-                "Resumed session: {}\nI sent a ready message to chat id:{}.\nOpen: {}\nContinue in that chat, or send /list.",
+                "resumed {}\nopen: {}\ncontinue there",
                 entry.name,
-                short_group_id(&entry.group_id),
                 white_noise_chat_uri(&entry.group_id)
             ),
             target_text,
@@ -742,7 +723,7 @@ impl AgentApp {
         let name = session_display_name(sender_key, &session);
         self.sessions.set(sender_key, session)?;
         Ok(format!(
-            "Closed session: {name}\nSend /list to switch sessions, or /jump {name} to reopen it."
+            "closed {name}\n/list to switch\n/jump {name} to reopen"
         ))
     }
 
@@ -786,7 +767,7 @@ impl AgentApp {
         session.worktree = None;
         session.worktree_path = None;
         match self.sessions.set(sender_key, session) {
-            Ok(()) => format!("Workspace: {repo_alias}:/"),
+            Ok(()) => format!("workspace {repo_alias}:/"),
             Err(error) => format!("Error: failed to save workspace: {error:#}"),
         }
     }
@@ -795,10 +776,7 @@ impl AgentApp {
         match self.session(sender_key) {
             Ok(session) => match session.repo_alias {
                 Some(alias) => {
-                    format!(
-                        "Workspace: {alias}:{}",
-                        workspace::display_cwd(&session.cwd)
-                    )
+                    format!("workspace {alias}:{}", workspace::display_cwd(&session.cwd))
                 }
                 None => "No repo selected. Send /use <repo>.".to_string(),
             },
@@ -828,7 +806,7 @@ impl AgentApp {
                         session.cwd = cwd;
                         match self.sessions.set(sender_key, session.clone()) {
                             Ok(()) => format!(
-                                "Workspace: {alias}:{}",
+                                "workspace {alias}:{}",
                                 workspace::display_cwd(&session.cwd)
                             ),
                             Err(error) => {
@@ -845,6 +823,12 @@ impl AgentApp {
 
     fn prepare_request(&self, sender_key: &str, mut request: AgentRequest) -> Result<AgentRequest> {
         if request.resume_session.is_some() {
+            if let Some(session) = request.resume_session.clone()
+                && let Some(full_session) =
+                    crate::local_sessions::resolve_session_id(request.agent, &session)?
+            {
+                request.resume_session = Some(full_session);
+            }
             self.config.effective_agent_profile_for_request(&request)?;
             return Ok(request);
         }
@@ -917,7 +901,7 @@ impl AgentApp {
             .map(|job| {
                 format!(
                     "- {} {} {} {}",
-                    job.id,
+                    short_ref(&job.id),
                     job.status,
                     job.agent,
                     job.repo_alias.as_deref().unwrap_or("-")
@@ -926,13 +910,13 @@ impl AgentApp {
             .collect::<Vec<_>>()
             .join("\n");
 
-        format!("Jobs\n{lines}")
+        format!("jobs\n{lines}")
     }
 
     fn tail_text(&self, job_id: &str) -> String {
         match self.jobs.tail(job_id, 2400) {
             Ok(Some(text)) if !text.trim().is_empty() => text,
-            Ok(Some(_)) => format!("Job {job_id} has an empty log."),
+            Ok(Some(_)) => format!("{} log is empty.", short_ref(job_id)),
             Ok(None) => format!("No such job: {job_id}"),
             Err(error) => format!("Error: tail failed: {error:#}"),
         }
@@ -940,7 +924,7 @@ impl AgentApp {
 
     fn cancel_text(&self, job_id: &str) -> String {
         match self.runner.cancel(job_id) {
-            Ok(true) => format!("Cancel requested: {job_id}"),
+            Ok(true) => format!("cancel requested: {}", short_ref(job_id)),
             Ok(false) => format!("No running job: {job_id}"),
             Err(error) => format!("Error: cancel failed: {error:#}"),
         }
@@ -1332,6 +1316,31 @@ fn workspace_text(session: &SessionState) -> String {
     )
 }
 
+fn render_job_reply(record: &JobRecord) -> String {
+    let id = short_ref(&record.id);
+    let status = job_status_label(record.status);
+    let summary = record
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("no output captured");
+
+    format!("{id} {status}\n{summary}\n\n/tail {id}")
+}
+
+fn job_status_label(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Succeeded => "done",
+        JobStatus::Failed => "failed",
+        JobStatus::Cancelled => "cancelled",
+        JobStatus::Interrupted => "interrupted",
+        JobStatus::Pending => "pending",
+        JobStatus::Running => "running",
+        JobStatus::CancelRequested => "cancelling",
+    }
+}
+
 fn request_workspace_text(request: &AgentRequest) -> String {
     if let Some(repo) = request.repo_alias.as_deref() {
         return format!(
@@ -1441,25 +1450,26 @@ fn preview_text(text: &str) -> String {
 
 fn help_text() -> String {
     [
-        "agentnoise commands",
+        "commands",
         "",
-        "Workspace",
-        "/status",
-        "/agents",
-        "/agent-sessions [limit]",
+        "chat",
         "/new [name]",
         "/rename [name]",
         "/list",
         "/jump <number|name|id>",
         "/resume <number|name|id>",
         "/close",
+        "",
+        "workspace",
+        "/status",
         "/repos",
         "/use <repo>",
         "/pwd",
         "/ls [path]",
         "/cd <path>",
         "",
-        "Agents",
+        "agents",
+        "/agents",
         "/codex <prompt>",
         "/codex <repo> <prompt>",
         "/codex-resume <session> <prompt>",
@@ -1473,7 +1483,7 @@ fn help_text() -> String {
         "/codex-wiki <prompt>",
         "/claude-wiki <prompt>",
         "",
-        "Jobs",
+        "jobs",
         "/jobs",
         "/tail <job>",
         "/cancel <job>",
@@ -1483,13 +1493,14 @@ fn help_text() -> String {
         "/attachments",
         "/attach <number|id>",
         "",
-        "Worktrees",
+        "sessions",
+        "/agent-sessions [limit]",
+        "",
+        "worktrees",
         "/worktrees",
         "/worktree new <name>",
         "/worktree use <name>",
         "/worktree remove <name> confirm",
-        "",
-        "/help",
     ]
     .join("\n")
 }
@@ -1531,7 +1542,7 @@ mod tests {
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), &pin)
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("Paired")
+            RouteAction::Reply(reply) if reply.contains("paired")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/status")
@@ -1582,7 +1593,7 @@ mod tests {
         assert!(matches!(
             app.route_message(Some("group-a"), Some(&phone_hex), "/help")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("agentnoise commands")
+            RouteAction::Reply(reply) if reply.contains("commands")
         ));
     }
 
@@ -1719,12 +1730,9 @@ mod tests {
         };
         let ack = app.run_ack_text(&request);
 
-        assert!(ack.contains("Got it: codex job queued"));
-        assert!(ack.contains("Workspace: work:/"));
-        assert!(ack.contains("progress pings"));
-        assert!(ack.contains("/jobs"));
-        assert!(ack.contains("/tail <job>"));
-        assert!(ack.contains("/cancel <job>"));
+        assert!(ack.contains("codex queued"));
+        assert!(ack.contains("work:/"));
+        assert!(ack.contains("I'll reply here when done."));
     }
 
     #[test]
@@ -1853,9 +1861,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             )
             .unwrap();
 
-        assert!(reply.contains("Job an-"));
-        assert!(reply.contains("succeeded"));
+        assert!(reply.starts_with("an-"));
+        assert!(reply.contains("done"));
         assert!(reply.contains("done once"));
+        assert!(reply.contains("/tail an-"));
         let progress = progress.lock().unwrap();
         assert!(progress.iter().any(|text| text.contains("started")));
         assert!(!progress.iter().any(|text| text.contains("succeeded")));
@@ -1907,14 +1916,14 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/rename main")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("Session: main")
+            RouteAction::Reply(reply) if reply.contains("session main")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/sessions")
                 .unwrap(),
             RouteAction::Reply(reply) if reply.contains("main (current)")
-                && reply.contains("chat: group")
-                && reply.contains("open: whitenoise://chat/group-a")
+                && reply.contains("g-group")
+                && reply.contains("/jump 1")
         ));
     }
 
@@ -1941,25 +1950,24 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
                 .unwrap(),
             RouteAction::Reply(reply) if reply.contains("1. bugfix")
                 && reply.contains("2. main (current)")
-                && reply.contains("chat: group")
-                && reply.contains("open: whitenoise://chat/group-b")
-                && reply.contains("Send /jump <number|name|id>.")
+                && reply.contains("g-group")
+                && reply.contains("/jump 1")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/jump bugfix")
                 .unwrap(),
             RouteAction::ResumeSession(request) if request.group_id == "group-b"
-                && request.reply_text.contains("Resumed session: bugfix")
-                && request.reply_text.contains("Open: whitenoise://chat/group-b")
-                && request.reply_text.contains("Continue in that chat")
-                && request.target_text.contains("Session: bugfix")
-                && request.target_text.contains("Back: whitenoise://chat/group-a")
+                && request.reply_text.contains("resumed bugfix")
+                && request.reply_text.contains("open: whitenoise://chat/group-b")
+                && request.reply_text.contains("continue there")
+                && request.target_text.contains("session bugfix")
+                && request.target_text.contains("back: whitenoise://chat/group-a")
         ));
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/resume 2")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("Session: main")
-                && reply.contains("Resumed here")
+            RouteAction::Reply(reply) if reply.contains("session main")
+                && reply.contains("ready: /pwd /codex <prompt>")
         ));
     }
 }
