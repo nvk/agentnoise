@@ -276,17 +276,26 @@ group is visible on the relay; command auth is still the sender allowlist.
 agentnoise up
 ```
 
-To run multiple sessions from the same phone, send `/new <name>` from an
-existing agentnoise chat. agentnoise creates another White Noise chat with the
-same paired phone identity, clones the current workspace, saves the new MLS
-group id, subscribes immediately, and posts a ready message in the new chat.
+The first paired chat is the inbox. Starting a new `/codex`, `/claude`,
+`/hermes`, or `/wiki` job from that inbox creates a fresh White Noise work
+chat with the same paired phone identity. The chat name is
+`hostname - 2-4 word prompt summary`, agentnoise sends an open link back to the
+inbox, and progress plus final output continue in the new chat. Follow-up jobs
+sent inside that work chat stay there.
+
+To create a manual parallel session from the same phone, send `/new <name>`
+from an existing agentnoise chat. agentnoise creates another White Noise chat
+with the same paired phone identity, clones the current workspace, saves the
+new MLS group id, subscribes immediately, and posts a ready message in the new
+chat.
 
 You can also create multiple White Noise chats with the agentnoise desktop
 identity manually. White Noise gives each chat a different MLS group id, and
 agentnoise keeps `/use`, `/cd`, and prompt context separate per group id. Use
 `/rename <name>` to name a manually-created chat, `/list` to list known
-sessions, and `/resume <number|name|id>` to ping a saved session from that list.
-`/sessions` and `/here <name>` remain accepted as compatibility aliases.
+sessions with short chat refs and `whitenoise://chat/...` open links, and
+`/jump <number|name|id>` to ping a saved session from that list. `/resume`,
+`/sessions`, and `/here <name>` remain accepted as compatibility aliases.
 
 ## Sender Allowlist
 

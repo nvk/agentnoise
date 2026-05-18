@@ -97,7 +97,7 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
         thread::sleep(Duration::from_secs(1));
     }
 
-    let outcome = send_until_replies(&client, &group_id, &options)?;
+    let outcome = send_until_replies(&client, &fake_config, &group_id, &options)?;
     if !outcome.satisfied() {
         bail!("{}", outcome.failure_message());
     }
@@ -343,18 +343,88 @@ impl ReplyOutcome {
 
 fn send_until_replies(
     client: &WnClient,
+    config: &WhitenoiseConfig,
     group_id: &str,
     options: &FakePhoneRoundtrip,
 ) -> Result<ReplyOutcome> {
+    let group_id = group_id.to_string();
+    let sent_message = options.message.clone();
+    let (tx, rx) = mpsc::channel();
+    let mut children = vec![subscribe_replies(
+        client,
+        config,
+        &group_id,
+        &sent_message,
+        tx.clone(),
+    )?];
+    let mut subscribed_groups = vec![group_id.clone()];
+
+    let started = Instant::now();
+    let mut last_send = Instant::now() - Duration::from_secs(10);
+    let mut sent_after_reply = false;
+    let mut outcome = ReplyOutcome::new(options);
+    while started.elapsed() < options.timeout {
+        if !sent_after_reply && last_send.elapsed() >= Duration::from_secs(5) {
+            client.send_to(&group_id, &options.message)?;
+            last_send = Instant::now();
+        }
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(Ok(reply)) => {
+                if reply_should_stop_resending(&reply, &outcome.expected) {
+                    sent_after_reply = true;
+                }
+                if let Some(next_group_id) = extract_chat_uri_group_id(&reply)
+                    && !subscribed_groups
+                        .iter()
+                        .any(|group_id| group_id == &next_group_id)
+                {
+                    children.push(subscribe_replies(
+                        client,
+                        config,
+                        &next_group_id,
+                        &sent_message,
+                        tx.clone(),
+                    )?);
+                    subscribed_groups.push(next_group_id);
+                }
+                outcome.record(reply);
+                if outcome.satisfied() {
+                    break;
+                }
+            }
+            Ok(Err(error)) => {
+                for child in &mut children {
+                    child.kill().ok();
+                }
+                return Err(error);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    for child in &mut children {
+        child.kill().ok();
+    }
+    Ok(outcome)
+}
+
+fn subscribe_replies(
+    client: &WnClient,
+    config: &WhitenoiseConfig,
+    group_id: &str,
+    sent_message: &str,
+    tx: mpsc::Sender<Result<String>>,
+) -> Result<Child> {
+    if let Err(error) = whitenoise_cli::accept_group(config, group_id) {
+        eprintln!("agentnoise fake-phone: failed to accept group {group_id}: {error:#}");
+    }
     let mut child = client.subscribe_group_with_limit(group_id, 0)?;
     let stdout = child
         .stdout
         .take()
         .context("fake phone subscribe did not expose stdout")?;
-    let group_id = group_id.to_string();
-    let reader_group_id = group_id.clone();
-    let sent_message = options.message.clone();
-    let (tx, rx) = mpsc::channel();
+    let reader_group_id = group_id.to_string();
+    let sent_message = sent_message.to_string();
     thread::spawn(move || {
         for value in WnClient::parse_events_from_reader(stdout) {
             let value = match value {
@@ -371,36 +441,7 @@ fn send_until_replies(
             }
         }
     });
-
-    let started = Instant::now();
-    let mut last_send = Instant::now() - Duration::from_secs(10);
-    let mut sent_after_reply = false;
-    let mut outcome = ReplyOutcome::new(options);
-    while started.elapsed() < options.timeout {
-        if !sent_after_reply && last_send.elapsed() >= Duration::from_secs(5) {
-            client.send_to(&group_id, &options.message)?;
-            last_send = Instant::now();
-        }
-        match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Ok(reply)) => {
-                if reply_should_stop_resending(&reply, &outcome.expected) {
-                    sent_after_reply = true;
-                }
-                outcome.record(reply);
-                if outcome.satisfied() {
-                    break;
-                }
-            }
-            Ok(Err(error)) => {
-                child.kill().ok();
-                return Err(error);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    child.kill().ok();
-    Ok(outcome)
+    Ok(child)
 }
 
 fn is_command_reply(text: &str, sent_message: &str) -> bool {
@@ -418,14 +459,29 @@ fn reply_should_stop_resending(reply: &str, expected: &[String]) -> bool {
         return true;
     }
     expected.iter().any(|expected| reply.contains(expected))
+        || is_job_session_started_reply(reply)
         || is_job_ack_reply(reply)
         || is_job_final_reply(reply)
 }
 
+fn is_job_session_started_reply(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("Started session: ") && text.contains("whitenoise://chat/")
+}
+
 fn is_job_ack_reply(text: &str) -> bool {
     let text = text.trim();
-    (text.starts_with("Got it: ") && text.contains(" job queued"))
+    ((text.starts_with("Got it: ") || text.contains("\nGot it: ")) && text.contains(" job queued"))
         || (text.starts_with("Job ") && text.contains(": started"))
+}
+
+fn extract_chat_uri_group_id(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once("whitenoise://chat/")?;
+    let group_id = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_hexdigit())
+        .collect::<String>();
+    (!group_id.is_empty()).then_some(group_id)
 }
 
 fn is_job_final_reply(text: &str) -> bool {
@@ -512,6 +568,10 @@ mod tests {
             "Job an-123 codex: started",
             &expected
         ));
+        assert!(reply_should_stop_resending(
+            "Started session: m5-research\nOpen: whitenoise://chat/abcdef0123456789\nI will send progress and the final reply there.",
+            &expected
+        ));
         assert!(reply_should_stop_resending("all done", &expected));
         assert!(reply_should_stop_resending(
             "This sender is not paired with agentnoise.",
@@ -529,6 +589,18 @@ mod tests {
         assert!(is_job_final_reply(
             "Job an-123 failed\nDetails: /tail an-123\n\nboom"
         ));
+    }
+
+    #[test]
+    fn fake_phone_extracts_job_session_group_link() {
+        assert_eq!(
+            extract_chat_uri_group_id(
+                "Started session: m5\nOpen: whitenoise://chat/abcdef0123456789\nnext"
+            )
+            .as_deref(),
+            Some("abcdef0123456789")
+        );
+        assert!(extract_chat_uri_group_id("Open: https://example.com").is_none());
     }
 
     #[test]

@@ -82,7 +82,7 @@ pub fn render_new_session_notice(sessions: &[LocalAgentSession]) -> String {
         "sessions"
     };
     format!(
-        "Local agent {noun} detected\n{}\nOnly metadata is shown. agentnoise did not read transcript content or attach automatically. Resume explicitly with the command above.",
+        "Local agent {noun} detected\n{}\nOnly metadata is shown. agentnoise does not send transcript content or attach automatically. Resume explicitly with the command above.",
         render_session_list(sessions)
     )
 }
@@ -374,7 +374,7 @@ mod tests {
 
         assert!(rendered.contains("Local agent session detected"));
         assert!(rendered.contains("/codex-resume c-123456 <prompt>"));
-        assert!(rendered.contains("did not read transcript content"));
+        assert!(rendered.contains("does not send transcript content"));
         assert!(!rendered.contains("private prompt"));
     }
 

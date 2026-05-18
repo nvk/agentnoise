@@ -194,8 +194,8 @@ brew services restart nvk/tap/agentnoise
 
 When enabled, agentnoise baselines existing sessions at listener startup and
 then sends newly seen local session ids, update times, cwd when available, and
-resume commands to the primary paired White Noise chat. It does not read
-transcripts, inspect process environments, or attach automatically.
+resume commands to the primary paired White Noise chat. It does not send
+transcript content, inspect process environments, or attach automatically.
 
 ## White Noise Identity
 
