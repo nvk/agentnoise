@@ -552,6 +552,16 @@ impl WhitenoiseConfig {
         }
     }
 
+    pub fn set_control_group_ids(&mut self, group_ids: impl IntoIterator<Item = String>) {
+        let mut normalized = Vec::new();
+        for group_id in group_ids {
+            push_unique_group_id(&mut normalized, &group_id);
+        }
+
+        self.group_id = normalized.first().cloned().unwrap_or_default();
+        self.group_ids = normalized;
+    }
+
     pub fn resolved_socket(&self) -> Option<PathBuf> {
         self.socket
             .as_deref()
@@ -752,6 +762,30 @@ mod tests {
         assert_eq!(
             config.control_group_ids(),
             vec!["abc".to_string(), "def".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_control_group_ids_replaces_stale_groups() {
+        let mut config = Config::template().whitenoise;
+        config.group_id = "stale".to_string();
+        config.group_ids = vec!["stale".to_string(), "old".to_string()];
+
+        config.set_control_group_ids(vec![
+            "active".to_string(),
+            "active".to_string(),
+            " ".to_string(),
+            "next".to_string(),
+        ]);
+
+        assert_eq!(config.group_id, "active");
+        assert_eq!(
+            config.group_ids,
+            vec!["active".to_string(), "next".to_string()]
+        );
+        assert_eq!(
+            config.control_group_ids(),
+            vec!["active".to_string(), "next".to_string()]
         );
     }
 

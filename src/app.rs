@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
@@ -32,13 +33,14 @@ pub enum RouteAction {
 #[derive(Debug, Clone)]
 pub struct NewSessionRequest {
     pub name: String,
+    pub group_name: String,
     pub sender: String,
     pub state: SessionState,
 }
 
 impl NewSessionRequest {
     pub fn group_name(&self) -> String {
-        format!("agentnoise: {}", self.name)
+        self.group_name.clone()
     }
 
     pub fn ready_text(&self) -> String {
@@ -52,8 +54,7 @@ impl NewSessionRequest {
     pub fn created_text(&self) -> String {
         format!(
             "Created session: {}\nI opened a new White Noise chat named \"{}\" and sent a ready message there.\nContinue in that chat, or send /list.",
-            self.name,
-            self.group_name()
+            self.name, self.group_name
         )
     }
 
@@ -61,8 +62,25 @@ impl NewSessionRequest {
         format!(
             "Created session: {}\nI opened a new White Noise chat named \"{}\" and sent a ready message there.\nOpen: {}\nContinue in that chat, or send /list.",
             self.name,
-            self.group_name(),
+            self.group_name,
             white_noise_chat_uri(group_id)
+        )
+    }
+
+    pub fn job_started_text_for_group(&self, group_id: &str) -> String {
+        format!(
+            "Started session: {}\nOpen: {}\nI will send progress and the final reply there.",
+            self.name,
+            white_noise_chat_uri(group_id)
+        )
+    }
+
+    pub fn job_ready_text(&self, ack: &str) -> String {
+        format!(
+            "Session: {}\nWorkspace: {}\n{}",
+            self.name,
+            workspace_text(&self.state),
+            ack
         )
     }
 }
@@ -511,7 +529,46 @@ impl AgentApp {
         state.closed = false;
 
         Ok(RouteAction::NewSession(NewSessionRequest {
+            group_name: format!("agentnoise: {name}"),
             name,
+            sender,
+            state,
+        }))
+    }
+
+    pub fn job_session_request(
+        &self,
+        group_id: Option<&str>,
+        sender: Option<&str>,
+        request: &AgentRequest,
+    ) -> Result<Option<NewSessionRequest>> {
+        if request.resume_session.is_some() {
+            return Ok(None);
+        }
+        let Some(group_id) = group_id.map(str::trim).filter(|group| !group.is_empty()) else {
+            return Ok(None);
+        };
+        let primary_group = self.config.whitenoise.group_id.trim();
+        if primary_group.is_empty() || group_id != primary_group {
+            return Ok(None);
+        }
+        let Some(sender) = sender
+            .map(str::trim)
+            .filter(|sender| !sender.is_empty())
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+
+        let group_name = job_group_name(&local_hostname(), &request.prompt);
+        let name = group_name.clone();
+        let mut state = self.session(&session_key(Some(group_id), Some(&sender)))?;
+        state.name = Some(name.clone());
+        state.closed = false;
+
+        Ok(Some(NewSessionRequest {
+            name,
+            group_name,
             sender,
             state,
         }))
@@ -1163,6 +1220,88 @@ fn generated_session_name() -> String {
     format!("session-{}", &uuid[..6])
 }
 
+fn local_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .and_then(|host| normalize_hostname(&host))
+        .or_else(|| {
+            Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| output.status.success().then_some(output.stdout))
+                .and_then(|stdout| String::from_utf8(stdout).ok())
+                .and_then(|host| normalize_hostname(&host))
+        })
+        .unwrap_or_else(|| "desktop".to_string())
+}
+
+fn normalize_hostname(host: &str) -> Option<String> {
+    let host = host.trim().split('.').next().unwrap_or(host.trim());
+    let normalized = host
+        .chars()
+        .filter_map(|ch| {
+            let ch = ch.to_ascii_lowercase();
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                Some(ch)
+            } else {
+                None
+            }
+        })
+        .collect::<String>();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn job_summary(prompt: &str) -> String {
+    let words = prompt
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|word| {
+            let word = word.trim().to_ascii_lowercase();
+            if word.len() < 2 || is_summary_stopword(&word) {
+                None
+            } else {
+                Some(word)
+            }
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+
+    match words.len() {
+        0 => "agent job".to_string(),
+        1 => format!("{} job", words[0]),
+        _ => words.join(" "),
+    }
+}
+
+fn job_group_name(host: &str, prompt: &str) -> String {
+    let host = normalize_hostname(host).unwrap_or_else(|| "desktop".to_string());
+    format!("{host} - {}", job_summary(prompt))
+}
+
+fn is_summary_stopword(word: &str) -> bool {
+    matches!(
+        word,
+        "wiki"
+            | "the"
+            | "and"
+            | "for"
+            | "with"
+            | "that"
+            | "this"
+            | "from"
+            | "into"
+            | "about"
+            | "please"
+            | "what"
+            | "whats"
+            | "can"
+            | "you"
+            | "does"
+            | "have"
+            | "are"
+            | "like"
+    )
+}
+
 fn session_display_name(key: &str, session: &SessionState) -> String {
     if let Some(name) = session.name.as_deref() {
         return name.to_string();
@@ -1586,6 +1725,91 @@ mod tests {
         assert!(ack.contains("/jobs"));
         assert!(ack.contains("/tail <job>"));
         assert!(ack.contains("/cancel <job>"));
+    }
+
+    #[test]
+    fn primary_chat_job_gets_parallel_session_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let request = match app
+            .route_message(
+                Some("inbox"),
+                Some("phone"),
+                "/wiki research water filters like Boroux/Berkey",
+            )
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+        let session = app
+            .job_session_request(Some("inbox"), Some("phone"), &request)
+            .unwrap()
+            .expect("session request");
+
+        assert_eq!(session.sender, "phone");
+        assert_eq!(session.state.repo_alias.as_deref(), Some("work"));
+        assert!(
+            session
+                .group_name
+                .ends_with(" - research water filters boroux")
+        );
+        assert!(session.name.ends_with(" - research water filters boroux"));
+        assert_eq!(session.state.name, Some(session.name.clone()));
+    }
+
+    #[test]
+    fn non_primary_chat_job_stays_in_current_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let request = match app
+            .route_message(Some("worker"), Some("phone"), "/codex follow up")
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+
+        assert!(
+            app.job_session_request(Some("worker"), Some("phone"), &request)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn job_group_name_uses_hostname_and_short_prompt_summary() {
+        assert_eq!(
+            job_group_name(
+                "Frontier1-Mini.local",
+                "@wiki research water filters like Boroux/Berkey/ClearlyFiltered",
+            ),
+            "frontier1-mini - research water filters boroux"
+        );
+        assert_eq!(job_group_name("m5", "test"), "m5 - test job");
     }
 
     #[cfg(unix)]

@@ -1288,9 +1288,9 @@ fn discover_group(config: &mut Config, config_path: &Path) -> Result<GroupDiscov
     }
 
     whitenoise_cli::accept_pending_groups(&config.whitenoise, &groups)?;
-    for group in groups {
-        config.whitenoise.add_control_group_id(&group.group_id);
-    }
+    config
+        .whitenoise
+        .set_control_group_ids(groups.into_iter().map(|group| group.group_id));
     config.save(config_path)?;
     Ok(GroupDiscovery::Ready)
 }
@@ -1410,7 +1410,7 @@ fn pairing_runtime_info(
 
 fn run_listener(
     config_path: &Path,
-    config: Config,
+    mut config: Config,
     pairing: Option<PairingRuntime>,
     _guard: EngineGuard,
 ) -> Result<()> {
@@ -1429,6 +1429,7 @@ fn run_listener(
             eprintln!("agentnoise: failed to ensure White Noise message relays: {error:#}");
         }
     }
+    reconcile_discovered_groups(config_path, &mut config);
     if let Some(pairing) = pairing.clone() {
         spawn_pairing_pin_display(config.clone(), pairing);
     }
@@ -1443,6 +1444,40 @@ fn run_listener(
     }
     let wn = Arc::new(WnClient::new(app.config().whitenoise.clone()));
     listen(config_path, app, wn)
+}
+
+fn reconcile_discovered_groups(config_path: &Path, config: &mut Config) {
+    let groups = match whitenoise_cli::list_groups(&config.whitenoise) {
+        Ok(groups) => groups,
+        Err(error) => {
+            eprintln!("agentnoise: group discovery failed: {error:#}");
+            return;
+        }
+    };
+    if groups.is_empty() {
+        return;
+    }
+    if let Err(error) = whitenoise_cli::accept_pending_groups(&config.whitenoise, &groups) {
+        eprintln!("agentnoise: failed to accept pending White Noise group(s): {error:#}");
+    }
+
+    let active_groups = groups
+        .into_iter()
+        .map(|group| group.group_id)
+        .collect::<Vec<_>>();
+    let previous_groups = config.whitenoise.control_group_ids();
+    if active_groups == previous_groups {
+        return;
+    }
+
+    config.whitenoise.set_control_group_ids(active_groups);
+    match config.save(config_path) {
+        Ok(()) => eprintln!(
+            "agentnoise: reconciled White Noise control chats: {} active",
+            config.whitenoise.control_group_ids().len()
+        ),
+        Err(error) => eprintln!("agentnoise: failed to save reconciled control chats: {error:#}"),
+    }
 }
 
 fn spawn_pairing_pin_display(config: Config, pairing: PairingRuntime) {
@@ -1784,16 +1819,104 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         }
                     }
                     RouteAction::Run(request) => {
-                        try_send_reply_recorded(
-                            &wn,
-                            &event_journal,
-                            group_id,
-                            &app.run_ack_text(&request),
-                        );
+                        let mut run_group_id = group_id.to_string();
+                        match app.job_session_request(
+                            event.group_id.as_deref(),
+                            event.sender.as_deref(),
+                            &request,
+                        ) {
+                            Ok(Some(session_request)) => {
+                                match create_parallel_session(
+                                    config_path,
+                                    Arc::clone(&app),
+                                    Arc::clone(&wn),
+                                    Arc::clone(&subscribed),
+                                    tx.clone(),
+                                    &session_request,
+                                    subscribe_limit,
+                                ) {
+                                    Ok(new_group_id) => {
+                                        try_send_reply_recorded(
+                                            &wn,
+                                            &event_journal,
+                                            group_id,
+                                            &session_request
+                                                .job_started_text_for_group(&new_group_id),
+                                        );
+                                        let ack = session_request
+                                            .job_ready_text(&app.run_ack_text(&request));
+                                        match send_reply_recorded(
+                                            &wn,
+                                            &event_journal,
+                                            &new_group_id,
+                                            &ack,
+                                        ) {
+                                            Ok(()) => run_group_id = new_group_id,
+                                            Err(error) => {
+                                                try_send_reply_recorded(
+                                                    &wn,
+                                                    &event_journal,
+                                                    group_id,
+                                                    &format!(
+                                                        "Warning: created the job session, but failed to send the first message there: {error:#}\nRunning this job here instead."
+                                                    ),
+                                                );
+                                                try_send_reply_recorded(
+                                                    &wn,
+                                                    &event_journal,
+                                                    group_id,
+                                                    &app.run_ack_text(&request),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        try_send_reply_recorded(
+                                            &wn,
+                                            &event_journal,
+                                            group_id,
+                                            &format!(
+                                                "Warning: failed to create a job session: {error:#}\nRunning this job here instead."
+                                            ),
+                                        );
+                                        try_send_reply_recorded(
+                                            &wn,
+                                            &event_journal,
+                                            group_id,
+                                            &app.run_ack_text(&request),
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                try_send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
+                                    group_id,
+                                    &app.run_ack_text(&request),
+                                );
+                            }
+                            Err(error) => {
+                                try_send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
+                                    group_id,
+                                    &format!(
+                                        "Warning: failed to prepare a job session: {error:#}\nRunning this job here instead."
+                                    ),
+                                );
+                                try_send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
+                                    group_id,
+                                    &app.run_ack_text(&request),
+                                );
+                            }
+                        }
                         let app = Arc::clone(&app);
                         let wn = Arc::clone(&wn);
                         let event_journal = Arc::clone(&event_journal);
-                        let group_id = group_id.to_string();
+                        let group_id = run_group_id;
                         std::thread::spawn(move || {
                             let progress_wn = Arc::clone(&wn);
                             let progress_journal = Arc::clone(&event_journal);

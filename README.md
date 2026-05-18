@@ -22,6 +22,14 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.23** - **Inbox sessions and stale group cleanup.** The primary paired
+chat now acts as an inbox: new `/codex`, `/claude`, `/hermes`, and `/wiki`
+jobs from that chat open a fresh White Noise work session named from the
+hostname and a short prompt summary, then progress and final output continue
+there. The fake-phone harness follows those handoff links, session open links
+are shown with shorter refs, and startup reconciles saved control chats against
+active White Noise groups so removed chats stop looking live.
+
 **v0.1.22** - **Service-mode and White Noise delivery fix.** Codex jobs now
 fail fast with a clear explanation when launched from macOS launchd/brew
 service contexts that make Codex hang before producing output. Direct Codex
@@ -113,7 +121,7 @@ starting a second listener, and disposable development identities can use
 
 ## What It Does
 
-agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher, [`bondage`](https://agentbondage.org/) by default or direct raw CLIs by explicit opt-in, stores job state and logs locally, and posts results back into the same White Noise chat that sent the command. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
+agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher, [`bondage`](https://agentbondage.org/) by default or direct raw CLIs by explicit opt-in, stores job state and logs locally, and posts results back through White Noise. The primary paired chat acts like an inbox: starting a new job there creates a new White Noise work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The most tested target is macOS. Linux and FreeBSD service templates are
 included and should be treated as newer paths.
@@ -548,13 +556,19 @@ plaintext burner identity and avoids Secret Service setup.
 - `/worktree remove <name> confirm`
 - `/help`
 
-Each White Noise chat is one agentnoise session. `/new bugfix-ui` creates a new
-parallel White Noise chat with the paired phone identity and clones the current
-workspace into it. `/rename main` names the current chat, `/list` shows known
-sessions with short chat refs and `whitenoise://chat/...` open links, `/jump 2`
-or `/resume 2` resumes a session from that list, and `/close` marks the current
-session closed locally. `/sessions` remains accepted as a readable alias for
-`/list`.
+Each White Noise chat is one agentnoise session. The first paired chat is the
+inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
+open a fresh work chat; agentnoise names it from the machine hostname and a
+2-4 word prompt summary, sends an open link back to the inbox, and posts
+progress plus final output in the new chat. Follow-up jobs sent inside that
+work chat stay in that chat.
+
+`/new bugfix-ui` still creates a manual parallel White Noise chat with the
+paired phone identity and clones the current workspace into it. `/rename main`
+names the current chat, `/list` shows known sessions with short chat refs and
+`whitenoise://chat/...` open links, `/jump 2` or `/resume 2` resumes a session
+from that list, and `/close` marks the current session closed locally.
+`/sessions` remains accepted as a readable alias for `/list`.
 
 Repos are aliases from the config, not arbitrary paths. `/use` selects a repo
 for the session, `/cd ..` moves within that selected repo, and plain `/codex` or

@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+## 0.1.23 - 2026-05-18
+
 - Added `whitenoise://chat/<group>` open links to session list, new-session,
   and cross-session resume replies, shortened chat refs to five characters, and
   added `/jump <session>` as a friendlier `/resume` alias.
+- Made the primary paired chat behave as an inbox for new jobs. `/codex`,
+  `/claude`, `/hermes`, and `/wiki` commands from that chat now open a fresh
+  White Noise work session named `hostname - prompt summary`; progress and
+  final output continue in the new chat, while follow-up jobs inside that chat
+  stay there.
+- Reconcile saved White Noise control chats against the active `wn groups list`
+  result at listener startup so removed groups do not keep appearing as live
+  sessions.
 
 ## 0.1.22 - 2026-05-17
 
