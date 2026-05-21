@@ -72,8 +72,8 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
     fs::create_dir_all(&plan.logs_dir)
         .with_context(|| format!("creating {}", plan.logs_dir.display()))?;
 
-    let _daemon = ChildGuard::new(start_fake_wnd(config, &plan)?);
-    wait_for_socket(&plan.socket, Duration::from_secs(10))?;
+    let mut daemon = ChildGuard::new(start_fake_wnd(config, &plan)?);
+    wait_for_socket(&plan, &mut daemon.child, Duration::from_secs(10))?;
 
     let fake_config = fake_whitenoise_config(config, &plan);
     let phone_npub = create_or_reuse_identity(&fake_config, &plan)?;
@@ -130,11 +130,21 @@ impl Drop for ChildGuard {
 fn start_fake_wnd(config: &Config, plan: &FakePhonePlan) -> Result<Child> {
     let wnd = whitenoise_cli::resolve_wnd_for_config(&config.whitenoise);
     let relays = config.whitenoise.pairing_relays.join(",");
+    let stdout_path = fake_wnd_stdout_path(plan);
+    let stderr_path = fake_wnd_stderr_path(plan);
     if plan.socket.exists() {
         fs::remove_file(&plan.socket).with_context(|| {
             format!("removing stale fake phone socket {}", plan.socket.display())
         })?;
     }
+    fs::write(&stdout_path, "")
+        .with_context(|| format!("creating fake phone stdout log {}", stdout_path.display()))?;
+    fs::write(&stderr_path, "")
+        .with_context(|| format!("creating fake phone stderr log {}", stderr_path.display()))?;
+    let stdout = fs::File::create(&stdout_path)
+        .with_context(|| format!("opening fake phone stdout log {}", stdout_path.display()))?;
+    let stderr = fs::File::create(&stderr_path)
+        .with_context(|| format!("opening fake phone stderr log {}", stderr_path.display()))?;
     Command::new(&wnd)
         .arg("--data-dir")
         .arg(&plan.data_dir)
@@ -143,21 +153,68 @@ fn start_fake_wnd(config: &Config, plan: &FakePhonePlan) -> Result<Child> {
         .arg("--discovery-relays")
         .arg(relays)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .with_context(|| format!("starting fake phone {}", wnd.display()))
 }
 
-fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
+fn wait_for_socket(plan: &FakePhonePlan, child: &mut Child, timeout: Duration) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if socket.exists() {
+        if plan.socket.exists() {
             return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .context("checking fake phone White Noise daemon")?
+        {
+            bail!(
+                "fake phone daemon exited before socket appeared: {}\n{}",
+                status,
+                fake_wnd_failure_detail(plan)
+            );
         }
         thread::sleep(Duration::from_millis(250));
     }
-    bail!("fake phone socket did not appear: {}", socket.display())
+    bail!(
+        "fake phone socket did not appear: {}\n{}",
+        plan.socket.display(),
+        fake_wnd_failure_detail(plan)
+    )
+}
+
+fn fake_wnd_stdout_path(plan: &FakePhonePlan) -> PathBuf {
+    plan.logs_dir.join("fake-wnd.stdout.log")
+}
+
+fn fake_wnd_stderr_path(plan: &FakePhonePlan) -> PathBuf {
+    plan.logs_dir.join("fake-wnd.stderr.log")
+}
+
+fn fake_wnd_failure_detail(plan: &FakePhonePlan) -> String {
+    let mut lines = vec![
+        format!("stdout: {}", fake_wnd_stdout_path(plan).display()),
+        format!("stderr: {}", fake_wnd_stderr_path(plan).display()),
+        format!("logs: {}", plan.logs_dir.display()),
+    ];
+    if let Some(stderr) = log_excerpt(&fake_wnd_stderr_path(plan)) {
+        lines.push(format!("stderr excerpt:\n{stderr}"));
+    }
+    if let Some(stdout) = log_excerpt(&fake_wnd_stdout_path(plan)) {
+        lines.push(format!("stdout excerpt:\n{stdout}"));
+    }
+    lines.join("\n")
+}
+
+fn log_excerpt(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let lines = text.lines().rev().take(12).collect::<Vec<_>>();
+    Some(lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
 }
 
 fn fake_whitenoise_config(config: &Config, plan: &FakePhonePlan) -> WhitenoiseConfig {

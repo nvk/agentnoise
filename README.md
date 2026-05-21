@@ -22,6 +22,14 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.27** - **Pending proposal recovery and clearer diagnostics.** Reply
+sends now refresh pending White Noise group proposals immediately when White
+Noise reports `pending proposal exists`, giving the normal retry loop a real
+chance to recover. Service startup logs the active listener pid while waiting
+on an existing lock, and fake-phone tests now print the early `wnd` stderr
+excerpt instead of hiding daemon startup failures behind a missing socket
+timeout.
+
 **v0.1.26** - **Named instances and subscription recovery.** Added
 `agentnoise --instance <name>` for safer multi-tenant hosts with separate
 config, data, logs, keychain service names, White Noise profile names, and

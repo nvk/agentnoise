@@ -1372,7 +1372,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.progress_interval_seconds = 1;
         config.runner.silence_ping_seconds = 1;
-        config.runner.startup_silence_timeout_seconds = 1;
+        config.runner.startup_silence_timeout_seconds = 2;
         config.runner.startup_retry_attempts = 1;
         config.runner.job_timeout_seconds = 20;
         config.agents.codex.bin = bin.display().to_string();

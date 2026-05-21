@@ -1322,7 +1322,19 @@ fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> 
     }
 
     let config = Config::load(config_path)?;
+    let mut last_notice = Instant::now() - Duration::from_secs(30);
     while runtime::engine_is_running(&config)? {
+        if last_notice.elapsed() >= Duration::from_secs(30) {
+            match runtime::engine_lock_owner(&config)? {
+                Some(pid) => eprintln!(
+                    "agentnoise: another listener is running as pid {pid}; service startup is waiting for it to exit"
+                ),
+                None => eprintln!(
+                    "agentnoise: another listener is running; service startup is waiting for it to exit"
+                ),
+            }
+            last_notice = Instant::now();
+        }
         thread::sleep(Duration::from_secs(1));
     }
     Ok(())
@@ -2308,7 +2320,7 @@ fn try_send_reply_recorded(
 
 fn send_retry_delay(detail: &str, attempt: usize) -> Duration {
     let attempt = attempt as u64;
-    if detail.contains("pending proposal") {
+    if detail.to_ascii_lowercase().contains("pending proposal") {
         return Duration::from_millis(750 * attempt * attempt);
     }
     Duration::from_millis(500 * attempt)

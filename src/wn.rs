@@ -137,6 +137,13 @@ impl WnClient {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = format!("{stdout}\n{stderr}").trim().to_string();
+            if detail.to_ascii_lowercase().contains("pending proposal")
+                && let Err(error) = self.accept_pending_groups_for_retry()
+            {
+                eprintln!(
+                    "agentnoise: failed to refresh pending White Noise proposals before retry: {error:#}"
+                );
+            }
             if detail.is_empty() {
                 bail!("wn messages send exited with {}", output.status);
             }
@@ -144,6 +151,11 @@ impl WnClient {
         }
 
         Ok(())
+    }
+
+    fn accept_pending_groups_for_retry(&self) -> Result<usize> {
+        let groups = whitenoise_cli::list_groups(&self.config)?;
+        whitenoise_cli::accept_pending_groups(&self.config, &groups)
     }
 
     pub fn send_reply(&self, text: &str) -> Result<()> {
@@ -577,6 +589,55 @@ printf '%s\n' '{"result":[{"content":"/status","sender_npub":"npub123","id":"m1"
             events[0].group_id.as_deref(),
             Some("0123456789abcdef0123456789abcdef")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_proposal_send_refreshes_pending_groups_before_retry_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let wn = temp.path().join("wn");
+        let log = temp.path().join("wn.log");
+        let group_id = "0123456789abcdef0123456789abcdef";
+        std::fs::write(
+            &wn,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *"messages send"*)
+    printf '%s\n' '{{"error":{{"message":"MDK error: Can'\''t create message because a pending proposal exists."}}}}' >&2
+    exit 1
+    ;;
+  *"groups list"*)
+    printf '%s\n' '{{"result":[{{"group_id":"{}","pending_confirmation":true}}]}}'
+    ;;
+  *"groups accept"*)
+    printf '%s\n' '{{"result":true}}'
+    ;;
+esac
+"#,
+                log.display(),
+                group_id
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&wn).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wn, permissions).unwrap();
+
+        let mut config = crate::config::Config::template().whitenoise;
+        config.wn_bin = wn.display().to_string();
+        let client = WnClient::new(config);
+
+        let error = client.send_to(group_id, "hello").unwrap_err().to_string();
+        let calls = std::fs::read_to_string(log).unwrap();
+
+        assert!(error.contains("pending proposal exists"));
+        assert!(calls.contains(&format!("messages send --json {group_id} hello")));
+        assert!(calls.contains("groups list --json"));
+        assert!(calls.contains(&format!("groups accept --json {group_id}")));
     }
 
     #[test]

@@ -172,6 +172,16 @@ pub fn engine_is_running(config: &Config) -> Result<bool> {
     Ok(false)
 }
 
+pub fn engine_lock_owner(config: &Config) -> Result<Option<u32>> {
+    let lock_path = lock_path(config);
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&lock_path)
+        .with_context(|| format!("reading lock owner {}", lock_path.display()))?;
+    Ok(parse_lock_pid(&text).filter(|pid| process_is_alive(*pid)))
+}
+
 pub fn attach_ui(config_path: &Path, config: &Config) -> Result<()> {
     println!("agentnoise already running");
     match read_status(config)? {
@@ -506,6 +516,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(engine_is_running(&config).unwrap());
+        assert_eq!(
+            engine_lock_owner(&config).unwrap(),
+            Some(std::process::id())
+        );
         assert!(
             acquire_engine(&config_path, &config, AcquireMode::Try)
                 .unwrap()

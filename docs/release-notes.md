@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.27 - 2026-05-21
+
+- Refresh pending White Noise group proposals immediately when a reply send
+  fails with `pending proposal exists`, so the normal retry loop can recover
+  faster instead of only sleeping.
+- Log the active listener PID while non-interactive service startup waits on
+  an existing engine lock, making stale foreground/tmux listeners visible in
+  service logs.
+- Capture fake-phone `wnd` stdout/stderr and report early daemon exits with a
+  log excerpt, instead of timing out on a missing socket with no cause.
+
 ## 0.1.26 - 2026-05-20
 
 - Added named instances for safer multi-tenant hosts. `agentnoise --instance
