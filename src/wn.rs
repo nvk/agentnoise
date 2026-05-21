@@ -79,6 +79,33 @@ impl WnClient {
         command.spawn().context("starting wn messages subscribe")
     }
 
+    pub fn list_group_messages(&self, group_id: &str, limit: u32) -> Result<Vec<MessageEvent>> {
+        let group_id = group_id.trim();
+        if group_id.is_empty() {
+            bail!("White Noise group id is empty");
+        }
+        let mut command = Command::new(whitenoise_cli::resolve_wn(&self.config.wn_bin));
+        self.add_socket_arg(&mut command);
+        command.arg("messages").arg("list").arg("--json");
+        self.add_account_arg(&mut command);
+        command.arg("--limit").arg(limit.to_string()).arg(group_id);
+
+        let output = command.output().context("running wn messages list")?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = format!("{stdout}\n{stderr}").trim().to_string();
+            if detail.is_empty() {
+                bail!("wn messages list exited with {}", output.status);
+            }
+            bail!("wn messages list exited with {}: {detail}", output.status);
+        }
+
+        let value: Value =
+            serde_json::from_slice(&output.stdout).context("parsing wn messages list JSON")?;
+        Ok(Self::parse_events_for_group(&value, group_id))
+    }
+
     pub fn send(&self, text: &str) -> Result<()> {
         let Some(group_id) = self.config.control_group_ids().into_iter().next() else {
             bail!("no White Noise group id is configured");
@@ -495,6 +522,59 @@ mod tests {
             .unwrap();
         assert_eq!(
             event.group_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn parses_messages_list_shape() {
+        let value: Value = serde_json::from_str(
+            r#"{"result":[{"content":"/status","sender_npub":"npub123","id":"m1"},{"message":{"content":"/jobs","sender_npub":"npub123","id":"m2"}}]}"#,
+        )
+        .unwrap();
+        let events = WnClient::parse_events_for_group(&value, "0123456789abcdef0123456789abcdef");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].text, "/status");
+        assert_eq!(events[0].id.as_deref(), Some("m1"));
+        assert_eq!(events[1].text, "/jobs");
+        assert_eq!(events[1].id.as_deref(), Some("m2"));
+        assert_eq!(
+            events[1].group_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_group_messages_invokes_wn_and_parses_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let wn = temp.path().join("wn");
+        std::fs::write(
+            &wn,
+            r#"#!/bin/sh
+printf '%s\n' '{"result":[{"content":"/status","sender_npub":"npub123","id":"m1"}]}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&wn).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wn, permissions).unwrap();
+
+        let mut config = crate::config::Config::template().whitenoise;
+        config.wn_bin = wn.display().to_string();
+        let client = WnClient::new(config);
+
+        let events = client
+            .list_group_messages("0123456789abcdef0123456789abcdef", 20)
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "/status");
+        assert_eq!(
+            events[0].group_id.as_deref(),
             Some("0123456789abcdef0123456789abcdef")
         );
     }

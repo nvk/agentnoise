@@ -574,6 +574,10 @@ impl Config {
         self.resolved_data_dir().join("runtime-events.jsonl")
     }
 
+    pub fn resolved_subscriptions_path(&self) -> PathBuf {
+        self.resolved_data_dir().join("subscriptions.json")
+    }
+
     pub fn resolved_approvals_path(&self) -> PathBuf {
         self.resolved_data_dir().join("approvals.json")
     }

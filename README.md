@@ -22,6 +22,14 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.26** - **Named instances and subscription recovery.** Added
+`agentnoise --instance <name>` for safer multi-tenant hosts with separate
+config, data, logs, keychain service names, White Noise profile names, and
+native service names. The listener now also records subscription health,
+reconciles recent White Noise group history, recovers missed inbound messages,
+and restarts stale `wn messages subscribe` children so phone commands do not
+get accepted and then disappear.
+
 **v0.1.25** - **Work chat replies without slashes.** The inbox stays command
 oriented, but work/session chats now remember the agent mode that created or
 last explicitly ran in them. After `/codex`, `/claude`, `/hermes`, or `/wiki`

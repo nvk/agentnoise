@@ -20,9 +20,10 @@ use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo, Ru
 use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
+use agentnoise::subscriptions::{self, SubscriptionRegistry};
 use agentnoise::text::compact_timestamp;
 use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
-use agentnoise::wn::WnClient;
+use agentnoise::wn::{MessageEvent, WnClient};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use time::OffsetDateTime;
@@ -30,6 +31,9 @@ use time::format_description::well_known::Rfc3339;
 use zeroize::Zeroize;
 
 const FIRST_PAIRING_SUBSCRIBE_LIMIT: u32 = 20;
+const SUBSCRIPTION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+const SUBSCRIPTION_STALE_IDLE: Duration = Duration::from_secs(90);
+const SUBSCRIPTION_RECONCILE_LIMIT: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListenerMode {
@@ -1627,11 +1631,37 @@ fn print_pairing_pin(pin: agentnoise::auth::PairingPin) {
     std::io::stdout().flush().ok();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageSource {
+    Stream,
+    Reconciliation,
+}
+
 enum StreamItem {
-    Event(agentnoise::wn::MessageEvent),
+    Event {
+        event: MessageEvent,
+        source: MessageSource,
+    },
+    StreamJson {
+        group_id: String,
+    },
     StreamError {
         group_id: String,
         message: String,
+    },
+    Reconcile {
+        group_id: String,
+    },
+    PolledMessages {
+        group_id: String,
+        messages: Vec<MessageEvent>,
+    },
+    ReconcileError {
+        group_id: String,
+        message: String,
+    },
+    RestartSubscription {
+        group_id: String,
     },
     Exited {
         group_id: String,
@@ -1643,9 +1673,24 @@ enum StreamItem {
     LocalSessionsWatchError(String),
 }
 
+#[derive(Clone)]
+struct SubscriptionStateHandle {
+    registry: Arc<Mutex<SubscriptionRegistry>>,
+    snapshot_path: PathBuf,
+}
+
+impl SubscriptionStateHandle {
+    fn new(snapshot_path: PathBuf) -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
+            snapshot_path,
+        }
+    }
+}
+
 fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<()> {
     let (tx, rx) = mpsc::channel();
-    let subscribed = Arc::new(Mutex::new(HashSet::new()));
+    let subscriptions = SubscriptionStateHandle::new(app.config().resolved_subscriptions_path());
     let event_journal = Arc::new(Mutex::new(EventJournal::open(
         &app.config().resolved_event_log_path(),
     )?));
@@ -1660,7 +1705,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
         for group_id in initial_groups {
             subscribe_group_if_needed(
                 Arc::clone(&wn),
-                Arc::clone(&subscribed),
+                subscriptions.clone(),
                 tx.clone(),
                 &group_id,
                 subscribe_limit,
@@ -1675,6 +1720,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
         }
     }
     spawn_group_discovery(Arc::clone(&wn), tx.clone());
+    spawn_subscription_watchdog(Arc::clone(&subscriptions.registry), tx.clone());
     spawn_local_session_watcher(app.config(), tx.clone());
     println!("agentnoise listening");
 
@@ -1691,7 +1737,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                     }
                     if let Err(error) = subscribe_group_if_needed(
                         Arc::clone(&wn),
-                        Arc::clone(&subscribed),
+                        subscriptions.clone(),
                         tx.clone(),
                         &group_id,
                         subscribe_limit,
@@ -1732,20 +1778,135 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
             StreamItem::LocalSessionsWatchError(message) => {
                 eprintln!("agentnoise: local session watch failed: {message}");
             }
+            StreamItem::StreamJson { group_id } => {
+                if let Ok(mut registry) = subscriptions.registry.lock() {
+                    registry.mark_json(&group_id);
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                }
+            }
             StreamItem::StreamError { group_id, message } => {
+                if let Ok(mut registry) = subscriptions.registry.lock() {
+                    registry.mark_error(&group_id, &message);
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                }
                 eprintln!("agentnoise: wn stream error for {group_id}: {message}");
             }
+            StreamItem::Reconcile { group_id } => {
+                let should_poll = {
+                    let mut registry = subscriptions
+                        .registry
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("subscription registry lock poisoned"))?;
+                    let should_poll = registry.mark_poll_start(&group_id);
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                    should_poll
+                };
+                if should_poll {
+                    spawn_group_reconciliation(Arc::clone(&wn), tx.clone(), group_id);
+                }
+            }
+            StreamItem::PolledMessages { group_id, messages } => {
+                let previous_latest = subscriptions
+                    .registry
+                    .lock()
+                    .ok()
+                    .and_then(|registry| registry.latest_polled_message_id(&group_id));
+                let recovered_events =
+                    reconciled_events_after(&messages, previous_latest.as_deref());
+                let recovered_unseen = {
+                    let journal = event_journal
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("event journal lock poisoned"))?;
+                    recovered_events
+                        .iter()
+                        .filter(|event| {
+                            event.group_id.as_deref().is_some_and(|group| {
+                                !journal.already_seen(group, event.id.as_deref())
+                            })
+                        })
+                        .count()
+                };
+                if let Ok(mut registry) = subscriptions.registry.lock() {
+                    registry.mark_poll(&group_id, &messages);
+                    if previous_latest.is_some() {
+                        registry.mark_recovered(&group_id, recovered_unseen);
+                    }
+                    for stale_group in registry.stale_running_groups(SUBSCRIPTION_STALE_IDLE) {
+                        let pid = registry.pid(&stale_group);
+                        registry.mark_stale(&stale_group);
+                        if let Some(pid) = pid {
+                            terminate_subscription_process(pid);
+                        } else {
+                            schedule_subscription_restart(tx.clone(), stale_group.clone(), 1);
+                        }
+                    }
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                }
+                if previous_latest.is_some() {
+                    for event in recovered_events {
+                        if tx
+                            .send(StreamItem::Event {
+                                event,
+                                source: MessageSource::Reconciliation,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            StreamItem::ReconcileError { group_id, message } => {
+                if let Ok(mut registry) = subscriptions.registry.lock() {
+                    registry.mark_poll_error(&group_id, &message);
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                }
+                eprintln!("agentnoise: wn reconciliation failed for {group_id}: {message}");
+            }
+            StreamItem::RestartSubscription { group_id } => {
+                if let Err(error) = subscribe_group_if_needed(
+                    Arc::clone(&wn),
+                    subscriptions.clone(),
+                    tx.clone(),
+                    &group_id,
+                    subscribe_limit,
+                ) {
+                    if let Ok(mut registry) = subscriptions.registry.lock() {
+                        registry.mark_failed(&group_id, &format!("{error:#}"));
+                        save_subscriptions_snapshot(&subscriptions, &registry);
+                    }
+                    eprintln!(
+                        "agentnoise: failed to restart subscription for {group_id}: {error:#}"
+                    );
+                    schedule_subscription_restart(tx.clone(), group_id, 2);
+                }
+            }
             StreamItem::Exited { group_id, status } => {
-                remove_subscribed_group(&subscribed, &group_id)?;
+                let restart_count = {
+                    let mut registry = subscriptions
+                        .registry
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("subscription registry lock poisoned"))?;
+                    let restart_count = registry.mark_exit(&group_id, &status.to_string());
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                    restart_count
+                };
                 if !status.success() {
                     eprintln!("agentnoise: wn subscribe for {group_id} exited with {status}");
                 }
+                schedule_subscription_restart(tx.clone(), group_id, restart_count);
             }
-            StreamItem::Event(event) => {
+            StreamItem::Event { event, source } => {
                 let Some(group_id) = event.group_id.as_deref() else {
                     eprintln!("agentnoise: ignored message without White Noise group id");
                     continue;
                 };
+                if source == MessageSource::Stream
+                    && let Ok(mut registry) = subscriptions.registry.lock()
+                {
+                    registry.mark_event(&event);
+                    save_subscriptions_snapshot(&subscriptions, &registry);
+                }
                 {
                     let mut journal = event_journal
                         .lock()
@@ -1756,6 +1917,10 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                     if let Err(error) = journal.record_inbound(&event) {
                         eprintln!("agentnoise: failed to record inbound event: {error:#}");
                     }
+                }
+                if let Ok(mut registry) = subscriptions.registry.lock() {
+                    registry.mark_journaled(&event);
+                    save_subscriptions_snapshot(&subscriptions, &registry);
                 }
                 let process_initial_pairing = event.unsupported.is_none()
                     && app.accepts_current_pairing_pin(event.sender.as_deref(), &event.text);
@@ -1804,7 +1969,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                             config_path,
                             Arc::clone(&app),
                             Arc::clone(&wn),
-                            Arc::clone(&subscribed),
+                            subscriptions.clone(),
                             tx.clone(),
                             &request,
                             subscribe_limit,
@@ -1849,7 +2014,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                         match resume_parallel_session(
                             config_path,
                             Arc::clone(&wn),
-                            Arc::clone(&subscribed),
+                            subscriptions.clone(),
                             tx.clone(),
                             &request,
                             subscribe_limit,
@@ -1910,7 +2075,7 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                     config_path,
                                     Arc::clone(&app),
                                     Arc::clone(&wn),
-                                    Arc::clone(&subscribed),
+                                    subscriptions.clone(),
                                     tx.clone(),
                                     &session_request,
                                     subscribe_limit,
@@ -2164,7 +2329,7 @@ fn create_parallel_session(
     config_path: &Path,
     app: Arc<AgentApp>,
     wn: Arc<WnClient>,
-    subscribed: Arc<Mutex<HashSet<String>>>,
+    subscriptions: SubscriptionStateHandle,
     tx: mpsc::Sender<StreamItem>,
     request: &NewSessionRequest,
     subscribe_limit: u32,
@@ -2180,7 +2345,7 @@ fn create_parallel_session(
 
     app.create_session_record(&group_id, request.state.clone())?;
     persist_control_group_id(config_path, &group_id)?;
-    subscribe_group_if_needed(wn, subscribed, tx, &group_id, subscribe_limit)?;
+    subscribe_group_if_needed(wn, subscriptions, tx, &group_id, subscribe_limit)?;
 
     Ok(group_id)
 }
@@ -2188,13 +2353,13 @@ fn create_parallel_session(
 fn resume_parallel_session(
     config_path: &Path,
     wn: Arc<WnClient>,
-    subscribed: Arc<Mutex<HashSet<String>>>,
+    subscriptions: SubscriptionStateHandle,
     tx: mpsc::Sender<StreamItem>,
     request: &agentnoise::app::ResumeSessionRequest,
     subscribe_limit: u32,
 ) -> Result<()> {
     persist_control_group_id(config_path, &request.group_id)?;
-    subscribe_group_if_needed(wn, subscribed, tx, &request.group_id, subscribe_limit)
+    subscribe_group_if_needed(wn, subscriptions, tx, &request.group_id, subscribe_limit)
 }
 
 fn persist_control_group_id(config_path: &Path, group_id: &str) -> Result<()> {
@@ -2223,7 +2388,7 @@ fn merge_initial_group_ids(configured: Vec<String>, discovered: Vec<String>) -> 
 
 fn subscribe_group_if_needed(
     wn: Arc<WnClient>,
-    subscribed: Arc<Mutex<HashSet<String>>>,
+    subscriptions: SubscriptionStateHandle,
     tx: mpsc::Sender<StreamItem>,
     group_id: &str,
     subscribe_limit: u32,
@@ -2234,27 +2399,39 @@ fn subscribe_group_if_needed(
     }
 
     {
-        let subscribed = subscribed
+        let subscriptions = subscriptions
+            .registry
             .lock()
-            .map_err(|_| anyhow::anyhow!("subscribed group lock poisoned"))?;
-        if subscribed.contains(group_id) {
+            .map_err(|_| anyhow::anyhow!("subscription registry lock poisoned"))?;
+        if subscriptions.is_running(group_id) {
             return Ok(());
         }
     }
 
     let group_id = group_id.to_string();
+    {
+        let mut registry = subscriptions
+            .registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("subscription registry lock poisoned"))?;
+        registry.mark_starting(&group_id);
+        save_subscriptions_snapshot(&subscriptions, &registry);
+    }
     let mut child = wn
         .subscribe_group_with_limit(&group_id, subscribe_limit)
         .with_context(|| format!("starting White Noise subscription for {group_id}"))?;
+    let pid = child.id();
     let stdout = child
         .stdout
         .take()
         .context("wn subscribe did not expose stdout")?;
     {
-        let mut subscribed = subscribed
+        let mut registry = subscriptions
+            .registry
             .lock()
-            .map_err(|_| anyhow::anyhow!("subscribed group lock poisoned"))?;
-        subscribed.insert(group_id.clone());
+            .map_err(|_| anyhow::anyhow!("subscription registry lock poisoned"))?;
+        registry.mark_started(&group_id, pid);
+        save_subscriptions_snapshot(&subscriptions, &registry);
     }
     println!("agentnoise listening group {group_id}");
     spawn_group_subscription(group_id, child, stdout, tx);
@@ -2270,7 +2447,12 @@ fn spawn_group_subscription(
     thread::spawn(move || {
         for value in WnClient::parse_events_from_reader(stdout) {
             let value = match value {
-                Ok(value) => value,
+                Ok(value) => {
+                    let _ = tx.send(StreamItem::StreamJson {
+                        group_id: group_id.clone(),
+                    });
+                    value
+                }
                 Err(error) => {
                     let _ = tx.send(StreamItem::StreamError {
                         group_id: group_id.clone(),
@@ -2288,7 +2470,13 @@ fn spawn_group_subscription(
             }
 
             for event in WnClient::parse_events_for_group(&value, &group_id) {
-                if tx.send(StreamItem::Event(event)).is_err() {
+                if tx
+                    .send(StreamItem::Event {
+                        event,
+                        source: MessageSource::Stream,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -2330,6 +2518,108 @@ fn spawn_group_discovery(wn: Arc<WnClient>, tx: mpsc::Sender<StreamItem>) {
             thread::sleep(Duration::from_secs(30));
         }
     });
+}
+
+fn spawn_subscription_watchdog(
+    subscriptions: Arc<Mutex<SubscriptionRegistry>>,
+    tx: mpsc::Sender<StreamItem>,
+) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(SUBSCRIPTION_RECONCILE_INTERVAL);
+            let groups = subscriptions
+                .lock()
+                .map(|registry| registry.due_for_reconciliation(SUBSCRIPTION_RECONCILE_INTERVAL))
+                .unwrap_or_default();
+            for group_id in groups {
+                if tx.send(StreamItem::Reconcile { group_id }).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_group_reconciliation(wn: Arc<WnClient>, tx: mpsc::Sender<StreamItem>, group_id: String) {
+    thread::spawn(
+        move || match wn.list_group_messages(&group_id, SUBSCRIPTION_RECONCILE_LIMIT) {
+            Ok(messages) => {
+                let _ = tx.send(StreamItem::PolledMessages { group_id, messages });
+            }
+            Err(error) => {
+                let _ = tx.send(StreamItem::ReconcileError {
+                    group_id,
+                    message: format!("{error:#}"),
+                });
+            }
+        },
+    );
+}
+
+fn schedule_subscription_restart(
+    tx: mpsc::Sender<StreamItem>,
+    group_id: String,
+    restart_count: u32,
+) {
+    thread::spawn(move || {
+        let delay = subscription_restart_delay(restart_count);
+        thread::sleep(delay);
+        let _ = tx.send(StreamItem::RestartSubscription { group_id });
+    });
+}
+
+fn subscription_restart_delay(restart_count: u32) -> Duration {
+    let seconds = 2u64.saturating_pow(restart_count.min(5));
+    Duration::from_secs(seconds.min(30))
+}
+
+#[cfg(unix)]
+fn terminate_subscription_process(pid: u32) {
+    match std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("agentnoise: stopping stale wn subscription {pid} exited with {status}");
+        }
+        Err(error) => {
+            eprintln!("agentnoise: failed to stop stale wn subscription {pid}: {error:#}");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_subscription_process(_pid: u32) {}
+
+fn save_subscriptions_snapshot(
+    subscriptions: &SubscriptionStateHandle,
+    registry: &SubscriptionRegistry,
+) {
+    if let Err(error) =
+        subscriptions::write_snapshot(&subscriptions.snapshot_path, &registry.snapshot())
+    {
+        eprintln!(
+            "agentnoise: failed to write subscription snapshot {}: {error:#}",
+            subscriptions.snapshot_path.display()
+        );
+    }
+}
+
+fn reconciled_events_after(
+    messages: &[MessageEvent],
+    previous_id: Option<&str>,
+) -> Vec<MessageEvent> {
+    let Some(previous_id) = previous_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Vec::new();
+    };
+    match messages
+        .iter()
+        .position(|event| event.id.as_deref().map(str::trim) == Some(previous_id))
+    {
+        Some(index) => messages[index + 1..].to_vec(),
+        None => messages.to_vec(),
+    }
 }
 
 fn spawn_local_session_watcher(config: &Config, tx: mpsc::Sender<StreamItem>) {
@@ -2419,14 +2709,6 @@ fn local_session_notification_group_from_config(config: &Config) -> Option<Strin
     (!group_id.is_empty()).then(|| group_id.to_string())
 }
 
-fn remove_subscribed_group(subscribed: &Arc<Mutex<HashSet<String>>>, group_id: &str) -> Result<()> {
-    subscribed
-        .lock()
-        .map_err(|_| anyhow::anyhow!("subscribed group lock poisoned"))?
-        .remove(group_id);
-    Ok(())
-}
-
 fn extend_unique(group_ids: &mut Vec<String>, more: impl IntoIterator<Item = String>) {
     for group_id in more {
         let group_id = group_id.trim();
@@ -2445,6 +2727,19 @@ fn unique_group_ids(group_ids: impl IntoIterator<Item = String>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message_event(group_id: &str, id: &str, text: &str) -> MessageEvent {
+        MessageEvent {
+            group_id: Some(group_id.to_string()),
+            sender: Some("phone".to_string()),
+            text: text.to_string(),
+            unsupported: None,
+            id: Some(id.to_string()),
+            trigger: None,
+            is_initial: false,
+            attachments: Vec::new(),
+        }
+    }
 
     #[test]
     fn startup_hello_includes_time_profile_and_workspace() {
@@ -2489,6 +2784,32 @@ mod tests {
                 2
             ) > send_retry_delay("temporary transport failure", 2)
         );
+    }
+
+    #[test]
+    fn subscription_reconciliation_baselines_before_replaying_messages() {
+        let messages = vec![
+            message_event("group-a", "m1", "/status"),
+            message_event("group-a", "m2", "/jobs"),
+        ];
+
+        assert!(reconciled_events_after(&messages, None).is_empty());
+        assert_eq!(
+            reconciled_events_after(&messages, Some("m1"))
+                .into_iter()
+                .map(|event| event.id.unwrap())
+                .collect::<Vec<_>>(),
+            vec!["m2".to_string()]
+        );
+        assert_eq!(reconciled_events_after(&messages, Some("missing")).len(), 2);
+    }
+
+    #[test]
+    fn subscription_restart_delay_backs_off_and_caps() {
+        assert_eq!(subscription_restart_delay(0), Duration::from_secs(1));
+        assert_eq!(subscription_restart_delay(1), Duration::from_secs(2));
+        assert_eq!(subscription_restart_delay(5), Duration::from_secs(30));
+        assert_eq!(subscription_restart_delay(30), Duration::from_secs(30));
     }
 
     #[test]

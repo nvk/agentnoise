@@ -17,6 +17,7 @@ use crate::jobs::{JobRecord, JobStatus, JobStore};
 use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
+use crate::subscriptions::{self, SubscriptionState};
 use crate::text::short_ref;
 use crate::wn::MessageEvent;
 use crate::workspace;
@@ -469,13 +470,17 @@ impl AgentApp {
             .map(workspace_text)
             .unwrap_or_else(|| "none".to_string());
 
+        let subscription_status = subscription_status_line(&self.config)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
+
         format!(
             "running | {}\n{} | {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
             self.config.runner.launcher,
             session_name,
             workspace,
             self.config.repos.len()
-        )
+        ) + &subscription_status
     }
 
     fn new_session_action(
@@ -1135,6 +1140,41 @@ fn sender_id_matches(configured: &str, sender: &str) -> bool {
     }
 }
 
+fn subscription_status_line(config: &Config) -> Option<String> {
+    let snapshot = subscriptions::read_snapshot(&config.resolved_subscriptions_path())
+        .ok()
+        .flatten()?;
+    let total = snapshot.groups.len();
+    if total == 0 {
+        return None;
+    }
+    let stale = snapshot.groups.iter().filter(|group| group.stale).count();
+    let running = snapshot
+        .groups
+        .iter()
+        .filter(|group| group.state == SubscriptionState::Running && !group.stale)
+        .count();
+    let restarting = snapshot
+        .groups
+        .iter()
+        .filter(|group| {
+            matches!(
+                group.state,
+                SubscriptionState::Restarting
+                    | SubscriptionState::Exited
+                    | SubscriptionState::Failed
+            )
+        })
+        .count();
+    if stale == 0 && restarting == 0 {
+        Some(format!("subs: {running}/{total} ok"))
+    } else {
+        Some(format!(
+            "subs: {running}/{total} ok, {stale} stale, {restarting} restarting"
+        ))
+    }
+}
+
 fn nostr_public_key_hex(value: &str) -> Option<String> {
     PublicKey::parse(value.trim())
         .ok()
@@ -1662,6 +1702,56 @@ mod tests {
 
         let saved = Config::load(&config_path).unwrap();
         assert_eq!(saved.whitenoise.allowed_senders, vec!["phone"]);
+    }
+
+    #[test]
+    fn status_reply_includes_subscription_health_when_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.whitenoise.group_id = "group-a".to_string();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        subscriptions::write_snapshot(
+            &config.resolved_subscriptions_path(),
+            &subscriptions::SubscriptionSnapshot {
+                version: 1,
+                updated_at: "2026-05-21T00:00:00Z".to_string(),
+                groups: vec![subscriptions::SubscriptionStatus {
+                    group_id: "group-a".to_string(),
+                    state: SubscriptionState::Running,
+                    pid: Some(42),
+                    started_at: Some("2026-05-21T00:00:00Z".to_string()),
+                    last_json_at: None,
+                    last_event_at: None,
+                    last_error_at: None,
+                    last_error: None,
+                    last_exit_at: None,
+                    last_exit_status: None,
+                    restart_count: 0,
+                    parse_error_count: 0,
+                    last_poll_at: None,
+                    latest_polled_message_id: None,
+                    latest_stream_message_id: None,
+                    latest_journaled_message_id: None,
+                    recovered_inbound: 0,
+                    stale: false,
+                }],
+            },
+        )
+        .unwrap();
+
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("group-a"), Some("phone"), "/status")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains("subs: 1/1 ok")
+        ));
     }
 
     #[test]

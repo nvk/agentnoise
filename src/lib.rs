@@ -22,6 +22,7 @@ pub mod secrets;
 pub mod service;
 pub mod session;
 pub mod setup;
+pub mod subscriptions;
 pub mod text;
 pub mod whitenoise_cli;
 pub mod wn;

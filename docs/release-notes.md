@@ -2,10 +2,18 @@
 
 ## Unreleased
 
+## 0.1.26 - 2026-05-20
+
 - Added named instances for safer multi-tenant hosts. `agentnoise --instance
   alice ...` and `agentnoise --instance bob ...` now resolve to separate
   config roots, generated data/log/worktree dirs, keychain services, White
   Noise profile names, and native service names.
+- Added White Noise subscription reconciliation. `agentnoise up` now keeps a
+  subscription health snapshot, polls recent group history as a watchdog,
+  recovers missed inbound messages, and restarts stale `wn messages subscribe`
+  children instead of leaving phone commands accepted but unanswered.
+- Added subscription health to `/status` and `agentnoise status` so stale or
+  restarting chat listeners are visible during debugging.
 
 ## 0.1.25 - 2026-05-20
 
