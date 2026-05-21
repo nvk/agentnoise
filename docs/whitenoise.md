@@ -280,8 +280,10 @@ The first paired chat is the inbox. Starting a new `/codex`, `/claude`,
 `/hermes`, or `/wiki` job from that inbox creates a fresh White Noise work
 chat with the same paired phone identity. The chat name is
 `hostname - 2-4 word prompt summary`, agentnoise sends an open link back to the
-inbox, and progress plus final output continue in the new chat. Follow-up jobs
-sent inside that work chat stay there.
+inbox, and progress plus final output continue in the new chat. Plain text
+sent inside that work chat continues with the same agent/profile/wiki mode and
+workspace. Use slash commands in a work chat when changing workspace,
+inspecting jobs, or intentionally switching agents.
 
 To create a manual parallel session from the same phone, send `/new <name>`
 from an existing agentnoise chat. agentnoise creates another White Noise chat

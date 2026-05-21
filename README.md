@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.25** - **Work chat replies without slashes.** The inbox stays command
+oriented, but work/session chats now remember the agent mode that created or
+last explicitly ran in them. After `/codex`, `/claude`, `/hermes`, or `/wiki`
+starts a work chat, plain text in that chat continues with the same
+agent/profile/wiki mode and workspace.
+
 **v0.1.24** - **Mobile chat cleanup and opt-in local session watch.** White
 Noise replies are shorter and more phone-readable: compact startup hellos,
 queue/final job replies, progress pings, status, help, session lists, and local
@@ -569,8 +575,10 @@ Each White Noise chat is one agentnoise session. The first paired chat is the
 inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
 open a fresh work chat; agentnoise names it from the machine hostname and a
 2-4 word prompt summary, sends an open link back to the inbox, and posts
-progress plus final output in the new chat. Follow-up jobs sent inside that
-work chat stay in that chat.
+progress plus final output in the new chat. Follow-up plain text sent inside
+that work chat continues with the same agent/profile/wiki mode, while slash
+commands remain available when you want to change workspace, inspect jobs, or
+force a different agent.
 
 `/new bugfix-ui` still creates a manual parallel White Noise chat with the
 paired phone identity and clones the current workspace into it. `/rename main`
@@ -586,9 +594,9 @@ enabled. `/wiki` follows the local Codex `codex-wiki` convention by prefixing
 `@wiki`; `/claude-wiki` sends a `wiki ...` prompt for Claude installations with
 the LLM Wiki instructions/plugin available.
 
-Plain text and unknown slash commands are not executed, but they are answered.
-The reply points the user at `/help` and `/codex <prompt>` so a mistyped phone
-message does not look like a dead daemon.
+Plain text in the inbox, and plain text in chats without a remembered agent
+mode, is not executed. The reply points the user at `/help` and `/codex
+<prompt>` so a mistyped phone message does not look like a dead daemon.
 
 Codex and Claude JSON streams are converted into occasional progress messages
 while a job runs. The default interval is conservative

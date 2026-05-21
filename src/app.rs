@@ -174,9 +174,13 @@ impl AgentApp {
             return Ok(RouteAction::Reply(self.sender_not_allowed_text()));
         }
 
+        let session_key = session_key(group_id, sender);
         let command = match parse_chat_command(text) {
             Ok(command) => command,
             Err(error) => {
+                if !text.trim_start().starts_with('/') {
+                    return self.route_bare_text(group_id, &session_key, text);
+                }
                 return Ok(RouteAction::Reply(invalid_command_text(
                     text,
                     &format!("{error:#}"),
@@ -184,7 +188,6 @@ impl AgentApp {
             }
         };
 
-        let session_key = session_key(group_id, sender);
         match command {
             ChatCommand::Help => Ok(RouteAction::Reply(help_text())),
             ChatCommand::Status => Ok(RouteAction::Reply(self.status_text(&session_key))),
@@ -244,24 +247,7 @@ impl AgentApp {
             ChatCommand::Worktree(command) => Ok(RouteAction::Reply(
                 self.worktree_text(&session_key, command),
             )),
-            ChatCommand::Run(request) => match self.prepare_request(&session_key, request) {
-                Ok(request) => {
-                    if let Some(reason) = approvals::approval_reason(&self.config, &request) {
-                        let approval = self.approvals.create(
-                            &session_key,
-                            request,
-                            reason,
-                            self.config.runner.approval_ttl_seconds,
-                        )?;
-                        Ok(RouteAction::Reply(approvals::render_approval_request(
-                            &approval,
-                        )))
-                    } else {
-                        Ok(RouteAction::Run(request))
-                    }
-                }
-                Err(error) => Ok(RouteAction::Reply(format!("Error: {error:#}"))),
-            },
+            ChatCommand::Run(request) => self.route_run_request(group_id, &session_key, request),
         }
     }
 
@@ -550,6 +536,7 @@ impl AgentApp {
         let mut state = self.session(&session_key(Some(group_id), Some(&sender)))?;
         state.name = Some(name.clone());
         state.closed = false;
+        set_session_default_request(&mut state, request);
 
         Ok(Some(NewSessionRequest {
             name,
@@ -853,6 +840,98 @@ impl AgentApp {
 
         self.config.effective_agent_profile_for_request(&request)?;
         Ok(request)
+    }
+
+    fn route_bare_text(
+        &self,
+        group_id: Option<&str>,
+        session_key: &str,
+        text: &str,
+    ) -> Result<RouteAction> {
+        let prompt = text.trim();
+        if prompt.is_empty() {
+            return Ok(RouteAction::Reply(invalid_command_text(
+                text,
+                "not a command",
+            )));
+        }
+        let Some(group_id) = group_id
+            .map(str::trim)
+            .filter(|group_id| !group_id.is_empty())
+        else {
+            return Ok(RouteAction::Reply(invalid_command_text(
+                text,
+                "not a command",
+            )));
+        };
+        if self.is_primary_group(group_id) {
+            return Ok(RouteAction::Reply(invalid_command_text(
+                text,
+                "not a command",
+            )));
+        }
+
+        let session = self.session(session_key)?;
+        let Some(agent) = session.default_agent else {
+            return Ok(RouteAction::Reply(invalid_command_text(
+                text,
+                "not a command",
+            )));
+        };
+        let mut request = AgentRequest::prompt(agent, apply_prompt_prefix(&session, prompt));
+        if let Some(repo_alias) = session.repo_alias.clone() {
+            request = request.with_workspace(repo_alias, session.cwd.clone());
+        }
+        if let Some(worktree_path) = session.worktree_path.clone() {
+            request = request.with_workspace_root(worktree_path);
+        }
+        if let Some(profile) = session.default_profile.clone() {
+            request = request.with_profile(profile);
+        }
+        self.route_run_request(Some(group_id), session_key, request)
+    }
+
+    fn route_run_request(
+        &self,
+        group_id: Option<&str>,
+        session_key: &str,
+        request: AgentRequest,
+    ) -> Result<RouteAction> {
+        match self.prepare_request(session_key, request) {
+            Ok(request) => {
+                if request.resume_session.is_none() && !self.is_primary_group_opt(group_id) {
+                    let mut session = self.session(session_key)?;
+                    set_session_default_request(&mut session, &request);
+                    self.sessions.set(session_key, session)?;
+                }
+                if let Some(reason) = approvals::approval_reason(&self.config, &request) {
+                    let approval = self.approvals.create(
+                        session_key,
+                        request,
+                        reason,
+                        self.config.runner.approval_ttl_seconds,
+                    )?;
+                    Ok(RouteAction::Reply(approvals::render_approval_request(
+                        &approval,
+                    )))
+                } else {
+                    Ok(RouteAction::Run(request))
+                }
+            }
+            Err(error) => Ok(RouteAction::Reply(format!("Error: {error:#}"))),
+        }
+    }
+
+    fn is_primary_group_opt(&self, group_id: Option<&str>) -> bool {
+        group_id
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .is_some_and(|group| self.is_primary_group(group))
+    }
+
+    fn is_primary_group(&self, group_id: &str) -> bool {
+        let primary_group = self.config.whitenoise.group_id.trim();
+        !primary_group.is_empty() && group_id == primary_group
     }
 
     fn session(&self, sender_key: &str) -> Result<SessionState> {
@@ -1316,6 +1395,37 @@ fn workspace_text(session: &SessionState) -> String {
     )
 }
 
+fn set_session_default_request(session: &mut SessionState, request: &AgentRequest) {
+    session.default_agent = Some(request.agent);
+    session.default_profile = request.profile.clone();
+    session.default_prompt_prefix = request_prompt_prefix(request);
+}
+
+fn request_prompt_prefix(request: &AgentRequest) -> Option<String> {
+    let prompt = request.prompt.trim();
+    match request.agent {
+        crate::runner::AgentKind::Codex if prompt == "@wiki" || prompt.starts_with("@wiki ") => {
+            Some("@wiki".to_string())
+        }
+        crate::runner::AgentKind::Claude if prompt == "wiki" || prompt.starts_with("wiki ") => {
+            Some("wiki".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn apply_prompt_prefix(session: &SessionState, prompt: &str) -> String {
+    let prompt = prompt.trim();
+    let Some(prefix) = session.default_prompt_prefix.as_deref() else {
+        return prompt.to_string();
+    };
+    if prompt == prefix || prompt.starts_with(&format!("{prefix} ")) {
+        prompt.to_string()
+    } else {
+        format!("{prefix} {prompt}")
+    }
+}
+
 fn render_job_reply(record: &JobRecord) -> String {
     let id = short_ref(&record.id);
     let status = job_status_label(record.status);
@@ -1708,6 +1818,33 @@ mod tests {
     }
 
     #[test]
+    fn inbox_bare_text_stays_command_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let mut state = SessionState::new(Some("sandbox".to_string()));
+        state.default_agent = Some(crate::runner::AgentKind::Codex);
+        app.create_session_record("inbox", state).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("inbox"), Some("phone"), "do the thing")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains("I received: do the thing")
+                && reply.contains("/codex <prompt>")
+        ));
+    }
+
+    #[test]
     fn run_ack_names_agent_and_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -1769,6 +1906,14 @@ mod tests {
 
         assert_eq!(session.sender, "phone");
         assert_eq!(session.state.repo_alias.as_deref(), Some("work"));
+        assert_eq!(
+            session.state.default_agent,
+            Some(crate::runner::AgentKind::Codex)
+        );
+        assert_eq!(
+            session.state.default_prompt_prefix.as_deref(),
+            Some("@wiki")
+        );
         assert!(
             session
                 .group_name
@@ -1776,6 +1921,74 @@ mod tests {
         );
         assert!(session.name.ends_with(" - research water filters boroux"));
         assert_eq!(session.state.name, Some(session.name.clone()));
+    }
+
+    #[test]
+    fn non_primary_work_chat_bare_text_runs_default_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let mut state = SessionState::new(Some("work".to_string()));
+        state.default_agent = Some(crate::runner::AgentKind::Codex);
+        app.create_session_record("worker", state).unwrap();
+
+        let request = match app
+            .route_message(Some("worker"), Some("phone"), "work on the fix")
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+
+        assert_eq!(request.agent, crate::runner::AgentKind::Codex);
+        assert_eq!(request.prompt, "work on the fix");
+        assert_eq!(request.repo_alias.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn work_chat_slash_run_sets_bare_text_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("worker"), Some("phone"), "/wiki research relays")
+                .unwrap(),
+            RouteAction::Run(request) if request.prompt == "@wiki research relays"
+        ));
+
+        let request = match app
+            .route_message(Some("worker"), Some("phone"), "keep going")
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+
+        assert_eq!(request.agent, crate::runner::AgentKind::Codex);
+        assert_eq!(request.prompt, "@wiki keep going");
+        assert_eq!(request.repo_alias.as_deref(), Some("work"));
     }
 
     #[test]

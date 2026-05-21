@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.25 - 2026-05-20
+
+- Added work-chat bare replies. The primary paired chat remains an inbox that
+  requires slash commands, but non-inbox work chats remember the agent/profile
+  and wiki prefix that created or last explicitly ran in them. Plain text in
+  those chats now continues with the remembered mode and workspace.
+
 ## 0.1.24 - 2026-05-18
 
 - Cleaned up White Noise chat output for phones. Startup hellos, job accepted

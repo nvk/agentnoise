@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::runner::AgentKind;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
     pub repo_alias: Option<String>,
@@ -20,6 +22,12 @@ pub struct SessionState {
     pub worktree: Option<String>,
     #[serde(default)]
     pub worktree_path: Option<PathBuf>,
+    #[serde(default)]
+    pub default_agent: Option<AgentKind>,
+    #[serde(default)]
+    pub default_profile: Option<String>,
+    #[serde(default)]
+    pub default_prompt_prefix: Option<String>,
 }
 
 impl SessionState {
@@ -31,6 +39,9 @@ impl SessionState {
             closed: false,
             worktree: None,
             worktree_path: None,
+            default_agent: None,
+            default_profile: None,
+            default_prompt_prefix: None,
         }
     }
 
@@ -49,6 +60,18 @@ impl SessionState {
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
+            .map(str::to_string);
+        self.default_profile = self
+            .default_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .map(str::to_string);
+        self.default_prompt_prefix = self
+            .default_prompt_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty())
             .map(str::to_string);
     }
 }
