@@ -7,11 +7,17 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{default_config_path, default_data_dir, default_log_dir, expand_tilde};
+use crate::paths::{
+    default_config_path, default_data_dir, default_log_dir, expand_tilde, instance_config_path,
+    instance_data_dir, instance_log_dir, instance_name_from_config_path, instance_root,
+    normalize_instance_name,
+};
 use crate::runner::{AgentKind, AgentRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub instance: Option<String>,
     pub whitenoise: WhitenoiseConfig,
     pub runner: RunnerConfig,
     #[serde(default)]
@@ -188,8 +194,14 @@ pub struct RepoConfig {
 }
 
 impl Config {
-    pub fn path_or_default(path: Option<PathBuf>) -> PathBuf {
-        path.unwrap_or_else(default_config_path)
+    pub fn path_or_default(path: Option<PathBuf>, instance: Option<&str>) -> PathBuf {
+        if let Some(path) = path {
+            return path;
+        }
+        instance
+            .and_then(normalize_instance_name)
+            .map(|name| instance_config_path(&name))
+            .unwrap_or_else(default_config_path)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -205,7 +217,7 @@ impl Config {
         if path.exists() {
             Self::load(path)
         } else {
-            Ok(Self::template())
+            Ok(Self::template_for_path(path))
         }
     }
 
@@ -219,7 +231,7 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let mut config = Self::template();
+        let mut config = Self::template_for_path(path);
         config.runner.launcher = launcher;
         fs::write(
             path,
@@ -250,6 +262,7 @@ impl Config {
             .to_string();
 
         Self {
+            instance: None,
             whitenoise: WhitenoiseConfig {
                 group_id: String::new(),
                 group_ids: Vec::new(),
@@ -319,6 +332,40 @@ impl Config {
         }
     }
 
+    pub fn template_for_path(path: &Path) -> Self {
+        if let Some(instance) = instance_name_from_config_path(path) {
+            Self::template_for_instance(&instance)
+        } else {
+            Self::template()
+        }
+    }
+
+    pub fn template_for_instance(name: &str) -> Self {
+        let mut config = Self::template();
+        config.apply_instance_defaults(name);
+        config
+    }
+
+    pub fn apply_instance_defaults(&mut self, name: &str) {
+        let Some(name) = normalize_instance_name(name) else {
+            return;
+        };
+        self.instance = Some(name.clone());
+        self.whitenoise.keychain_service = format!("agentnoise-{name}");
+        self.whitenoise.keychain_item = crate::secrets::DEFAULT_ITEM.to_string();
+        self.whitenoise.profile_name = format!("agentnoise-{name}");
+        self.whitenoise.profile_display_name = format!("agentnoise {name}");
+        self.runner.data_dir = instance_data_dir(&name).display().to_string();
+        self.runner.log_dir = instance_log_dir(&name).display().to_string();
+        self.runner.worktree_dir = instance_data_dir(&name)
+            .join("worktrees")
+            .display()
+            .to_string();
+        if self.repos.len() == 1 && self.repos[0].alias == "sandbox" {
+            self.repos[0].path = instance_root(&name).join("sandbox").display().to_string();
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.runner.max_prompt_chars == 0 {
             bail!("runner.max_prompt_chars must be greater than zero");
@@ -346,6 +393,15 @@ impl Config {
         }
         if self.whitenoise.profile_display_name.trim().is_empty() {
             bail!("whitenoise.profile_display_name cannot be empty");
+        }
+        if let Some(instance) = self.instance.as_deref() {
+            let normalized = normalize_instance_name(instance)
+                .with_context(|| format!("invalid instance name: {instance}"))?;
+            if normalized != instance {
+                bail!(
+                    "instance name `{instance}` must normalize to `{normalized}`; use lowercase letters, digits, and dashes"
+                );
+            }
         }
         if self.whitenoise.transport == WhitenoiseTransport::Socket
             && self.whitenoise.resolved_socket().is_none()
@@ -895,6 +951,42 @@ path = "/tmp"
                 .to_string()
                 .contains("local_sessions.notify_limit")
         );
+    }
+
+    #[test]
+    fn instance_template_sets_isolated_defaults() {
+        let path = crate::paths::instance_config_path("alice");
+        let config = Config::template_for_path(&path);
+
+        assert_eq!(config.instance.as_deref(), Some("alice"));
+        assert_eq!(config.whitenoise.keychain_service, "agentnoise-alice");
+        assert_eq!(config.whitenoise.keychain_item, "whitenoise-nsec");
+        assert_eq!(config.whitenoise.profile_name, "agentnoise-alice");
+        assert!(
+            config
+                .runner
+                .data_dir
+                .ends_with("/agentnoise/instances/alice/data")
+        );
+        assert!(
+            config
+                .runner
+                .log_dir
+                .ends_with("/agentnoise/instances/alice")
+        );
+        assert!(
+            config.repos[0]
+                .path
+                .ends_with("/agentnoise/instances/alice/sandbox")
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn path_or_default_uses_named_instance_path() {
+        let path = Config::path_or_default(None, Some("Alice Laptop"));
+
+        assert!(path.ends_with("agentnoise/instances/alice-laptop/config.toml"));
     }
 
     #[test]

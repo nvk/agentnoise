@@ -38,8 +38,8 @@ pub fn render(target: ServiceTarget, exe: &Path, config_path: &Path, config: &Co
     match target {
         ServiceTarget::Launchd => launchd::render_plist(exe, config_path, config),
         ServiceTarget::SystemdUser => render_systemd_user(exe, config_path, config),
-        ServiceTarget::FreebsdRc => render_freebsd_rc(exe, config_path),
-        ServiceTarget::OpenbsdRc => render_openbsd_rc(exe, config_path),
+        ServiceTarget::FreebsdRc => render_freebsd_rc(exe, config_path, config),
+        ServiceTarget::OpenbsdRc => render_openbsd_rc(exe, config_path, config),
     }
 }
 
@@ -71,35 +71,39 @@ pub fn install(
         ServiceTarget::SystemdUser => {
             let path = path_override
                 .map(Path::to_path_buf)
-                .unwrap_or_else(systemd_user_path);
+                .unwrap_or_else(|| systemd_user_path(config));
             write_service_file(&path, &render_systemd_user(exe, config_path, config), force)?;
             if load {
                 systemctl_user(&["daemon-reload"])?;
-                systemctl_user(&["enable", "--now", SYSTEMD_UNIT])?;
+                let unit = systemd_unit(config);
+                systemctl_user(&["enable", "--now", &unit])?;
             }
             Ok(path)
         }
         ServiceTarget::FreebsdRc => {
             let path = path_override
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("/usr/local/etc/rc.d/agentnoise"));
-            write_service_file(&path, &render_freebsd_rc(exe, config_path), force)?;
+                .unwrap_or_else(|| PathBuf::from("/usr/local/etc/rc.d").join(service_name(config)));
+            write_service_file(&path, &render_freebsd_rc(exe, config_path, config), force)?;
             make_executable(&path)?;
             if load {
-                run_command("sysrc", &["agentnoise_enable=YES"])?;
-                run_command("service", &["agentnoise", "start"])?;
+                let rcvar = freebsd_rcvar(config);
+                run_command("sysrc", &[&format!("{rcvar}_enable=YES")])?;
+                let service = service_name(config);
+                run_command("service", &[&service, "start"])?;
             }
             Ok(path)
         }
         ServiceTarget::OpenbsdRc => {
             let path = path_override
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("/etc/rc.d/agentnoise"));
-            write_service_file(&path, &render_openbsd_rc(exe, config_path), force)?;
+                .unwrap_or_else(|| PathBuf::from("/etc/rc.d").join(service_name(config)));
+            write_service_file(&path, &render_openbsd_rc(exe, config_path, config), force)?;
             make_executable(&path)?;
             if load {
-                run_command("rcctl", &["enable", "agentnoise"])?;
-                run_command("rcctl", &["start", "agentnoise"])?;
+                let service = service_name(config);
+                run_command("rcctl", &["enable", &service])?;
+                run_command("rcctl", &["start", &service])?;
             }
             Ok(path)
         }
@@ -108,21 +112,23 @@ pub fn install(
 
 pub fn uninstall(
     target: ServiceTarget,
+    config: &Config,
     unload: bool,
     path_override: Option<&Path>,
 ) -> Result<Option<PathBuf>> {
     match target {
         ServiceTarget::Launchd => {
-            let removed = launchd::uninstall(unload)?;
-            Ok(removed.then(launchd::plist_path))
+            let removed = launchd::uninstall(config, unload)?;
+            Ok(removed.then(|| launchd::plist_path(config)))
         }
         ServiceTarget::SystemdUser => {
+            let unit = systemd_unit(config);
             if unload {
-                systemctl_user(&["disable", "--now", SYSTEMD_UNIT]).ok();
+                systemctl_user(&["disable", "--now", &unit]).ok();
             }
             let path = path_override
                 .map(Path::to_path_buf)
-                .unwrap_or_else(systemd_user_path);
+                .unwrap_or_else(|| systemd_user_path(config));
             if path.exists() {
                 fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
                 systemctl_user(&["daemon-reload"]).ok();
@@ -132,33 +138,47 @@ pub fn uninstall(
             }
         }
         ServiceTarget::FreebsdRc => {
+            let service = service_name(config);
             if unload {
-                run_command("service", &["agentnoise", "stop"]).ok();
+                run_command("service", &[&service, "stop"]).ok();
             }
             let path = path_override
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("/usr/local/etc/rc.d/agentnoise"));
+                .unwrap_or_else(|| PathBuf::from("/usr/local/etc/rc.d").join(service));
             remove_if_present(path)
         }
         ServiceTarget::OpenbsdRc => {
+            let service = service_name(config);
             if unload {
-                run_command("rcctl", &["stop", "agentnoise"]).ok();
-                run_command("rcctl", &["disable", "agentnoise"]).ok();
+                run_command("rcctl", &["stop", &service]).ok();
+                run_command("rcctl", &["disable", &service]).ok();
             }
             let path = path_override
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("/etc/rc.d/agentnoise"));
+                .unwrap_or_else(|| PathBuf::from("/etc/rc.d").join(service));
             remove_if_present(path)
         }
     }
 }
 
-pub fn systemd_user_path() -> PathBuf {
+pub fn service_name(config: &Config) -> String {
+    config
+        .instance
+        .as_deref()
+        .map(|instance| format!("agentnoise-{instance}"))
+        .unwrap_or_else(|| "agentnoise".to_string())
+}
+
+pub fn systemd_unit(config: &Config) -> String {
+    format!("{}.service", service_name(config))
+}
+
+pub fn systemd_user_path(config: &Config) -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| expand_tilde("~/.config"))
         .join("systemd/user")
-        .join(SYSTEMD_UNIT)
+        .join(systemd_unit(config))
 }
 
 fn render_systemd_user(exe: &Path, config_path: &Path, config: &Config) -> String {
@@ -187,47 +207,54 @@ WantedBy=default.target
     )
 }
 
-fn render_freebsd_rc(exe: &Path, config_path: &Path) -> String {
+fn render_freebsd_rc(exe: &Path, config_path: &Path, config: &Config) -> String {
+    let service = service_name(config);
+    let rcvar = freebsd_rcvar(config);
     format!(
         r#"#!/bin/sh
 #
-# PROVIDE: agentnoise
+# PROVIDE: {rcvar}
 # REQUIRE: NETWORKING LOGIN
 # KEYWORD: shutdown
 #
 # Add this to /etc/rc.conf:
-# agentnoise_enable="YES"
-# agentnoise_user="your-user"
+# {rcvar}_enable="YES"
+# {rcvar}_user="your-user"
 
 . /etc/rc.subr
 
-name="agentnoise"
-rcvar="agentnoise_enable"
+name="{service}"
+rcvar="{rcvar}_enable"
 
 load_rc_config "$name"
 
-: ${{agentnoise_enable:="NO"}}
-: ${{agentnoise_user:="agentnoise"}}
-: ${{agentnoise_command:={exe}}}
-: ${{agentnoise_config:={config_path}}}
-: ${{agentnoise_path:="{path_env}"}}
+: ${{{rcvar}_enable:="NO"}}
+: ${{{rcvar}_user:="agentnoise"}}
+: ${{{rcvar}_command:={exe}}}
+: ${{{rcvar}_config:={config_path}}}
+: ${{{rcvar}_path:="{path_env}"}}
 
 pidfile="/var/run/${{name}}.pid"
-procname="${{agentnoise_command}}"
+procname="${{{rcvar}_command}}"
 command="/usr/sbin/daemon"
-command_args="-f -p ${{pidfile}} -u ${{agentnoise_user}} /usr/bin/env PATH=${{agentnoise_path}} \"${{agentnoise_command}}\" --config \"${{agentnoise_config}}\" up"
+command_args="-f -p ${{pidfile}} -u ${{{rcvar}_user}} /usr/bin/env PATH=${{{rcvar}_path}} \"${{{rcvar}_command}}\" --config \"${{{rcvar}_config}}\" up"
 
 run_rc_command "$1"
 "#,
         exe = shell_quote(&exe.display().to_string()),
         config_path = shell_quote(&config_path.display().to_string()),
         path_env = default_service_path(),
+        service = service,
+        rcvar = rcvar,
     )
 }
 
-fn render_openbsd_rc(exe: &Path, config_path: &Path) -> String {
+fn render_openbsd_rc(exe: &Path, config_path: &Path, config: &Config) -> String {
+    let service = service_name(config);
     format!(
         r#"#!/bin/ksh
+
+# {service}
 
 daemon={exe}
 daemon_flags="--config {config_path} up"
@@ -244,7 +271,12 @@ rc_cmd "$1"
         exe = shell_quote(&exe.display().to_string()),
         config_path = shell_quote(&config_path.display().to_string()),
         path_env = default_service_path(),
+        service = service,
     )
+}
+
+fn freebsd_rcvar(config: &Config) -> String {
+    service_name(config).replace('-', "_")
 }
 
 fn write_service_file(path: &Path, text: &str, force: bool) -> Result<()> {
@@ -349,6 +381,15 @@ mod tests {
     }
 
     #[test]
+    fn named_instance_uses_distinct_service_names() {
+        let config = Config::template_for_instance("alice");
+
+        assert_eq!(service_name(&config), "agentnoise-alice");
+        assert_eq!(systemd_unit(&config), "agentnoise-alice.service");
+        assert!(systemd_user_path(&config).ends_with("agentnoise-alice.service"));
+    }
+
+    #[test]
     fn install_creates_runtime_dirs_before_writing_service() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
@@ -376,9 +417,11 @@ mod tests {
 
     #[test]
     fn freebsd_rc_uses_daemon_supervisor() {
+        let config = Config::template();
         let rc = render_freebsd_rc(
             Path::new("/usr/local/bin/agentnoise"),
             Path::new("/usr/local/etc/agentnoise/config.toml"),
+            &config,
         );
         assert!(rc.contains("PROVIDE: agentnoise"));
         assert!(rc.contains("/usr/sbin/daemon"));
@@ -387,9 +430,11 @@ mod tests {
 
     #[test]
     fn openbsd_rc_uses_rc_subr() {
+        let config = Config::template();
         let rc = render_openbsd_rc(
             Path::new("/usr/local/bin/agentnoise"),
             Path::new("/etc/agentnoise/config.toml"),
+            &config,
         );
         assert!(rc.contains("/etc/rc.d/rc.subr"));
         assert!(rc.contains("daemon_flags=\"--config"));

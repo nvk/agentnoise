@@ -58,6 +58,13 @@ enum PairingDisplay {
 struct Cli {
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help = "Use a named isolated instance with separate config, data, logs, keychain, and service"
+    )]
+    instance: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -463,7 +470,18 @@ enum ServiceCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse_from(normalized_cli_args());
-    let config_path = Config::path_or_default(cli.config);
+    if cli.config.is_some() && cli.instance.is_some() {
+        bail!("--instance cannot be combined with --config");
+    }
+    let instance = cli
+        .instance
+        .as_deref()
+        .map(|name| {
+            agentnoise::paths::normalize_instance_name(name)
+                .with_context(|| format!("invalid instance name: {name}"))
+        })
+        .transpose()?;
+    let config_path = Config::path_or_default(cli.config, instance.as_deref());
 
     match cli.command {
         Command::Init(args) => {
@@ -554,7 +572,11 @@ fn main() -> Result<()> {
         }
         Command::Config(args) => match args.command {
             ConfigCommand::Path => println!("{}", config_path.display()),
-            ConfigCommand::PrintTemplate => println!("{}", Config::template_toml()?),
+            ConfigCommand::PrintTemplate => println!(
+                "{}",
+                toml::to_string_pretty(&Config::template_for_path(&config_path))
+                    .context("serializing template config")?
+            ),
             ConfigCommand::Launcher { launcher } => {
                 let mut config = Config::load_or_template(&config_path)?;
                 config.runner.launcher = launcher;
@@ -652,9 +674,10 @@ fn main() -> Result<()> {
                 println!("installed {}", path.display());
             }
             LaunchdCommand::Uninstall { unload } => {
-                let removed = launchd::uninstall(unload)?;
+                let config = Config::load_or_template(&config_path)?;
+                let removed = launchd::uninstall(&config, unload)?;
                 if removed {
-                    println!("removed {}", launchd::plist_path().display());
+                    println!("removed {}", launchd::plist_path(&config).display());
                 } else {
                     println!("not installed");
                 }
@@ -1033,7 +1056,8 @@ fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
             path,
         } => {
             let target = target.unwrap_or_else(service::default_target);
-            match service::uninstall(target, unload, path.as_deref())? {
+            let config = Config::load_or_template(config_path)?;
+            match service::uninstall(target, &config, unload, path.as_deref())? {
                 Some(path) => println!("removed {}", path.display()),
                 None => println!("not installed"),
             }

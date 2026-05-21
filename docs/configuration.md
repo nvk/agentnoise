@@ -15,10 +15,37 @@ On macOS/Homebrew the normal config is under:
 ~/Library/Application Support/agentnoise/config.toml
 ```
 
+Named instances use isolated config roots. This is the recommended setup when
+multiple people share one machine:
+
+```sh
+agentnoise --instance alice config path
+agentnoise --instance bob config path
+```
+
+```text
+~/Library/Application Support/agentnoise/instances/alice/config.toml
+~/Library/Application Support/agentnoise/instances/bob/config.toml
+```
+
+The generated Alice/Bob configs also get separate data dirs, log dirs, keychain
+services, worktree dirs, service names, White Noise profile names, and default
+`sandbox` repo paths. That is stronger than pairing two phone npubs to one
+global config, because the global config shares repos and launcher policy.
+
 Restart after edits:
 
 ```sh
 brew services restart nvk/tap/agentnoise
+```
+
+For a named instance installed through `agentnoise service install`, restart
+the native service name instead. On Linux that is `agentnoise-alice.service`.
+On macOS, unload/load the generated LaunchAgent label such as
+`com.agentnoise.agentnoise.alice`, or rerun:
+
+```sh
+agentnoise --instance alice service install --target launchd --force --load
 ```
 
 ## Agent Launcher
@@ -167,6 +194,18 @@ Use from White Noise:
 /use site
 /cd src
 /codex fix the failing test
+```
+
+For multi-tenant hosts, keep each person's default `sandbox` repo under that
+person's instance root, or configure only the repos that person should reach.
+Example:
+
+```toml
+instance = "alice"
+
+[[repos]]
+alias = "sandbox"
+path = "~/Library/Application Support/agentnoise/instances/alice/sandbox"
 ```
 
 ## Local Session Visibility

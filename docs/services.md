@@ -31,6 +31,21 @@ agentnoise service uninstall --target launchd --unload
 
 `agentnoise launchd ...` remains as a macOS-specific compatibility command.
 
+For multiple isolated helpers on one machine, install named instances instead
+of sharing one service:
+
+```sh
+agentnoise --instance alice service install --target launchd --force --load
+agentnoise --instance bob service install --target launchd --force --load
+```
+
+Those write separate LaunchAgents:
+
+```text
+~/Library/LaunchAgents/com.agentnoise.agentnoise.alice.plist
+~/Library/LaunchAgents/com.agentnoise.agentnoise.bob.plist
+```
+
 Current Codex CLI releases do not run reliably when `codex exec` is launched
 directly by launchd. They can start and then produce no output forever. The
 macOS service is still useful for White Noise daemon/login startup, pairing,
@@ -67,6 +82,13 @@ The generated unit is written to:
 ~/.config/systemd/user/agentnoise.service
 ```
 
+Named instances write named units:
+
+```sh
+agentnoise --instance alice service install --target systemd-user --force --load
+systemctl --user status agentnoise-alice.service
+```
+
 For packagers, start from:
 
 ```text
@@ -96,6 +118,9 @@ agentnoise service print --target freebsd-rc
 agentnoise service install --target freebsd-rc --force
 ```
 
+Named instances use separate script names and rc variables, for example
+`/usr/local/etc/rc.d/agentnoise-alice` with `agentnoise_alice_enable`.
+
 ## OpenBSD
 
 Install the rc.d script:
@@ -116,6 +141,9 @@ The CLI can also render it:
 ```sh
 agentnoise service print --target openbsd-rc
 ```
+
+Named instances render separate rc.d script names such as
+`/etc/rc.d/agentnoise-alice`.
 
 ## First Pairing
 

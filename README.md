@@ -423,6 +423,46 @@ To open another independent session, create another White Noise chat with the
 same agentnoise desktop identity. The running listener discovers visible chats
 periodically; each chat has separate `/use`, `/cd`, and prompt context.
 
+### Multiple People on One Machine
+
+Use named instances when two people share one host but need separate phone
+pairing, desktop identities, keychain entries, services, logs, and sandboxes.
+Do not put both phone npubs in the same `allowed_senders` list unless they are
+intentionally sharing the same repos and launcher policy.
+
+Example with Alice and Bob:
+
+```sh
+agentnoise --instance alice up --ssh --name frontier-alice
+agentnoise --instance bob up --ssh --name frontier-bob
+```
+
+Each instance gets its own default config:
+
+```text
+~/Library/Application Support/agentnoise/instances/alice/config.toml
+~/Library/Application Support/agentnoise/instances/bob/config.toml
+```
+
+Each generated config uses a separate keychain service, data directory, log
+directory, worktree directory, White Noise profile name, and default sandbox:
+
+```text
+agentnoise-alice -> ~/Library/Application Support/agentnoise/instances/alice/sandbox
+agentnoise-bob   -> ~/Library/Application Support/agentnoise/instances/bob/sandbox
+```
+
+Install separate services after each instance is paired:
+
+```sh
+agentnoise --instance alice service install --target launchd --force --load
+agentnoise --instance bob service install --target launchd --force --load
+```
+
+On Linux the user units are named `agentnoise-alice.service` and
+`agentnoise-bob.service`; on macOS the LaunchAgent labels are
+`com.agentnoise.agentnoise.alice` and `com.agentnoise.agentnoise.bob`.
+
 If `wn`/`wnd` are not already packaged beside `agentnoise`, install them under agentnoise's managed data directory:
 
 ```sh

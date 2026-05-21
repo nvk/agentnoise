@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub const APP_NAME: &str = "agentnoise";
+pub const INSTANCES_DIR: &str = "instances";
 
 pub fn default_data_dir() -> PathBuf {
     dirs::data_dir()
@@ -17,6 +18,51 @@ pub fn default_log_dir() -> PathBuf {
 
 pub fn default_config_path() -> PathBuf {
     default_data_dir().join("config.toml")
+}
+
+pub fn normalize_instance_name(name: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut last_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            output.push('-');
+            last_dash = true;
+        }
+    }
+    let output = output.trim_matches('-').to_string();
+    (!output.is_empty()).then_some(output)
+}
+
+pub fn instance_root(name: &str) -> PathBuf {
+    default_data_dir().join(INSTANCES_DIR).join(name)
+}
+
+pub fn instance_config_path(name: &str) -> PathBuf {
+    instance_root(name).join("config.toml")
+}
+
+pub fn instance_data_dir(name: &str) -> PathBuf {
+    instance_root(name).join("data")
+}
+
+pub fn instance_log_dir(name: &str) -> PathBuf {
+    default_log_dir().join(INSTANCES_DIR).join(name)
+}
+
+pub fn instance_name_from_config_path(path: &Path) -> Option<String> {
+    let instances_root = default_data_dir().join(INSTANCES_DIR);
+    let relative = path.strip_prefix(instances_root).ok()?;
+    let mut components = relative.components();
+    let name = components.next()?.as_os_str().to_str()?;
+    let config = components.next()?.as_os_str().to_str()?;
+    if config == "config.toml" && components.next().is_none() {
+        Some(name.to_string())
+    } else {
+        None
+    }
 }
 
 pub fn default_service_path() -> String {

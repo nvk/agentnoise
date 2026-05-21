@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added named instances for safer multi-tenant hosts. `agentnoise --instance
+  alice ...` and `agentnoise --instance bob ...` now resolve to separate
+  config roots, generated data/log/worktree dirs, keychain services, White
+  Noise profile names, and native service names.
+
 ## 0.1.25 - 2026-05-20
 
 - Added work-chat bare replies. The primary paired chat remains an inbox that

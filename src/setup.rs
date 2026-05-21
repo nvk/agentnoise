@@ -46,7 +46,7 @@ pub struct SetupResult {
 pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     let created_config = !config_path.exists();
     let mut config = if created_config {
-        Config::template()
+        Config::template_for_path(config_path)
     } else {
         Config::load(config_path)?
     };
