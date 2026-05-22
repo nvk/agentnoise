@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.1.27 - 2026-05-21
+
+- Refresh pending White Noise group proposals immediately when a reply send
+  fails with `pending proposal exists`, so the normal retry loop can recover
+  faster instead of only sleeping.
+- Log the active listener PID while non-interactive service startup waits on
+  an existing engine lock, making stale foreground/tmux listeners visible in
+  service logs.
+- Capture fake-phone `wnd` stdout/stderr and report early daemon exits with a
+  log excerpt, instead of timing out on a missing socket with no cause.
+
+## 0.1.26 - 2026-05-20
+
+- Added named instances for safer multi-tenant hosts. `agentnoise --instance
+  alice ...` and `agentnoise --instance bob ...` now resolve to separate
+  config roots, generated data/log/worktree dirs, keychain services, White
+  Noise profile names, and native service names.
+- Added White Noise subscription reconciliation. `agentnoise up` now keeps a
+  subscription health snapshot, polls recent group history as a watchdog,
+  recovers missed inbound messages, and restarts stale `wn messages subscribe`
+  children instead of leaving phone commands accepted but unanswered.
+- Added subscription health to `/status` and `agentnoise status` so stale or
+  restarting chat listeners are visible during debugging.
+
+## 0.1.25 - 2026-05-20
+
+- Added work-chat bare replies. The primary paired chat remains an inbox that
+  requires slash commands, but non-inbox work chats remember the agent/profile
+  and wiki prefix that created or last explicitly ran in them. Plain text in
+  those chats now continues with the remembered mode and workspace.
+
 ## 0.1.24 - 2026-05-18
 
 - Cleaned up White Noise chat output for phones. Startup hellos, job accepted
