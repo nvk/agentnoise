@@ -33,12 +33,14 @@ release:
     cargo build --release
 
 # Build (release) then run an isolated local-dev listener with debug logs.
+# Dev instances use direct agents so a clean reset does not require bondage.
 up instance=dev_instance: release
-    AGENTNOISE_LOG="${AGENTNOISE_LOG:-{{ dev_log_filter }}}" ./target/release/agentnoise --instance "{{ instance }}" up
+    AGENTNOISE_LOG="${AGENTNOISE_LOG:-{{ dev_log_filter }}}" ./target/release/agentnoise --instance "{{ instance }}" up --direct-agents
 
 # Build (release) then run an isolated local-dev listener quietly.
+# Dev instances use direct agents so a clean reset does not require bondage.
 up-quiet instance=dev_instance: release
-    ./target/release/agentnoise --instance "{{ instance }}" up
+    ./target/release/agentnoise --instance "{{ instance }}" up --direct-agents
 
 # Build (release) then run the default instance from this checkout.
 # Stop the packaged/default service first, or this will contend for its lock.
@@ -66,7 +68,7 @@ reset-dev instance=dev_instance:
     rm -rf "$data_root"
     echo "agentnoise reset-dev: removing log dir   → $log_dir"
     rm -rf "$log_dir"
-    echo "agentnoise reset-dev: done — next \`just up {{ instance }}\` starts that instance cleanly."
+    echo "agentnoise reset-dev: done — next \`just up {{ instance }}\` starts that instance cleanly with --direct-agents."
 
 # Wipe one named local-dev instance, then build + start it fresh.
 fresh-dev instance=dev_instance: (reset-dev instance) (up instance)
@@ -89,7 +91,7 @@ reset:
     rm -rf "$data_dir"
     echo "agentnoise reset: removing log dir  → $log_dir"
     rm -rf "$log_dir"
-    echo "agentnoise reset: done — next \`just up\` starts from a clean slate."
+    echo "agentnoise reset: done — next \`just up\` starts the dev instance from a clean slate with --direct-agents."
 
 # Wipe the default instance, then build + start the default instance fresh.
 fresh: reset up-default

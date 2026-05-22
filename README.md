@@ -286,7 +286,9 @@ diagnostic, not proof that the agent ignored the command.
 ### Development Mode
 
 Local development still uses the embedded Marmot v2 engine and the OS keychain.
-For smoke tests that should not launch through bondage profiles, initialize a
+The checked-in `just up` / `just up-quiet` dev recipes pass `--direct-agents`, so
+`just reset` followed by `just up` does not require a local bondage config. For
+other smoke tests that should not launch through bondage profiles, initialize a
 temporary config with `agentnoise init --direct-agents` and point its data, log,
 and worktree directories at a throwaway temp directory.
 

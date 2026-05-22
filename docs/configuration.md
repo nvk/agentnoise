@@ -43,13 +43,15 @@ checkout as a named development instance:
 
 ```sh
 brew services start nvk/tap/agentnoise
-just up              # uses --instance dev and debug logs
-just up-quiet dev    # same dev instance without debug logs
+just up              # uses --instance dev, --direct-agents, and debug logs
+just up-quiet dev    # same direct-agent dev instance without debug logs
 ```
 
 The phone sees these as separate Agent Noise identities/groups. Pair the dev
 instance once, then use that dev chat for checkout testing while the release
-service keeps running normally.
+service keeps running normally. The checked-in dev recipes force direct-agent
+mode so `just reset` followed by `just up` does not require a local bondage
+config.
 
 Restart after edits:
 
