@@ -16,12 +16,6 @@ brew services stop nvk/tap/agentnoise
 agentnoise up --ssh --phone npub1... --name agentnoise-mbp
 ```
 
-For disposable remote testing where keychain prompts get in the way:
-
-```sh
-agentnoise up --ssh --phone npub1... --name agentnoise-test --dev-burner-nsec
-```
-
 What happens:
 
 1. agentnoise creates or reuses a desktop keypair on the remote machine.
@@ -53,7 +47,8 @@ agentnoise up --ssh --phone npub1... --name agentnoise-freebsd
 
 The display name is saved in `config.toml` and published as the Nostr profile
 (kind 0) by the embedded Marmot v2 engine on next startup. The normalized
-profile `name` is also saved.
+profile `name` is also saved. `identity rename` publishes immediately when a
+local desktop account already exists; pass `--no-publish` to save config only.
 
 After setup, inspect or rename the current desktop identity without passing a
 phone `npub`:
@@ -64,9 +59,7 @@ agentnoise identity rename agentnoise-labbox
 ```
 
 `identity status` reads the stored public account from config when available,
-so it does not need the desktop `nsec`. `identity rename` saves the new machine
-label; the embedded Marmot v2 engine publishes the updated profile when the
-listener starts (or via `--no-publish` to save only).
+so it does not need the desktop `nsec`.
 
 ## Message Relays
 
@@ -80,11 +73,8 @@ agentnoise darkmatter probe --relay wss://relay.primal.net
 
 ## Secret Handling
 
-Do not pass an `nsec` over SSH for normal setup. If you need to import an
-existing identity, pass it only through stdin to `agentnoise keychain
-store-nsec`; never put it in an argument, environment variable, shell history,
-or QR code.
-
-For headless or unreliable keychain environments, `--dev-burner-nsec` uses a
-local `0600` plaintext file under the agentnoise data dir. It is practical for
-throwaway remote testing, not for a valuable long-lived identity.
+Do not pass an `nsec` over SSH for normal setup. agentnoise creates a remote
+desktop identity locally and stores it through the platform credential store.
+If the remote host cannot provide an unlocked keychain or Secret Service for the
+service account, run the listener in the foreground user session or fix that
+credential-store access before relying on unattended restart.

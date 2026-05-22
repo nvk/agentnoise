@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -8,7 +9,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentnoise::app::{AgentApp, RouteAction};
+use agentnoise::app::{AgentApp, NewSessionRequest, RouteAction};
 use agentnoise::auth::PairingGate;
 use agentnoise::config::{Config, RunnerLauncher};
 use agentnoise::darkmatter_app::DarkmatterEngine;
@@ -788,12 +789,56 @@ fn rename_identity_profile(
         return Ok(());
     }
 
-    // The embedded engine publishes the user profile (Nostr kind 0) on
-    // listener startup via `runtime.publish_user_profile`. We don't have
-    // a long-lived engine here, so we just note that the publish happens
-    // on next listen.
-    println!("profile: saved; restart `agentnoise listen` to publish the new label to relays");
+    publish_identity_profile(config)?;
+    println!("profile: saved and published");
     Ok(())
+}
+
+fn publish_identity_profile(config: &Config) -> Result<()> {
+    let Some(account_ref) = config
+        .darkmatter
+        .account
+        .as_deref()
+        .or(config.darkmatter.bot_npub.as_deref())
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+    else {
+        bail!(
+            "profile saved, but no desktop identity is configured yet; run `agentnoise setup` or `agentnoise listen` once"
+        );
+    };
+
+    let bootstrap_relays = config.darkmatter.message_relays.clone();
+    if bootstrap_relays.is_empty() {
+        bail!("profile saved, but darkmatter.message_relays is empty; cannot publish profile");
+    }
+
+    let dm_home = config.resolved_data_dir().join("darkmatter");
+    let keychain_service =
+        agentnoise::darkmatter_app::keychain_service_for_instance(config.instance.as_deref());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for profile publish")?;
+
+    runtime.block_on(async {
+        let engine = DarkmatterEngine::open(dm_home, bootstrap_relays, &keychain_service)?;
+        engine.start().await?;
+        let result = async {
+            let Some(account) = engine.find_account(account_ref)? else {
+                bail!(
+                    "profile saved, but configured darkmatter account was not found in the local keychain/home"
+                );
+            };
+            engine
+                .publish_configured_profile(&account.account_id_hex, &config.darkmatter)
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        engine.shutdown().await;
+        result
+    })
 }
 
 fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
@@ -1345,6 +1390,11 @@ fn run_listener(
     let account_id_hex = tokio_handle
         .block_on(engine.ensure_account(config.darkmatter.account.as_deref(), &bootstrap_relays))?;
     eprintln!("agentnoise: darkmatter account ready: {account_id_hex}");
+    if let Err(error) = tokio_handle
+        .block_on(engine.publish_configured_profile(&account_id_hex, &config.darkmatter))
+    {
+        eprintln!("agentnoise: failed to publish darkmatter profile: {error:#}");
+    }
 
     if let Some(pairing_runtime) = pairing.clone() {
         spawn_pairing_pin_display(config.clone(), pairing_runtime);
@@ -1384,38 +1434,21 @@ fn run_listener(
     }
 
     let (tx, rx) = mpsc::channel::<agentnoise::dm::MessageEvent>();
+    let subscribed_groups = Arc::new(Mutex::new(
+        group_ids.iter().cloned().collect::<HashSet<_>>(),
+    ));
     for group_id in &group_ids {
-        let dm_clone = Arc::clone(&dm);
-        let tx_clone = tx.clone();
-        let group_id = group_id.clone();
-        tokio_handle.spawn(async move {
-            let mut subscription = match dm_clone.subscribe_group(&group_id).await {
-                Ok(subscription) => subscription,
-                Err(error) => {
-                    eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
-                    return;
-                }
-            };
-            for event in subscription.snapshot() {
-                if tx_clone.send(event).is_err() {
-                    return;
-                }
-            }
-            while let Some(event) = subscription.next_message().await {
-                if tx_clone.send(event).is_err() {
-                    return;
-                }
-            }
-        });
+        spawn_group_subscription(&tokio_handle, Arc::clone(&dm), group_id.clone(), tx.clone());
     }
     spawn_local_session_watcher_simple(config_path, &config, &dm, &event_journal);
+    let subscription_tx = tx.clone();
     spawn_group_join_discovery(
         &tokio_handle,
         engine.clone(),
         Arc::clone(&dm),
         account_id_hex.clone(),
         config_path.to_path_buf(),
-        group_ids.iter().cloned().collect(),
+        Arc::clone(&subscribed_groups),
         tx.clone(),
     );
     drop(tx);
@@ -1460,19 +1493,127 @@ fn run_listener(
                     eprintln!("agentnoise: failed to send reply: {error:#}");
                 }
             }
-            RouteAction::NewSession(_) | RouteAction::ResumeSession(_) => {
-                let _ = dm.send_reply_to_blocking(
-                    &group_id,
-                    "agentnoise: parallel/resume sessions are not yet wired through darkmatter v2 (Phase 3 follow-up)",
-                );
+            RouteAction::NewSession(request) => {
+                match activate_darkmatter_session_group(
+                    &SessionGroupContext {
+                        config_path,
+                        app: app.as_ref(),
+                        engine: &engine,
+                        account_id_hex: &account_id_hex,
+                        subscription: GroupSubscriptionContext {
+                            tokio_handle: &tokio_handle,
+                            dm: &dm,
+                            tx: &subscription_tx,
+                            subscribed_groups: &subscribed_groups,
+                        },
+                    },
+                    &request,
+                ) {
+                    Ok(new_group_id) => {
+                        if let Err(error) = dm.send_reply_to_blocking(
+                            &group_id,
+                            &request.created_text_for_group(&new_group_id),
+                        ) {
+                            eprintln!("agentnoise: failed to send new-session ack: {error:#}");
+                        }
+                        if let Err(error) =
+                            dm.send_reply_to_blocking(&new_group_id, &request.ready_text())
+                        {
+                            eprintln!(
+                                "agentnoise: failed to send new-session ready message: {error:#}"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let _ = dm.send_reply_to_blocking(
+                            &group_id,
+                            &format!("Error: failed to create Darkmatter session chat: {error:#}"),
+                        );
+                    }
+                }
+            }
+            RouteAction::ResumeSession(request) => {
+                if let Err(error) = dm.send_reply_to_blocking(&group_id, &request.reply_text) {
+                    eprintln!("agentnoise: failed to send resume ack: {error:#}");
+                }
+                if let Err(error) =
+                    dm.send_reply_to_blocking(&request.group_id, &request.target_text)
+                {
+                    eprintln!("agentnoise: failed to send resume target message: {error:#}");
+                    let _ = dm.send_reply_to_blocking(
+                        &group_id,
+                        &format!(
+                            "agentnoise: failed to send resume message to target chat: {error:#}"
+                        ),
+                    );
+                }
             }
             RouteAction::Run(request) => {
+                let mut group = group_id.clone();
+                match app.job_session_request(
+                    event.group_id.as_deref(),
+                    event.sender.as_deref(),
+                    &request,
+                ) {
+                    Ok(Some(session_request)) => {
+                        match activate_darkmatter_session_group(
+                            &SessionGroupContext {
+                                config_path,
+                                app: app.as_ref(),
+                                engine: &engine,
+                                account_id_hex: &account_id_hex,
+                                subscription: GroupSubscriptionContext {
+                                    tokio_handle: &tokio_handle,
+                                    dm: &dm,
+                                    tx: &subscription_tx,
+                                    subscribed_groups: &subscribed_groups,
+                                },
+                            },
+                            &session_request,
+                        ) {
+                            Ok(new_group_id) => {
+                                let ack = app.run_ack_text(&request);
+                                if let Err(error) = dm.send_reply_to_blocking(
+                                    &group_id,
+                                    &session_request.job_started_text_for_group(&new_group_id),
+                                ) {
+                                    eprintln!(
+                                        "agentnoise: failed to send job session ack: {error:#}"
+                                    );
+                                }
+                                if let Err(error) = dm.send_reply_to_blocking(
+                                    &new_group_id,
+                                    &session_request.job_ready_text(&ack),
+                                ) {
+                                    eprintln!(
+                                        "agentnoise: failed to send job session ready message: {error:#}"
+                                    );
+                                }
+                                group = new_group_id;
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "agentnoise: failed to create job session chat: {error:#}"
+                                );
+                                let _ = dm.send_reply_to_blocking(
+                                    &group_id,
+                                    &format!(
+                                        "agentnoise: failed to create a parallel session chat; running here.\n{error:#}"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("agentnoise: failed to prepare job session chat: {error:#}");
+                    }
+                }
                 let app_clone = Arc::clone(&app);
                 let dm_clone = Arc::clone(&dm);
                 let event_journal_clone = Arc::clone(&event_journal);
                 let engine_clone = engine.clone();
                 let account_id_clone = account_id_hex.clone();
-                let group = group_id.clone();
                 let handle_clone = tokio_handle.clone();
                 thread::spawn(move || {
                     let job_id = uuid::Uuid::new_v4().to_string();
@@ -1619,17 +1760,115 @@ fn should_send_plain_final_reply(
     !stream_finalized || !streamed_progress || !stream_broker_finished
 }
 
+struct GroupSubscriptionContext<'a> {
+    tokio_handle: &'a tokio::runtime::Handle,
+    dm: &'a Arc<DmClient>,
+    tx: &'a mpsc::Sender<agentnoise::dm::MessageEvent>,
+    subscribed_groups: &'a Arc<Mutex<HashSet<String>>>,
+}
+
+struct SessionGroupContext<'a> {
+    config_path: &'a Path,
+    app: &'a AgentApp,
+    engine: &'a DarkmatterEngine,
+    account_id_hex: &'a str,
+    subscription: GroupSubscriptionContext<'a>,
+}
+
+fn activate_darkmatter_session_group(
+    context: &SessionGroupContext<'_>,
+    request: &NewSessionRequest,
+) -> Result<String> {
+    let group_id_hex = create_darkmatter_session_group(
+        context.subscription.tokio_handle,
+        context.engine,
+        context.account_id_hex,
+        request,
+    )?;
+    context
+        .app
+        .create_session_record(&group_id_hex, request.state.clone())?;
+    persist_discovered_group(context.config_path, &group_id_hex)?;
+    subscribe_group_if_new(&context.subscription, &group_id_hex);
+    Ok(group_id_hex)
+}
+
+fn create_darkmatter_session_group(
+    tokio_handle: &tokio::runtime::Handle,
+    engine: &DarkmatterEngine,
+    account_id_hex: &str,
+    request: &NewSessionRequest,
+) -> Result<String> {
+    let members = vec![request.sender.clone()];
+    let group_id = tokio_handle
+        .block_on(engine.runtime().create_group(
+            account_id_hex,
+            &request.group_name,
+            &members,
+            None,
+        ))
+        .map_err(|err| anyhow::anyhow!("darkmatter create_group: {err}"))?;
+    Ok(hex::encode(group_id.as_slice()))
+}
+
+fn subscribe_group_if_new(context: &GroupSubscriptionContext<'_>, group_id_hex: &str) -> bool {
+    let inserted = match context.subscribed_groups.lock() {
+        Ok(mut subscribed_groups) => subscribed_groups.insert(group_id_hex.to_string()),
+        Err(_) => {
+            eprintln!("agentnoise: group subscription lock poisoned");
+            false
+        }
+    };
+    if !inserted {
+        return false;
+    }
+    spawn_group_subscription(
+        context.tokio_handle,
+        Arc::clone(context.dm),
+        group_id_hex.to_string(),
+        context.tx.clone(),
+    );
+    true
+}
+
+fn spawn_group_subscription(
+    tokio_handle: &tokio::runtime::Handle,
+    dm: Arc<DmClient>,
+    group_id: String,
+    tx: mpsc::Sender<agentnoise::dm::MessageEvent>,
+) {
+    tokio_handle.spawn(async move {
+        let mut subscription = match dm.subscribe_group(&group_id).await {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
+                return;
+            }
+        };
+        for event in subscription.snapshot() {
+            if tx.send(event).is_err() {
+                return;
+            }
+        }
+        while let Some(event) = subscription.next_message().await {
+            if tx.send(event).is_err() {
+                return;
+            }
+        }
+    });
+}
+
 fn spawn_group_join_discovery(
     tokio_handle: &tokio::runtime::Handle,
     engine: DarkmatterEngine,
     dm: Arc<DmClient>,
     account_id_hex: String,
     config_path: PathBuf,
-    initial_group_ids: std::collections::HashSet<String>,
+    subscribed_groups: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<agentnoise::dm::MessageEvent>,
 ) {
     let mut events = engine.runtime().subscribe();
-    let mut subscribed_groups = initial_group_ids;
+    let subscription_handle = tokio_handle.clone();
     tokio_handle.spawn(async move {
         loop {
             let event = match events.recv().await {
@@ -1649,7 +1888,15 @@ fn spawn_group_join_discovery(
                 continue;
             }
             let group_id_hex = hex::encode(group_id.as_slice());
-            if !subscribed_groups.insert(group_id_hex.clone()) {
+            if !subscribe_group_if_new(
+                &GroupSubscriptionContext {
+                    tokio_handle: &subscription_handle,
+                    dm: &dm,
+                    tx: &tx,
+                    subscribed_groups: &subscribed_groups,
+                },
+                &group_id_hex,
+            ) {
                 continue;
             }
             eprintln!("agentnoise: joined group {group_id_hex} via darkmatter welcome");
@@ -1658,30 +1905,6 @@ fn spawn_group_join_discovery(
                     "agentnoise: failed to persist discovered group {group_id_hex}: {error:#}"
                 );
             }
-            let dm_inner = Arc::clone(&dm);
-            let tx_inner = tx.clone();
-            let group_id_hex_inner = group_id_hex.clone();
-            tokio::spawn(async move {
-                let mut subscription = match dm_inner.subscribe_group(&group_id_hex_inner).await {
-                    Ok(subscription) => subscription,
-                    Err(error) => {
-                        eprintln!(
-                            "agentnoise: failed to subscribe to {group_id_hex_inner}: {error:#}"
-                        );
-                        return;
-                    }
-                };
-                for event in subscription.snapshot() {
-                    if tx_inner.send(event).is_err() {
-                        return;
-                    }
-                }
-                while let Some(event) = subscription.next_message().await {
-                    if tx_inner.send(event).is_err() {
-                        return;
-                    }
-                }
-            });
         }
     });
 }

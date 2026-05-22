@@ -7,15 +7,19 @@
 //! fresh identity, then starts the runtime workers.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use cgka_traits::TransportEndpoint;
 use marmot_account::AccountHome;
 use marmot_app::{
-    AccountSetupRequest, AccountSetupResult, ManagedAccount, MarmotApp, MarmotAppRuntime,
+    AccountRelayListBootstrap, AccountSetupRequest, AccountSetupResult, ManagedAccount, MarmotApp,
+    MarmotAppRuntime, UserProfileMetadata,
 };
 use nostr::PublicKey;
 use nostr::nips::nip19::FromBech32;
+
+use crate::config::DarkmatterConfig;
 
 /// Normalize an account reference (npub or hex) to the lowercase
 /// `account_id_hex` form marmot-app uses for `ManagedAccount`. A bech32 `npub`
@@ -161,6 +165,56 @@ impl DarkmatterEngine {
             .map_err(|err| anyhow::anyhow!("darkmatter create_identity: {err}"))?;
         Ok(result.account.account_id_hex)
     }
+
+    /// Publish the configured Nostr kind:0 profile for the managed desktop
+    /// account. The profile is intentionally derived from agentnoise config so
+    /// setup, listener startup, and `identity rename` all publish the same
+    /// local machine identity.
+    pub async fn publish_configured_profile(
+        &self,
+        account_id_hex: &str,
+        config: &DarkmatterConfig,
+    ) -> Result<UserProfileMetadata> {
+        if config.message_relays.is_empty() {
+            bail!("publish_configured_profile requires at least one relay url");
+        }
+        let relays: Vec<TransportEndpoint> = config
+            .message_relays
+            .iter()
+            .map(|url| TransportEndpoint(url.clone()))
+            .collect();
+        let bootstrap = AccountRelayListBootstrap::new(relays.clone(), relays);
+        let profile = configured_profile_metadata(config, current_unix_seconds());
+        self.runtime
+            .publish_user_profile(account_id_hex, profile, bootstrap)
+            .await
+            .map_err(|err| anyhow::anyhow!("darkmatter publish_user_profile: {err}"))
+    }
+}
+
+fn configured_profile_metadata(config: &DarkmatterConfig, created_at: u64) -> UserProfileMetadata {
+    UserProfileMetadata {
+        name: non_empty_profile_field(&config.profile_name),
+        display_name: non_empty_profile_field(&config.profile_display_name),
+        about: non_empty_profile_field(&config.profile_about),
+        picture: None,
+        nip05: None,
+        lud16: None,
+        created_at,
+        source_relays: Vec::new(),
+    }
+}
+
+fn non_empty_profile_field(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -189,5 +243,21 @@ mod tests {
             "agentnoise-alice"
         );
         assert_eq!(keychain_service_for_instance(Some("  ")), "agentnoise");
+    }
+
+    #[test]
+    fn configured_profile_metadata_uses_darkmatter_config_labels() {
+        let mut config = crate::config::Config::template().darkmatter;
+        config.profile_name = "desktop-one".to_string();
+        config.profile_display_name = "Desktop One".to_string();
+        config.profile_about = "Local helper".to_string();
+
+        let profile = configured_profile_metadata(&config, 123);
+
+        assert_eq!(profile.name.as_deref(), Some("desktop-one"));
+        assert_eq!(profile.display_name.as_deref(), Some("Desktop One"));
+        assert_eq!(profile.about.as_deref(), Some("Local helper"));
+        assert_eq!(profile.created_at, 123);
+        assert!(profile.source_relays.is_empty());
     }
 }

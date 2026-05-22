@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use nostr::PublicKey;
 use nostr::nips::nip19::ToBech32;
 
-use crate::config::{Config, RunnerLauncher};
+use crate::config::{Config, DarkmatterConfig, RunnerLauncher};
 use crate::darkmatter_app::DarkmatterEngine;
 use crate::identity::{self, DEFAULT_IDENTITY_NAME, PairingPayload};
 
@@ -80,6 +80,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         &keychain_service,
         options.force_identity,
         config.darkmatter.account.clone(),
+        config.darkmatter.clone(),
     )?;
 
     config.darkmatter.account = Some(npub.clone());
@@ -127,6 +128,7 @@ fn ensure_engine_identity(
     keychain_service: &str,
     _force: bool,
     previous_npub: Option<String>,
+    profile_config: DarkmatterConfig,
 ) -> Result<(String, bool)> {
     if bootstrap_relays.is_empty() {
         anyhow::bail!(
@@ -146,6 +148,9 @@ fn ensure_engine_identity(
             None => false,
         };
         let account_id_hex = engine.ensure_account(configured, &bootstrap_relays).await?;
+        engine
+            .publish_configured_profile(&account_id_hex, &profile_config)
+            .await?;
         engine.shutdown().await;
         let pk = PublicKey::from_hex(&account_id_hex).context("decoding account_id_hex")?;
         let npub = pk.to_bech32().context("encoding npub bech32")?;

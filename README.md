@@ -24,111 +24,13 @@ such alpha, much wow.
 
 ## Changelog
 
-**v0.1.24** - **Mobile chat cleanup and opt-in local session watch.** White
-Noise replies are shorter and more phone-readable: compact startup hellos,
-queue/final job replies, progress pings, status, help, session lists, and local
-agent session metadata. Job ids and local session ids can be referenced by
-short unique prefixes for `/tail`, `/cancel`, and `*-resume` commands. Added
-the opt-in local session watcher so `agentnoise config local-sessions-watch on`
-can notify the primary paired chat when same-account Codex/Claude metadata
-appears, while staying off by default for privacy.
+**v0.2.0** - **Dark Matter migration.** agentnoise now uses the embedded
+Darkmatter/Marmot v2 Rust runtime for account setup, profile publishing, group
+discovery, message send/subscribe, desktop-created work groups, and
+agent-text-stream lifecycle events. The legacy Marmot v1 command path was
+removed.
 
-**v0.1.23** - **Inbox sessions and stale group cleanup.** The primary paired
-chat now acts as an inbox: new `/codex`, `/claude`, `/hermes`, and `/wiki`
-jobs from that chat open a fresh White Noise work session named from the
-hostname and a short prompt summary, then progress and final output continue
-there. The fake-phone harness follows those handoff links, session open links
-are shown with shorter refs, and startup reconciles saved control chats against
-active White Noise groups so removed chats stop looking live.
-
-**v0.1.22** - **Service-mode and White Noise delivery fix.** Codex jobs now
-fail fast with a clear explanation when launched from macOS launchd/brew
-service contexts that make Codex hang before producing output. Direct Codex
-launches use a stable agentnoise data dir while still passing the selected
-workspace through `codex -C`, startup has a no-output watchdog/retry, removed
-White Noise groups are ignored, pending paired control chats are accepted, and
-reply send failures no longer kill the listener.
-
-**v0.1.21** - **Quiet-job chat pings.** Running jobs now send a visible
-`still running` message when Codex, Claude, Hermes, or the launcher stays alive
-but produces no new output. The ping includes `/tail <job>` and `/cancel <job>`
-so a phone user can inspect or stop the job instead of staring at an accepted
-command with no follow-up.
-
-**v0.1.20** - **Fake-phone E2E and Codex launch fix.** The fake-phone harness
-now waits for real command replies and final job output instead of passing on
-startup hellos or unrelated auth replies. Codex jobs also pass
-`--skip-git-repo-check`, which fixes phone-launched jobs in configured
-workspaces that are plain directories.
-
-**v0.1.16** - **Startup hello.** Once the listener is up, already-paired
-control chats get a timestamped `agentnoise is up` message with profile and
-workspace context. First-pairing mode stays quiet until the PIN succeeds.
-
-**v0.1.15** - **Homebrew service keychain prompt fix.** Service startup now
-waits longer for `wnd` to become ready and avoids a redundant second daemon
-startup check after setup. This prevents launchd keep-alive loops from
-repeatedly touching the macOS Keychain when White Noise startup is slow.
-
-**v0.1.14** - **Optional direct launcher and reliability polish.**
-`bondage` remains the default and recommended local policy boundary, but
-first-run commands can now opt into `runner.launcher = "direct"` with
-`--direct-agents`. Direct mode runs raw `codex`, `claude`, or optional
-`hermes` CLIs with structured argv and skips the `bondage` binary/config
-checks in `agentnoise doctor`. Session replies now spell out current chat,
-target chat, workspace, and next command more clearly for phone use.
-Live fake-phone tests and service diagnostics were tightened, and `status` /
-`doctor` avoid slow implicit keychain probes. A local White Noise send can still
-arrive on the phone late; the docs now call out how to separate local send
-success from phone sync/display lag.
-
-**v0.1.13** - **White Noise login detection fix.** `wn whoami` reports logged
-in accounts as hex pubkeys while agentnoise config stores the desktop account
-as `npub`. The startup check now normalizes both forms, so agentnoise only
-skips Keychain repair when the actual White Noise signing account is present.
-
-**v0.1.12** - **Service keychain startup fix.** `agentnoise up` now reuses the
-cached desktop `npub` from config for QR/profile setup instead of loading the
-desktop `nsec` on every service restart. Homebrew services should only touch
-the OS keychain when creating the identity or repairing a missing White Noise
-login. Keychain repair errors now explain the Terminal authorization step.
-
-**v0.1.11** - **Pairing identity fix.** Normalized Nostr sender identity
-checks across hex pubkeys and `npub` values. This stops agentnoise from
-treating its own White Noise replies as unpaired inbound messages when the
-desktop identity is stored as `npub` but White Noise reports authors as hex.
-Allowed phone senders also match across both forms.
-
-**v0.1.10** - **Reliability and identity polish.** Bare text, unknown
-commands, unauthorized senders, and startup catch-up events now get explicit
-phone replies instead of silent drops. Added reply send retries,
-`agentnoise identity status`, `agentnoise identity rename <name>`, and support
-for the common typo `agentnoise -- help`. Added configured White Noise message
-relays and `agentnoise whitenoise relays`/`ensure-relays` so message delivery
-can use a broader account relay set instead of only the QR discovery hints.
-
-**v0.1.9** - **Remote pairing polish.** Added SSH pairing mode with
-terminal-only PIN display, `--name` for per-machine White Noise/Nostr profile
-labels, and a remote SSH guide that passes the phone `npub` without moving any
-`nsec` over SSH.
-
-**v0.1.8** - **Parity hardening pass.** Added a fake phone harness for
-isolated White Noise testing, durable runtime event journaling, `agentnoise
-status`, progress messages from Codex/Claude JSON streams, approval replay for
-risky local profiles, attachment metadata capture, a direct `wnd` socket probe,
-`/agents`, opt-in git worktree sessions, and local release smoke checks.
-
-**v0.1.7** - **Optional Hermes backend.** Added `/hermes` and
-`/hermes-resume` as disabled-by-default commands that route Hermes through the
-same `bondage` local policy boundary used for Codex and Claude. Command
-parsing, config compatibility, command construction, doctor output, and
-packaging are tested; live Hermes CLI/runtime execution is still alpha and
-untested.
-
-**v0.1.6** - **Service console and dev burner identity.** `agentnoise up` can
-attach to an already-running Homebrew service as a local console instead of
-starting a second listener, and disposable development identities can use
-`--dev-burner-nsec` without repeated OS keychain prompts.
+Older release history lives in [docs/release-notes.md](docs/release-notes.md).
 
 ## What It Does
 
@@ -272,14 +174,10 @@ OS keychain, starts the embedded Marmot v2 engine, publishes the profile/key
 package, and opens the pairing window.
 
 After the desktop `npub` is written to config, service restarts use that public
-identity for QR/profile setup and avoid reading the `nsec` unless the engine
-needs to log in. The listener still requires a logged-in Marmot v2 signing
-account before it can send replies. If macOS blocks background Keychain access
-during repair, authorize it from Terminal once:
-
-```sh
-agentnoise keychain status
-```
+identity for QR/profile setup and avoid reading the `nsec` unless the embedded
+engine needs to sign relay events. If macOS blocks background Keychain access,
+run `agentnoise up` once from Terminal and approve the OS prompt for the
+`agentnoise` keychain service.
 
 Pair the phone:
 
@@ -385,24 +283,12 @@ or mobile sync path is delayed. Reopening the chat or restarting the local
 `agentnoise up` can flush old replies, but treat that as a transport
 diagnostic, not proof that the agent ignored the command.
 
-### Development Burner Identity
+### Development Mode
 
-For local development and throwaway relay testing, skip OS keychain prompts:
-
-```sh
-agentnoise up --dev-burner-nsec
-```
-
-That creates a burner `nsec` at
-`~/Library/Application Support/agentnoise/dev-burner.nsec`, sets
-`darkmatter.dev_burner_nsec = true`, and makes future `agentnoise up` or
-Homebrew service runs use that file instead of the OS keychain. This is
-plaintext by design. Do not use it for a real phone identity or a production
-desktop helper.
-
-This flag bypasses the agentnoise keychain store. The embedded Marmot v2 engine
-imports the nsec on startup and manages its own per-account SQLCipher state
-under `~/.local/agentnoise/darkmatter/`.
+Local development still uses the embedded Marmot v2 engine and the OS keychain.
+For smoke tests that should not launch through bondage profiles, initialize a
+temporary config with `agentnoise init --direct-agents` and point its data, log,
+and worktree directories at a throwaway temp directory.
 
 Under Marmot v2 the phone creates the control group (the desktop discovers it
 via `MarmotAppEvent::GroupJoined`). Scan the QR with your Marmot v2 phone
@@ -464,11 +350,8 @@ loginctl enable-linger "$USER"
 
 Secret storage on Linux uses keyutils plus Secret Service persistence. Headless
 servers need the same user service context to reach an unlocked Secret Service
-collection; test that before relying on unattended restart:
-
-```sh
-agentnoise keychain status
-```
+collection; test `agentnoise up` from that account before relying on unattended
+restart.
 
 ## FreeBSD Quick Start
 
@@ -505,14 +388,8 @@ tail -f /var/log/messages
 ```
 
 FreeBSD uses DBus Secret Service for real `nsec` storage. Confirm the service
-account can read the stored secret before depending on restart repair:
-
-```sh
-agentnoise keychain status
-```
-
-For disposable relay testing only, `agentnoise up --dev-burner-nsec` uses a
-plaintext burner identity and avoids Secret Service setup.
+account can run `agentnoise up` and sign messages before depending on restart
+repair.
 
 ## Chat Commands
 
@@ -556,19 +433,21 @@ plaintext burner identity and avoids Secret Service setup.
 - `/worktree remove <name> confirm`
 - `/help`
 
-Each White Noise chat is one agentnoise session. The first paired chat is the
+Each Marmot v2 group is one agentnoise session. The first paired group is the
 inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
-open a fresh work chat; agentnoise names it from the machine hostname and a
+open a fresh work group; agentnoise names it from the machine hostname and a
 2-4 word prompt summary, sends an open link back to the inbox, and posts
-progress plus final output in the new chat. Follow-up jobs sent inside that
-work chat stay in that chat.
+progress plus final output in the new group. Follow-up jobs sent inside that
+work group stay in that group.
 
-`/new bugfix-ui` still creates a manual parallel White Noise chat with the
-paired phone identity and clones the current workspace into it. `/rename main`
-names the current chat, `/list` shows known sessions with short chat refs and
+`/new bugfix-ui` creates a manual parallel Marmot v2 group with the paired phone
+identity and clones the current workspace into it. `/rename main` names the
+current group, `/list` shows known sessions with short group refs and
 `whitenoise://chat/...` open links, `/jump 2` or `/resume 2` resumes a session
 from that list, and `/close` marks the current session closed locally.
-`/sessions` remains accepted as a readable alias for `/list`.
+`/sessions` remains accepted as a readable alias for `/list`. The
+`whitenoise://chat/...` scheme is retained only because current phone clients
+still register that link format.
 
 Repos are aliases from the config, not arbitrary paths. `/use` selects a repo
 for the session, `/cd ..` moves within that selected repo, and plain `/codex` or
@@ -594,9 +473,8 @@ normal reply, with `/tail <job>` for logs.
 
 If a configured agent profile looks intentionally elevated, for example a
 profile or permission mode containing `unsafe`, agentnoise creates an approval
-object instead of launching immediately. Approvals are bound to the same White
-Noise chat that requested them and expire after
-`runner.approval_ttl_seconds`.
+object instead of launching immediately. Approvals are bound to the same Marmot
+v2 group that requested them and expire after `runner.approval_ttl_seconds`.
 
 For Homebrew service use, keep configured repos outside iCloud Drive/CloudDocs.
 Codex can hang under launchd before writing output when `-C` points at those
@@ -609,36 +487,34 @@ agentnoise saves the metadata it can see, replies with an attachment id, and
 lets the user inspect it with `/attachments` and `/attach <id>`.
 
 Git worktrees are opt-in per chat. `/worktree new fix-ui` creates a git
-worktree under the configured `runner.worktree_dir`, switches only that chat to
-the new path, and keeps other White Noise sessions on their existing
-workspaces. Removal requires the explicit `confirm` word.
+worktree under the configured `runner.worktree_dir`, switches only that group to
+the new path, and keeps other sessions on their existing workspaces. Removal
+requires the explicit `confirm` word.
 
 ## Fake Phone Testing
 
-`agentnoise fake-phone` starts from a separate White Noise daemon data
-directory, keeps a throwaway phone `nsec` in the fake-phone test root, creates
-a chat with the desktop agentnoise identity, and sends test messages without
-touching the real phone identity or the normal agentnoise keychain.
+`agentnoise fake-phone` runs a synthetic in-process Darkmatter roundtrip with a
+mock relay, one desktop account, and one phone account. It exercises group
+creation, message send/subscribe, replies, and agent-text-stream finalization
+without touching the real listener, real phone identity, or normal agentnoise
+keychain.
 
 ```sh
 agentnoise fake-phone plan
-agentnoise fake-phone roundtrip --pin 123456 /status
+agentnoise fake-phone roundtrip --expect "received: /status" /status
 agentnoise fake-phone roundtrip /help
 agentnoise fake-phone roundtrip \
   --timeout-seconds 180 \
-  --min-replies 2 \
   --require-job-final \
-  --expect agentnoise-e2e-ok \
+  --expect "codex queued: Reply with exactly: agentnoise-e2e-ok" \
   /codex "Reply with exactly: agentnoise-e2e-ok"
 ```
 
-For first-pairing tests, pass the current desktop PIN. After pairing, omit
-`--pin`. The harness resends the test message for the timeout window because a
-running agentnoise service may need one discovery cycle before subscribing to
-the newly-created chat. With `--expect`, unrelated replies such as startup
-hellos or auth errors do not stop resends. Use `--require-job-final` for
-`/codex`, `/claude`, or `/hermes` tests; otherwise the first ack would be
-enough to pass.
+This is a protocol smoke, not proof that the live desktop listener is paired
+with a real phone. Use `agentnoise up`, scan the QR, and send `/status` from the
+phone for that check. Use `--require-job-final` for synthetic `/codex`,
+`/claude`, or `/hermes` tests; otherwise a reply before stream finalization
+would be enough to pass.
 
 ## Screenshots
 
@@ -651,17 +527,16 @@ before using a real phone or terminal capture.
 
 ## Transport Notes
 
-The default White Noise transport remains the tested `wn` CLI path. Setting
-`whitenoise.socket` points `wn` at a specific `wnd` daemon socket. The
-experimental direct socket adapter is exposed as a probe only:
+The default transport is the embedded Marmot v2 runtime from the `darkmatter`
+Rust workspace. There is no `wn` or `wnd` subprocess in the daemon path. Use the
+embedded probe to verify local account startup and relay configuration:
 
 ```sh
-agentnoise whitenoise socket-probe --method ping
+agentnoise darkmatter probe --relay wss://relay.primal.net
 ```
 
-This keeps production message send/subscribe behavior on the stable upstream
-CLI while giving us a tested JSON-line Unix socket client for future direct
-`wnd` work.
+Live message send/subscribe, group creation, key packages, relay lists, and
+profile publishing all go through `MarmotAppRuntime`.
 
 ### Local Agent Session Visibility
 
@@ -752,20 +627,19 @@ pairing mode:
 
 The PIN also prints to stdout/stderr logs for headless and non-macOS setups.
 While the listener is running, `agentnoise pair` prints the same live PIN in the
-terminal alongside the QR. It rotates on `whitenoise.pairing_pin_seconds`, which
+terminal alongside the QR. It rotates on `darkmatter.pairing_pin_seconds`, which
 defaults to 30 seconds.
 
 ## Security Defaults
 
-- Use a dedicated White Noise bot identity for the desktop helper.
+- Use a dedicated Marmot v2 desktop identity for the helper.
 - Put only trusted devices/users in agentnoise control chats.
 - Keep first pairing local: the sender must prove they can see the desktop PIN.
 - Keep repos as configured aliases.
 - Keep agent execution behind [`bondage`](https://agentbondage.org/).
-- Store the bot `nsec` in the OS keychain for normal use, not in `config.toml`.
+- Store the desktop `nsec` in the OS keychain, not in `config.toml`.
 - Keep automatic local-session notifications off unless that machine is meant
   to expose same-account Codex/Claude metadata to the paired chat.
-- Use `--dev-burner-nsec` only for throwaway development identities.
 
 ## More
 

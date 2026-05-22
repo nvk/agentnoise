@@ -1,8 +1,6 @@
 # Testing
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
-agentnoise has three local test layers.
+agentnoise has four local test layers.
 
 Fast local checks:
 
@@ -21,15 +19,15 @@ Offline chat UX smoke:
 ```
 
 This uses temp state and a fake phone sender to exercise `/status`, `/rename`,
-`/cd`, `/list`, `/new`, `/resume`, and `/close` without touching your real
-White Noise identity or OS keychain. To also run one real direct Codex/frontier
-job through that same fake chat flow:
+`/cd`, `/list`, `/new`, `/resume`, and `/close` without touching a real Marmot
+identity or OS keychain. To also run one direct Codex job through that same fake
+chat flow:
 
 ```sh
 AGENTNOISE_CHAT_UX_FRONTIER=1 ./scripts/test-chat-ux.sh
 ```
 
-White Noise adapter contract fixtures:
+Fixture contracts:
 
 ```sh
 just test-fixtures
@@ -37,12 +35,12 @@ just test-fixtures
 ./scripts/test-fixtures.sh
 ```
 
-The fixture tests cover checked-in `wn` JSON shapes for `whoami`, group
-discovery, relay type merging, and message subscription streams. These tests
-should catch upstream output-shape changes before a real phone or service is
-involved.
+This is kept as a narrow contract target for checked-in fixture tests. Under the
+Marmot v2 migration it may be empty until new fixture contracts are added, but
+it remains part of the release preflight so future fixture coverage has a stable
+entry point.
 
-Isolated fake-phone live roundtrip:
+Synthetic fake-phone protocol smoke:
 
 ```sh
 just test-e2e-fake
@@ -50,23 +48,11 @@ just test-e2e-fake
 ./scripts/test-e2e-fake.sh
 ```
 
-This starts agentnoise with a development burner identity, launches the
-fake-phone harness with its own `wnd` data directory and burner phone `nsec`,
-pairs through the printed SSH PIN, verifies `/status` and `/help`, then sends
-`/codex Reply with exactly: agentnoise-fake-phone-e2e-ok` and requires both the
-ack and the final job reply. It still depends on local White Noise binaries,
-relay reachability, and a working Codex profile, so it is intentionally separate
-from the offline release check.
-
-Run this live roundtrip once as a pre-release smoke on a workstation. Do not put
-it in a repeat loop on the primary machine. Repeated live relay runs belong on a
-spare machine, disposable macOS install, or other environment that can be
-rebooted without interrupting work.
-
-Current White Noise daemons may still use the platform keyring for account login
-after agentnoise passes a dev burner `nsec` directly. If this fails with a
-`Keyring error` or `Operation not permitted`, rerun it from an unsandboxed user
-session with access to the platform keyring/Secret Service.
+This starts an in-process mock relay and dual Darkmatter runtime, verifies
+`/status` and `/help`, then sends `/codex Reply with exactly:
+agentnoise-fake-phone-e2e-ok` and requires an agent-text-stream finalization.
+It does not start the live listener or depend on real relays, a real phone, or a
+working Codex profile.
 
 Release preflight:
 
@@ -77,18 +63,21 @@ just release-check
 ```
 
 This stays local and does not depend on hosted CI. It runs the fast checks,
-fixture contracts, the offline chat UX smoke, `cargo package --offline`, and
-formula placeholder checks.
+fixture contracts, the offline chat UX smoke, a Cargo package file-list check, a
+locked offline release build, and formula placeholder checks.
 
-Use `release-check` as the offline gate. Add one live fake-phone job smoke after
-that before shipping changes that affect service startup, White Noise routing,
+Use `release-check` as the offline gate. Add one manual real-phone smoke before
+shipping changes that affect service startup, pairing, live relay routing,
 agent launching, job lifecycle, or reply formatting.
 
 Manual phone smoke:
 
 1. Start or attach with `agentnoise up`.
-2. Send `/status` from the real phone chat.
-3. Confirm the phone displays the reply.
-4. If the phone is silent, check `runtime-events.jsonl` and `wn messages list`
-   before restarting anything. A local `reply-sent` with no phone display is a
-   White Noise delivery/sync delay, not an agent command failure.
+2. Scan the QR with the Marmot v2 phone client if this is first pairing.
+3. Create or open the control group with the desktop identity.
+4. Send the displayed PIN if `allowed_senders` is still empty.
+5. Send `/status` and confirm the phone displays the reply.
+
+If the phone is silent, check `runtime-events.jsonl` before restarting anything.
+A local outbound record with no phone display points at relay/mobile sync, not
+agent command routing.

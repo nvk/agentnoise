@@ -1,7 +1,5 @@
 # Supervisor Services
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 agentnoise does not daemonize itself. The engine is a foreground process owned
 by either a supervisor or the terminal. The host supervisor owns boot, restart,
 stop, and logs.
@@ -54,20 +52,20 @@ with the `agentnoise_alice_enable` rc variable).
 
 Current Codex CLI releases do not run reliably when `codex exec` is launched
 directly by launchd. They can start and then produce no output forever. The
-macOS service is still useful for White Noise daemon/login startup, pairing,
-status, and non-Codex commands, but Codex jobs should be run from a login-shell
+macOS service is still useful for embedded runtime startup, pairing, status, and
+non-Codex commands, but Codex jobs should be run from a login-shell
 engine until agentnoise grows a dedicated worker mode. Stop the service first
 so the login-shell process owns the listener:
 
 ```sh
 brew services stop nvk/tap/agentnoise
-agentnoise up --no-daemon
+agentnoise up
 ```
 
 For SSH sessions, keep that foreground engine alive with tmux:
 
 ```sh
-tmux new -s agentnoise 'agentnoise up --no-daemon'
+tmux new -s agentnoise 'agentnoise up'
 ```
 
 If you intentionally want to test launchd-launched Codex anyway, set
@@ -157,9 +155,8 @@ chat automatically.
 
 ## Secret Storage
 
-agentnoise stores the desktop White Noise `nsec` through the platform credential
-store selected at build time, unless `--dev-burner-nsec` has explicitly enabled
-a plaintext development burner file:
+agentnoise stores the desktop Marmot/Nostr `nsec` through the platform
+credential store selected at build time:
 
 - macOS: Apple Keychain.
 - Windows: Windows Credential Manager.
@@ -168,5 +165,4 @@ a plaintext development burner file:
 
 On Linux and BSD, unattended restart depends on the same user session being able
 to reach an unlocked Secret Service collection. Headless servers should run
-`agentnoise keychain status` from the exact service account and supervisor
-context before relying on restart repair.
+`agentnoise up` from the exact service account before relying on restart repair.

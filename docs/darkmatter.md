@@ -54,17 +54,15 @@ The chosen integration strategy was: **embed `marmot-app` as a library**, **clea
 - `src/dm.rs` — `DmClient` chat surface: subscribe to a group, send replies. Models the legacy `WnClient` API shape so the rest of the codebase can be ported with minimal cascading changes.
 - `src/dm_streams.rs` — `AgentTextStream::start` / `::finish` wrap the v2 QUIC live-preview primitive; stream_id is derived deterministically from a job UUID via SHA-256.
 
-**Dependencies** (added in `Cargo.toml`):
+**Dependencies** (pinned in `Cargo.toml` / `Cargo.lock`):
 
 ```toml
-marmot-app    = { path = "../darkmatter/crates/marmot-app" }
-marmot-account = { path = "../darkmatter/crates/marmot-account" }
-cgka-traits   = { path = "../darkmatter/crates/traits" }
-tokio         = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
-hex           = "0.4"
+marmot-app = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "..." }
+marmot-account = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "..." }
+cgka-traits = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "..." }
 ```
 
-A symlink `../darkmatter` → `/Users/jeff/code/darkmatter` is created per worktree so the same relative path resolves from both the main checkout and any git worktree.
+agentnoise should build from a clean checkout without a sibling darkmatter repo.
 
 ---
 
@@ -162,7 +160,7 @@ What it does:
 1. Builds a multi-thread tokio runtime.
 2. Constructs `DarkmatterEngine::open(home, relays)` — by default `<data_dir>/darkmatter`.
 3. Calls `runtime.start()` to spawn account workers.
-4. Calls `ensure_account("agentnoise-desktop", None, relays)` — creates the managed account if missing, otherwise looks it up.
+4. Calls `ensure_account(config.darkmatter.account, relays)` — creates the managed account if the configured account is missing, otherwise looks it up.
 5. Prints account label, account_id_hex, home, and relays.
 6. Cleanly shuts the runtime down.
 
@@ -170,33 +168,33 @@ Successful output proves the dep tree compiles, marmot-app bootstraps, and the a
 
 ---
 
-## What a follow-up listener port looks like
+## Listener Shape
 
-The current `run_listener` in `src/main.rs` (lines ~1443–2700) does a lot:
+The current `run_listener` in `src/main.rs`:
 
 - Acquires an exclusive engine lock.
-- Restores White Noise login from keychain (`whitenoise_cli::ensure_login_from_configured_nsec`).
-- Reconciles message relays.
-- Discovers + accepts pending groups (polling `wn groups list`).
-- Spawns one `wn messages subscribe --json <group>` per group as a child process; parses JSON lines into `wn::MessageEvent`.
-- Multiplexes events + group-discovery + local-session-watcher + pairing-PIN-display into a `std::sync::mpsc<StreamItem>` loop.
-- Routes events through `AgentApp::route_message` and sends replies via `WnClient::send_reply_to`.
+- Opens `DarkmatterEngine` with an OS-keychain-backed `AccountHome`.
+- Starts `MarmotAppRuntime`, ensures the configured account exists, and publishes
+  the configured user profile.
+- Subscribes to configured groups through `DmClient::subscribe_group`.
+- Discovers phone-created groups from `MarmotAppEvent::GroupJoined`, persists
+  them to config, and subscribes immediately.
+- Creates desktop-initiated parallel groups for `/new` and primary-chat job
+  fanout through `runtime.create_group`.
+- Routes events through `AgentApp::route_message` and sends replies with
+  `DmClient::send_reply_to`.
+- Wraps live job previews with `AgentTextStream::start` / `finish` and falls
+  back to normal chat replies if the stream path is unavailable.
 
-The v2 shape:
-
-- Replace ensure-login / ensure-relays with `DarkmatterEngine::ensure_account` + `runtime.publish_account_relay_lists`.
-- Replace group discovery polling with `runtime.subscribe()` broadcast filtered on `MarmotAppEvent::GroupJoined`.
-- Replace per-group subscription processes with `DmClient::subscribe()` returning a tokio `mpsc::Receiver<MessageEvent>`.
-- Replace `wn.send_reply_to` with `DmClient::send_reply`.
-- Replace chunked agent output with `AgentTextStream::start` + `record_chunk` + `finish` in `runner.rs`'s progress callback.
-- Switch `fn main()` to `#[tokio::main(flavor = "multi_thread")]` or build a runtime explicitly in the listener path.
-
-The `dm::MessageEvent` struct is shaped to match `wn::MessageEvent` field-for-field (minus attachments, which need a v2 media-component bridge), so `AgentApp::route_message` does not change.
+The `dm::MessageEvent` struct is shaped to match the old chat router surface
+field-for-field (minus attachments, which need a v2 media-component bridge), so
+`AgentApp::route_message` does not need to know which protocol version supplied
+the event.
 
 ---
 
 ## Open questions
 
-- **Attachments**: `wn::MessageEvent` carries `attachments: Vec<AttachmentInfo>`; v2 surfaces media via `MarmotAppMessagePayloadV1::Media` and `AppGroupImageComponent` (Blossom hash). A bridge is needed.
+- **Attachments**: v2 surfaces media via `MarmotAppMessagePayloadV1::Media` and `AppGroupImageComponent` (Blossom hash). A bridge is needed.
 - **QUIC candidate discovery**: `runtime.start_agent_text_stream` takes a `Vec<String>` of QUIC candidates. The exact production source (e.g., asking the `transport-quic-stream` crate for the bound addresses) is TBD.
 - **Pairing PIN parity**: HMAC-SHA256 PIN logic in `src/auth.rs` is protocol-agnostic and survives unchanged; what changes is the storage location of allowed senders (npub allowlist still works since both stacks share Nostr key identity).

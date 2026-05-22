@@ -1,7 +1,5 @@
 # Local Bring-Up
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 This is the normal desktop-to-phone path. Run it from a regular user terminal,
 not from a restricted agent sandbox, because setup needs the macOS login
 keychain and `~/Library/Application Support`.
@@ -49,16 +47,16 @@ Existing configs can switch without re-running setup:
 
 ## Pair
 
-If you know the phone White Noise `npub`:
+If you know the phone Marmot v2 `npub`:
 
 ```sh
 "$AGENTNOISE" up --phone npub... --name agentnoise-mbp
 ```
 
-That creates or reuses the desktop keypair in the OS keychain, writes the config,
-starts the White Noise daemon if needed, logs in from the configured bootstrap
-nsec, publishes the desktop profile/key package, creates the `agentnoise`
-control chat, and saves the group id when `wn` returns it.
+That creates or reuses the desktop keypair in the OS keychain, writes the
+config, starts the embedded Darkmatter runtime, and publishes the desktop
+profile/key package. Under Marmot v2 the phone creates the control group; the
+desktop discovers and saves it while the listener is running.
 
 If you do not know the phone `npub`:
 
@@ -66,10 +64,10 @@ If you do not know the phone `npub`:
 "$AGENTNOISE" up
 ```
 
-Scan the QR in White Noise, create a chat/group with the desktop identity, then
-leave the process running. It will keep discovering White Noise chats until the
-new chat appears. If you used `--no-listen` or stopped the process, run the same
-command again:
+Scan the QR in the Marmot v2 phone client, create a group with the desktop
+identity, then leave the process running. It will keep discovering Marmot v2
+groups until the new group appears. If you used `--no-listen` or stopped the
+process, run the same command again:
 
 ```sh
 "$AGENTNOISE" up
@@ -83,7 +81,7 @@ sender to `allowed_senders`.
 
 Use a distinct `--name` for every computer, for example `agentnoise-mbp` or
 `agentnoise-linuxbox`. The name is saved in config and published as the desktop
-White Noise/Nostr profile so the phone can tell multiple agentnoise identities
+Marmot/Nostr profile so the phone can tell multiple agentnoise identities
 apart.
 
 To inspect or rename the current machine later:
@@ -96,12 +94,12 @@ agentnoise identity rename agentnoise-mbp
 Use `agentnoise identity rename <name> --no-publish` when you only want to edit
 config and let the next `agentnoise up` publish the profile.
 
-If messages are slow or missing, inspect the actual White Noise account relay
-state, not just the QR pairing hints:
+If messages are slow or missing, inspect the embedded runtime and event log, not
+just the QR pairing hints:
 
 ```sh
-agentnoise whitenoise relays
-agentnoise whitenoise ensure-relays
+agentnoise darkmatter probe
+tail -f "$HOME/Library/Application Support/agentnoise/runtime-events.jsonl"
 ```
 
 ## Remote SSH Pairing
@@ -140,10 +138,11 @@ From the phone, send:
 /wiki research agent chat ux
 ```
 
-Each White Noise chat with the agentnoise desktop identity is an independent
-agentnoise session. You can create another chat from the same phone identity,
+Each Marmot v2 group with the agentnoise desktop identity is an independent
+agentnoise session. You can create another group from the same phone identity,
 send `/use` or `/cd` there, and it will not disturb the workspace state in the
-first chat.
+first group. `/new <name>` can also create a parallel group from the desktop
+side when the phone sender has a published key package.
 
 When the foreground test works:
 
@@ -205,16 +204,6 @@ Hermes runs directly as `hermes chat ...`.
 
 `codex-fix` and `codex-unsafe` are enough for editing and testing agentnoise.
 They are not enough for local bring-up, because those `nono` profiles still
-block the macOS keychain and default Application Support paths that White Noise
-uses. Use a normal terminal, or a no-`nono` profile such as `codex-rawdog`, for
-the actual setup run.
-
-For development-only burner identities where keychain prompts get in the way:
-
-```sh
-"$AGENTNOISE" up --dev-burner-nsec
-```
-
-This writes a plaintext throwaway `nsec` under the agentnoise data dir and sets
-the config so later `up` or service starts reuse that file. Do not use it for a
-real identity.
+block the macOS keychain and default Application Support paths that the embedded
+Darkmatter runtime uses. Use a normal terminal, or a profile that allows the
+agentnoise data directory and OS keychain, for the actual setup run.

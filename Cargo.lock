@@ -568,7 +568,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "cgka-engine"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "async-trait",
  "cgka-traits",
@@ -590,7 +590,7 @@ dependencies = [
 [[package]]
 name = "cgka-session"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "cgka-engine",
  "cgka-traits",
@@ -602,7 +602,7 @@ dependencies = [
 [[package]]
 name = "cgka-traits"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "async-trait",
  "hex",
@@ -949,7 +949,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1069,7 +1069,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2138,7 +2138,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "marmot-account"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
@@ -2159,7 +2159,7 @@ dependencies = [
 [[package]]
 name = "marmot-app"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "async-trait",
  "cgka-engine",
@@ -2370,7 +2370,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2942,7 +2942,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3262,7 +3262,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3328,7 +3328,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3699,7 +3699,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "storage-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "cgka-traits",
  "openmls",
@@ -3755,7 +3755,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4116,7 +4116,7 @@ dependencies = [
 [[package]]
 name = "transport-nostr-adapter"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "async-trait",
  "cgka-traits",
@@ -4132,7 +4132,7 @@ dependencies = [
 [[package]]
 name = "transport-nostr-peeler"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "async-trait",
  "cgka-traits",
@@ -4149,7 +4149,7 @@ dependencies = [
 [[package]]
 name = "transport-quic-broker"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "cgka-traits",
  "clap",
@@ -4160,6 +4160,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "transport-quic-stream",
@@ -4168,7 +4169,7 @@ dependencies = [
 [[package]]
 name = "transport-quic-stream"
 version = "0.1.0"
-source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=026a3be7157ea04134ff6919f656eaa23f6159f8#026a3be7157ea04134ff6919f656eaa23f6159f8"
+source = "git+https://github.com/marmot-protocol/darkmatter.git?rev=a3eb7d727135eb80221601e8b46981137386e9b7#a3eb7d727135eb80221601e8b46981137386e9b7"
 dependencies = [
  "cgka-traits",
  "quinn",
@@ -4489,7 +4490,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

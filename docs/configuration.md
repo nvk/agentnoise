@@ -1,7 +1,5 @@
 # Configuration
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 Find the live config:
 
 ```sh
@@ -259,28 +257,18 @@ brew services restart nvk/tap/agentnoise
 
 When enabled, agentnoise baselines existing sessions at listener startup and
 then sends newly seen local session ids, update times, cwd when available, and
-resume commands to the primary paired White Noise chat. It does not send
+resume commands to the primary paired Marmot v2 group. It does not send
 transcript content, inspect process environments, or attach automatically.
 
-## White Noise Identity
+## Marmot Identity
 
-The desktop helper uses its own White Noise/Nostr identity. The public `npub`
-and profile labels live in config. The private `nsec` should stay in the OS
-keychain for real use.
+The desktop helper uses its own Marmot/Nostr identity. The public `npub` and
+profile labels live in config. The private `nsec` should stay in the OS keychain
+for real use.
 
 Useful commands:
 
 ```sh
 agentnoise identity status
 agentnoise identity rename agentnoise-mbp
-agentnoise keychain status
 ```
-
-For development-only testing:
-
-```sh
-agentnoise up --dev-burner-nsec
-```
-
-That writes a throwaway plaintext `nsec` under the agentnoise data directory.
-Do not use it for a real identity.

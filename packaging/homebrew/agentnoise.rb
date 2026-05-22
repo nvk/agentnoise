@@ -39,7 +39,7 @@ class Agentnoise < Formula
 
       Current Codex CLI builds do not run reliably from macOS launchd. For
       /codex jobs on macOS, run agentnoise from a login shell or tmux:
-        agentnoise up --no-daemon
+        agentnoise up
 
       Use agentnoise up anytime as the local console. If the service is already
       running, it attaches instead of starting a second listener.

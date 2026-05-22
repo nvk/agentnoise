@@ -1,7 +1,5 @@
 # Launchd Service
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 agentnoise can install itself as a per-user macOS LaunchAgent.
 
 ## Install
@@ -62,6 +60,9 @@ agentnoise service uninstall --target launchd --unload
   `agentnoise up` enters PIN pairing mode. On macOS it shows the desktop
   identity QR, current PIN, and live countdown, and also prints the PIN to the
   launchd log.
-- `launchd install` runs `agentnoise up`, which starts `wnd`, repairs login from the configured bootstrap nsec when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens.
+- `launchd install` runs `agentnoise up`, which starts the embedded Darkmatter
+  runtime, ensures the configured account exists, publishes the desktop profile,
+  enforces first-pairing PIN auth, waits for the first control group when needed,
+  then listens.
 - Restart the service after changing config.
 - If the process restarts, active jobs are marked `interrupted` in the local job store.

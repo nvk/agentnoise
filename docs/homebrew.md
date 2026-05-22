@@ -1,7 +1,5 @@
 # Homebrew Packaging
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 The intended Homebrew token is:
 
 ```text
@@ -13,8 +11,8 @@ Homebrew did not have a formula or cask named `agentnoise` when checked on 2026-
 ## Tap Formula
 
 Use `packaging/homebrew/agentnoise.rb` as the starting formula once the source
-is pushed and tagged. The initial formula uses pinned git sources: the
-agentnoise release tag and the pinned upstream `whitenoise-rs` revision.
+is pushed and tagged. The formula builds agentnoise with the pinned Darkmatter
+Cargo dependencies from `Cargo.lock`.
 
 Local tap install shape:
 
@@ -24,12 +22,13 @@ agentnoise init
 brew services start nvk/tap/agentnoise
 ```
 
-The formula builds and installs `agentnoise`, `wn`, and `wnd` under the same
-Homebrew prefix. The service uses `agentnoise up`, so setup repair, daemon
-startup, group discovery, first-pairing PIN auth, and keychain login repair stay
-in one code path. On a fresh install the service starts before a control chat
-exists, shows the QR/PIN pairing flow, and keeps discovering White Noise chats
-until the phone-created chat appears. Homebrew owns restart and boot through
+The formula installs `agentnoise`. The Marmot v2 protocol stack is embedded in
+the binary; there are no `wn` or `wnd` subprocesses in the daemon path. The
+service uses `agentnoise up`, so setup repair, embedded runtime startup, group
+discovery, first-pairing PIN auth, and keychain access stay in one code path. On
+a fresh install the service starts before a control group exists, shows the
+QR/PIN pairing flow, and keeps discovering Marmot v2 groups until the
+phone-created group appears. Homebrew owns restart and boot through
 `brew services`.
 
 `agentnoise up` is also the local console. If the Homebrew service is already
@@ -39,17 +38,17 @@ running, it takes the foreground engine lock and behaves like the service until
 the terminal exits.
 
 Current macOS Codex CLI builds can hang before producing output when launched
-directly by launchd. Use Homebrew services for setup, pairing, White Noise
-startup, status, and boot. For phone-launched `/codex` jobs on macOS, stop the
-service and run the listener from a login shell or tmux:
+directly by launchd. Use Homebrew services for setup, pairing, status, and boot.
+For phone-launched `/codex` jobs on macOS, stop the service and run the listener
+from a login shell or tmux:
 
 ```sh
 brew services stop nvk/tap/agentnoise
-agentnoise up --no-daemon
+agentnoise up
 ```
 
 ```sh
-tmux new -s agentnoise 'agentnoise up --no-daemon'
+tmux new -s agentnoise 'agentnoise up'
 ```
 
 For config examples:
@@ -63,35 +62,24 @@ agentnoise doctor
 See [Configuration](configuration.md) for raw Codex/Claude mode, `bondage`
 profile mode, repo aliases, and profile variants such as `/codex-fix`.
 
-For development-only installs where keychain prompts are noise, run:
-
-```sh
-agentnoise up --dev-burner-nsec
-```
-
-That writes a plaintext throwaway identity under the agentnoise data dir. Later
-Homebrew service starts reuse it because the flag persists in `config.toml`.
-Do not use this for a real identity.
-
-To check or change the machine label shown in White Noise:
+To check or change the machine label shown in the phone client:
 
 ```sh
 agentnoise identity status
 agentnoise identity rename agentnoise-mbp
 ```
 
-To inspect or repair the White Noise account relays used for message delivery:
+To inspect the embedded runtime and relay configuration:
 
 ```sh
-agentnoise whitenoise relays
-agentnoise whitenoise ensure-relays
+agentnoise darkmatter probe
 ```
 
 ## Release Checklist
 
 1. Tag a release.
 2. Update the agentnoise formula tag if the version changed.
-3. Update the pinned `whitenoise-rs` resource revision when upgrading the bundled CLI.
+3. Update `Cargo.lock` when upgrading the pinned Darkmatter revision.
 4. Run:
 
    ```sh
