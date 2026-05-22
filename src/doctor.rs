@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use crate::config::{Config, RunnerLauncher};
 use crate::paths::{expand_tilde, find_on_path, is_gui_backed_workspace_path};
 use crate::runner::{AgentKind, AgentRequest};
-use crate::whitenoise_cli;
 
 #[derive(Debug)]
 enum Level {
@@ -20,10 +19,7 @@ struct Check {
 }
 
 pub fn render_doctor(config_path: &Path, config: &Config) -> String {
-    let mut checks = vec![
-        path_check("config", config_path),
-        wn_command_check(&config.whitenoise.wn_bin),
-    ];
+    let mut checks = vec![path_check("config", config_path), darkmatter_check(config)];
     match config.runner.launcher {
         RunnerLauncher::Bondage => {
             checks.push(command_check("bondage", &config.runner.bondage_bin))
@@ -58,32 +54,29 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
         path_check("log dir", &config.resolved_log_dir()),
     ]);
 
-    let group_count = config.whitenoise.control_group_ids().len();
+    let group_count = config.darkmatter.control_group_ids().len();
     checks.push(Check {
         level: Level::Ok,
-        name: "White Noise transport".to_string(),
-        detail: format!("{:?}", config.whitenoise.transport).to_ascii_lowercase(),
+        name: "darkmatter transport".to_string(),
+        detail: "embedded marmot-app".to_string(),
     });
-    if let Some(socket) = config.whitenoise.resolved_socket() {
-        checks.push(path_check("White Noise socket", &socket));
-    }
 
     if group_count == 0 {
         checks.push(Check {
             level: Level::Warn,
-            name: "White Noise groups".to_string(),
+            name: "darkmatter groups".to_string(),
             detail: "not configured".to_string(),
         });
     } else {
         checks.push(Check {
             level: Level::Ok,
-            name: "White Noise groups".to_string(),
+            name: "darkmatter groups".to_string(),
             detail: format!("{group_count} configured"),
         });
     }
 
-    if config.whitenoise.allowed_senders.is_empty() {
-        if config.whitenoise.require_pairing_pin {
+    if config.darkmatter.allowed_senders.is_empty() {
+        if config.darkmatter.require_pairing_pin {
             checks.push(Check {
                 level: Level::Warn,
                 name: "sender allowlist".to_string(),
@@ -100,41 +93,25 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
         checks.push(Check {
             level: Level::Ok,
             name: "sender allowlist".to_string(),
-            detail: format!("{} sender(s)", config.whitenoise.allowed_senders.len()),
+            detail: format!("{} sender(s)", config.darkmatter.allowed_senders.len()),
         });
     }
 
-    if config.whitenoise.require_pairing_pin {
+    if config.darkmatter.require_pairing_pin {
         checks.push(Check {
             level: Level::Ok,
             name: "pairing PIN".to_string(),
-            detail: format!("{}s window", config.whitenoise.pairing_pin_seconds),
+            detail: format!("{}s window", config.darkmatter.pairing_pin_seconds),
         });
     }
 
-    if config.whitenoise.dev_burner_nsec {
-        checks.push(Check {
-            level: Level::Warn,
-            name: "dev burner nsec".to_string(),
-            detail: identity_dev_burner_status(config),
-        });
-    } else if config.whitenoise.use_keychain_nsec {
-        let store = config.secret_store();
-        checks.push(Check {
-            level: Level::Ok,
-            name: "OS keychain nsec".to_string(),
-            detail: format!(
-                "configured: {}; run `agentnoise keychain status` for a live keychain check",
-                store.label()
-            ),
-        });
-    } else {
-        checks.push(Check {
-            level: Level::Ok,
-            name: "OS keychain nsec".to_string(),
-            detail: "disabled".to_string(),
-        });
-    }
+    checks.push(Check {
+        level: Level::Ok,
+        name: "secret store".to_string(),
+        detail:
+            "OS keychain via marmot-account KeychainSecretStore (service \"agentnoise\", item <account_id_hex>)"
+                .to_string(),
+    });
 
     for repo in &config.repos {
         let repo_path = expand_tilde(&repo.path);
@@ -236,27 +213,6 @@ fn bondage_profile_check(name: &str, profile: &str, text: &str) -> Check {
     }
 }
 
-fn identity_dev_burner_status(config: &Config) -> String {
-    let Some(path) = crate::identity::dev_burner_nsec_path(
-        &config.whitenoise,
-        crate::identity::DEFAULT_IDENTITY_NAME,
-    ) else {
-        return "enabled but no file path configured".to_string();
-    };
-
-    if path.is_file() {
-        format!(
-            "development-only plaintext secret present: {}",
-            path.display()
-        )
-    } else {
-        format!(
-            "development-only plaintext secret missing: {}",
-            path.display()
-        )
-    }
-}
-
 fn command_check(name: &str, command: &str) -> Check {
     match find_executable(command) {
         Some(path) => Check {
@@ -272,20 +228,20 @@ fn command_check(name: &str, command: &str) -> Check {
     }
 }
 
-fn wn_command_check(command: &str) -> Check {
-    let resolved = whitenoise_cli::resolve_wn(command);
-    if resolved.is_file() {
+fn darkmatter_check(config: &Config) -> Check {
+    let relay_count = config.darkmatter.message_relays.len();
+    if relay_count == 0 {
         return Check {
-            level: Level::Ok,
-            name: "wn".to_string(),
-            detail: resolved.display().to_string(),
+            level: Level::Warn,
+            name: "darkmatter relays".to_string(),
+            detail: "no message_relays configured; set darkmatter.message_relays in config.toml"
+                .to_string(),
         };
     }
-
     Check {
-        level: Level::Warn,
-        name: "wn".to_string(),
-        detail: format!("{} not found", resolved.display()),
+        level: Level::Ok,
+        name: "darkmatter relays".to_string(),
+        detail: format!("{relay_count} configured"),
     }
 }
 
@@ -347,18 +303,16 @@ mod tests {
     }
 
     #[test]
-    fn doctor_does_not_query_keychain_status() {
+    fn doctor_reports_keychain_secret_store() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = Config::template();
-        config.whitenoise.use_keychain_nsec = true;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
 
         let output = render_doctor(&temp.path().join("config.toml"), &config);
 
-        assert!(output.contains("OS keychain nsec"));
-        assert!(output.contains("configured: agentnoise / whitenoise-nsec"));
-        assert!(output.contains("agentnoise keychain status"));
+        assert!(output.contains("secret store"));
+        assert!(output.contains("KeychainSecretStore"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -172,6 +172,16 @@ pub fn engine_is_running(config: &Config) -> Result<bool> {
     Ok(false)
 }
 
+pub fn engine_lock_owner(config: &Config) -> Result<Option<u32>> {
+    let lock_path = lock_path(config);
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&lock_path)
+        .with_context(|| format!("reading lock owner {}", lock_path.display()))?;
+    Ok(parse_lock_pid(&text).filter(|pid| process_is_alive(*pid)))
+}
+
 pub fn attach_ui(config_path: &Path, config: &Config) -> Result<()> {
     println!("agentnoise already running");
     match read_status(config)? {
@@ -260,9 +270,14 @@ fn parse_lock_pid(text: &str) -> Option<u32> {
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
+    // `kill -0` only probes existence; silence its stdout/stderr so a dead PID
+    // doesn't leak "kill: <pid>: No such process" to the terminal during the
+    // normal stale-lock cleanup path.
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -291,11 +306,11 @@ fn write_status(
         data_dir: config.resolved_data_dir().display().to_string(),
         log_dir: config.resolved_log_dir().display().to_string(),
         npub: config
-            .whitenoise
+            .darkmatter
             .bot_npub
             .clone()
-            .or_else(|| config.whitenoise.account.clone()),
-        groups: config.whitenoise.control_group_ids(),
+            .or_else(|| config.darkmatter.account.clone()),
+        groups: config.darkmatter.control_group_ids(),
         pairing,
     };
     write_runtime_status(path, &status)
@@ -491,8 +506,8 @@ mod tests {
         let mut config = Config::template();
         config.runner.data_dir = root.join("data").display().to_string();
         config.runner.log_dir = root.join("logs").display().to_string();
-        config.whitenoise.account = Some("npub-test".to_string());
-        config.whitenoise.group_id = "group-a".to_string();
+        config.darkmatter.account = Some("npub-test".to_string());
+        config.darkmatter.group_id = "group-a".to_string();
         config
     }
 
@@ -506,6 +521,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(engine_is_running(&config).unwrap());
+        assert_eq!(
+            engine_lock_owner(&config).unwrap(),
+            Some(std::process::id())
+        );
         assert!(
             acquire_engine(&config_path, &config, AcquireMode::Try)
                 .unwrap()

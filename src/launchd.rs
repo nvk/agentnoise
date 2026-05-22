@@ -9,8 +9,16 @@ use crate::paths::{default_service_path, expand_tilde};
 
 pub const LABEL: &str = "com.agentnoise.agentnoise";
 
-pub fn plist_path() -> PathBuf {
-    expand_tilde("~/Library/LaunchAgents").join(format!("{LABEL}.plist"))
+pub fn label(config: &Config) -> String {
+    config
+        .instance
+        .as_deref()
+        .map(|instance| format!("{LABEL}.{instance}"))
+        .unwrap_or_else(|| LABEL.to_string())
+}
+
+pub fn plist_path(config: &Config) -> PathBuf {
+    expand_tilde("~/Library/LaunchAgents").join(format!("{}.plist", label(config)))
 }
 
 pub fn render_plist(exe: &Path, config_path: &Path, config: &Config) -> String {
@@ -48,7 +56,7 @@ pub fn render_plist(exe: &Path, config_path: &Path, config: &Config) -> String {
 </dict>
 </plist>
 "#,
-        label = LABEL,
+        label = xml_escape(&label(config)),
         exe = xml_escape(&exe.display().to_string()),
         config = xml_escape(&config_path.display().to_string()),
         path_env = xml_escape(&default_service_path()),
@@ -65,7 +73,7 @@ pub fn install(exe: &Path, config_path: &Path, config: &Config, force: bool) -> 
         );
     }
 
-    let path = plist_path();
+    let path = plist_path(config);
     if path.exists() && !force {
         bail!(
             "{} already exists; use --force to overwrite",
@@ -82,8 +90,8 @@ pub fn install(exe: &Path, config_path: &Path, config: &Config, force: bool) -> 
     Ok(path)
 }
 
-pub fn uninstall(unload: bool) -> Result<bool> {
-    let path = plist_path();
+pub fn uninstall(config: &Config, unload: bool) -> Result<bool> {
+    let path = plist_path(config);
     if unload && path.exists() {
         unload_plist(&path).ok();
     }
@@ -159,5 +167,18 @@ mod tests {
         assert!(plist.contains("<string>up</string>"));
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("/opt/homebrew/bin/agentnoise"));
+    }
+
+    #[test]
+    fn named_instance_uses_distinct_label_and_plist() {
+        let config = Config::template_for_instance("alice");
+        let plist = render_plist(
+            Path::new("/opt/homebrew/bin/agentnoise"),
+            Path::new("/tmp/config.toml"),
+            &config,
+        );
+
+        assert!(plist.contains("<string>com.agentnoise.agentnoise.alice</string>"));
+        assert!(plist_path(&config).ends_with("com.agentnoise.agentnoise.alice.plist"));
     }
 }

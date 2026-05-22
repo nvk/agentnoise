@@ -1,21 +1,33 @@
-use std::fs;
+//! Fake-phone test harness — runs a self-contained round-trip locally using
+//! darkmatter v2 primitives.
+//!
+//! Mechanism:
+//! 1. Boot an in-process [`nostr_relay_builder::MockRelay`].
+//! 2. Build one [`marmot_app::MarmotApp`] pointing at that relay; create two
+//!    managed accounts on it: `desktop` and `phone`.
+//! 3. `phone.create_group([desktop])`, wait for desktop's `GroupJoined` event.
+//! 4. Spawn a desktop responder that subscribes to messages, wraps each reply
+//!    in an [`crate::dm_streams::AgentTextStream`] lifecycle so the phone sees
+//!    `AgentStreamStarted` / `AgentStreamFinalized` events (smoke test for the
+//!    v2 QUIC-live-preview wiring).
+//! 5. Phone sends the requested test message and collects replies + stream
+//!    events until min_replies are seen, expectations matched, or timeout
+//!    fires.
+
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
-use nostr::Keys;
-use nostr::nips::nip19::ToBech32;
+use anyhow::{Context, Result};
+use cgka_traits::TransportEndpoint;
+use marmot_app::{
+    AccountSetupRequest, AgentTextStreamFinishRequest, AppMessageQuery, MarmotApp, MarmotAppEvent,
+    MarmotAppRuntime, RuntimeMessageUpdate,
+};
+use nostr_relay_builder::MockRelay;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use sha2::{Digest, Sha256};
 
-use crate::auth::is_pairing_pin_message;
-use crate::config::{Config, WhitenoiseConfig};
-use crate::secrets;
-use crate::whitenoise_cli;
-use crate::wn::WnClient;
+use crate::config::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FakePhonePlan {
@@ -51,9 +63,9 @@ pub fn plan(config: &Config, root: Option<&Path>) -> FakePhonePlan {
     let root = root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| config.resolved_data_dir().join("fake-phone"));
-    let data_dir = root.join("wnd-data");
-    let logs_dir = root.join("wnd-logs");
-    let socket = data_dir.join("release").join("wnd.sock");
+    let data_dir = root.join("dm-data");
+    let logs_dir = root.join("dm-logs");
+    let socket = data_dir.join("mock-relay.sock");
     let nsec_file = root.join("fake-phone.nsec");
     FakePhonePlan {
         root,
@@ -64,567 +76,322 @@ pub fn plan(config: &Config, root: Option<&Path>) -> FakePhonePlan {
     }
 }
 
-pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
-    let plan = plan(config, Some(&options.root));
-    fs::create_dir_all(&plan.root).with_context(|| format!("creating {}", plan.root.display()))?;
-    fs::create_dir_all(&plan.data_dir)
-        .with_context(|| format!("creating {}", plan.data_dir.display()))?;
-    fs::create_dir_all(&plan.logs_dir)
-        .with_context(|| format!("creating {}", plan.logs_dir.display()))?;
-
-    let _daemon = ChildGuard::new(start_fake_wnd(config, &plan)?);
-    wait_for_socket(&plan.socket, Duration::from_secs(10))?;
-
-    let fake_config = fake_whitenoise_config(config, &plan);
-    let phone_npub = create_or_reuse_identity(&fake_config, &plan)?;
-    let agent_npub = config
-        .whitenoise
-        .bot_npub
-        .as_deref()
-        .or(config.whitenoise.account.as_deref())
-        .map(str::trim)
-        .filter(|npub| !npub.is_empty())
-        .context("config has no agentnoise npub; run `agentnoise setup` first")?;
-    let group_id = create_group(&fake_config, &options.group_name, agent_npub)?;
-    let client = WnClient::new(fake_config.clone_with_group(&group_id));
-    if let Some(pin) = options
-        .pin
-        .as_deref()
-        .map(str::trim)
-        .filter(|pin| !pin.is_empty())
-    {
-        client.send_to(&group_id, pin)?;
-        thread::sleep(Duration::from_secs(1));
-    }
-
-    let outcome = send_until_replies(&client, &fake_config, &group_id, &options)?;
-    if !outcome.satisfied() {
-        bail!("{}", outcome.failure_message());
-    }
-    Ok(FakePhoneResult {
-        phone_npub,
-        group_id,
-        replies: outcome.replies,
-        matched: outcome.matched,
-        saw_job_final: outcome.saw_job_final,
-    })
+/// Run the end-to-end fake-phone round-trip. Builds its own tokio runtime so
+/// callers don't have to.
+pub fn roundtrip(_config: &Config, options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for fake-phone roundtrip")?;
+    runtime.block_on(run_roundtrip(options))
 }
 
-struct ChildGuard {
-    child: Child,
-}
+async fn run_roundtrip(options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
+    let tmp = tempfile::tempdir().context("creating fake-phone tempdir")?;
+    let relay = MockRelay::run()
+        .await
+        .map_err(|e| anyhow::anyhow!("starting MockRelay: {e}"))?;
+    let url = relay.url().await.to_string();
+    let endpoints = vec![TransportEndpoint(url.clone())];
 
-impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child }
-    }
-}
+    let app = MarmotApp::with_relays(tmp.path(), vec![url.clone()]);
+    let runtime = MarmotAppRuntime::new(app.clone());
 
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        self.child.kill().ok();
-        self.child.wait().ok();
-    }
-}
-
-fn start_fake_wnd(config: &Config, plan: &FakePhonePlan) -> Result<Child> {
-    let wnd = whitenoise_cli::resolve_wnd_for_config(&config.whitenoise);
-    let relays = config.whitenoise.pairing_relays.join(",");
-    if plan.socket.exists() {
-        fs::remove_file(&plan.socket).with_context(|| {
-            format!("removing stale fake phone socket {}", plan.socket.display())
-        })?;
-    }
-    Command::new(&wnd)
-        .arg("--data-dir")
-        .arg(&plan.data_dir)
-        .arg("--logs-dir")
-        .arg(&plan.logs_dir)
-        .arg("--discovery-relays")
-        .arg(relays)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("starting fake phone {}", wnd.display()))
-}
-
-fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
-    let started = Instant::now();
-    while started.elapsed() < timeout {
-        if socket.exists() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    bail!("fake phone socket did not appear: {}", socket.display())
-}
-
-fn fake_whitenoise_config(config: &Config, plan: &FakePhonePlan) -> WhitenoiseConfig {
-    let mut fake = config.whitenoise.clone();
-    fake.group_id.clear();
-    fake.group_ids.clear();
-    fake.account = None;
-    fake.socket = Some(plan.socket.display().to_string());
-    fake.allowed_senders.clear();
-    fake.use_keychain_nsec = false;
-    fake.dev_burner_nsec = false;
-    fake
-}
-
-trait WithGroup {
-    fn clone_with_group(&self, group_id: &str) -> Self;
-}
-
-impl WithGroup for WhitenoiseConfig {
-    fn clone_with_group(&self, group_id: &str) -> Self {
-        let mut config = self.clone();
-        config.group_id = group_id.to_string();
-        config.group_ids = vec![group_id.to_string()];
-        config
-    }
-}
-
-fn create_or_reuse_identity(config: &WhitenoiseConfig, plan: &FakePhonePlan) -> Result<String> {
-    let mut nsec = load_or_create_burner_nsec(plan)?;
-    let phone_npub = match npub_from_nsec(&nsec) {
-        Ok(npub) => npub,
-        Err(error) => {
-            nsec.zeroize();
-            return Err(error);
-        }
+    let setup = AccountSetupRequest {
+        identity: None,
+        default_relays: endpoints.clone(),
+        bootstrap_relays: endpoints.clone(),
+        publish_missing_relay_lists: true,
+        publish_initial_key_package: true,
     };
-    let login = whitenoise_cli::login_with_nsec(config, &nsec, None)
-        .with_context(|| format!("logging fake phone identity into {}", plan.socket.display()));
-    nsec.zeroize();
-    login?;
-    Ok(phone_npub)
-}
+    let desktop = runtime
+        .create_identity(setup.clone())
+        .await
+        .map_err(|err| anyhow::anyhow!("creating desktop identity: {err}"))?;
+    let phone = runtime
+        .create_identity(setup)
+        .await
+        .map_err(|err| anyhow::anyhow!("creating phone identity: {err}"))?;
 
-fn load_or_create_burner_nsec(plan: &FakePhonePlan) -> Result<String> {
-    match fs::read_to_string(&plan.nsec_file) {
-        Ok(secret) => {
-            let nsec = secret.trim().to_string();
-            secrets::validate_nsec(&nsec)
-                .with_context(|| format!("validating {}", plan.nsec_file.display()))?;
-            return Ok(nsec);
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", plan.nsec_file.display()));
-        }
-    }
+    let desktop_id = desktop.account.account_id_hex.clone();
+    let phone_id = phone.account.account_id_hex.clone();
+    let phone_npub = npub_from_account_id(&phone_id)?;
 
-    let keys = Keys::generate();
-    let nsec = keys.secret_key().to_bech32().expect("nsec bech32");
-    write_burner_nsec(&plan.nsec_file, &nsec)?;
-    Ok(nsec)
-}
+    let mut events = runtime.subscribe();
 
-fn npub_from_nsec(nsec: &str) -> Result<String> {
-    let keys = Keys::parse(nsec).context("parsing fake phone burner nsec")?;
-    keys.public_key()
-        .to_bech32()
-        .context("encoding fake phone npub")
-}
-
-fn write_burner_nsec(path: &Path, nsec: &str) -> Result<()> {
-    secrets::validate_nsec(nsec)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(path, format!("{nsec}\n")).with_context(|| format!("writing {}", path.display()))?;
-    set_burner_file_permissions(path)
-}
-
-#[cfg(unix)]
-fn set_burner_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .with_context(|| format!("reading permissions for {}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("setting permissions on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_burner_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn create_group(config: &WhitenoiseConfig, name: &str, agent_npub: &str) -> Result<String> {
-    let created = whitenoise_cli::create_group(config, name, &[agent_npub.to_string()])?;
-    created
-        .group_id
-        .or_else(|| whitenoise_cli::group_id_from_output(&created.output))
-        .context("White Noise did not return a group id")
-}
-
-#[derive(Debug)]
-struct ReplyOutcome {
-    replies: Vec<String>,
-    matched: Vec<String>,
-    expected: Vec<String>,
-    min_replies: usize,
-    require_job_final: bool,
-    saw_job_final: bool,
-}
-
-impl ReplyOutcome {
-    fn new(options: &FakePhoneRoundtrip) -> Self {
-        Self {
-            replies: Vec::new(),
-            matched: Vec::new(),
-            expected: options
-                .expect
-                .iter()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect(),
-            min_replies: options.min_replies.max(1),
-            require_job_final: options.require_job_final,
-            saw_job_final: false,
-        }
-    }
-
-    fn record(&mut self, reply: String) {
-        if is_job_final_reply(&reply) {
-            self.saw_job_final = true;
-        }
-        for expected in &self.expected {
-            if reply.contains(expected) && !self.matched.iter().any(|value| value == expected) {
-                self.matched.push(expected.clone());
-            }
-        }
-        self.replies.push(reply);
-    }
-
-    fn satisfied(&self) -> bool {
-        self.replies.len() >= self.min_replies
-            && self.matched.len() == self.expected.len()
-            && (!self.require_job_final || self.saw_job_final)
-    }
-
-    fn failure_message(&self) -> String {
-        let mut missing = Vec::new();
-        if self.replies.len() < self.min_replies {
-            missing.push(format!(
-                "received {} reply/replies, need {}",
-                self.replies.len(),
-                self.min_replies
-            ));
-        }
-        let unmatched = self
-            .expected
-            .iter()
-            .filter(|expected| !self.matched.iter().any(|matched| matched == *expected))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !unmatched.is_empty() {
-            missing.push(format!("missing expected text: {}", unmatched.join(", ")));
-        }
-        if self.require_job_final && !self.saw_job_final {
-            missing.push("missing final job reply".to_string());
-        }
-        let detail = if self.replies.is_empty() {
-            "no replies received".to_string()
-        } else {
-            format!("last reply: {}", self.replies.last().unwrap())
-        };
-        format!(
-            "fake phone roundtrip timed out: {}; {}",
-            missing.join("; "),
-            detail
+    let group_id = runtime
+        .create_group(
+            &phone_id,
+            &options.group_name,
+            std::slice::from_ref(&desktop_id),
+            None,
         )
-    }
-}
+        .await
+        .map_err(|err| anyhow::anyhow!("phone create_group: {err}"))?;
+    let group_id_hex = hex::encode(group_id.as_slice());
 
-fn send_until_replies(
-    client: &WnClient,
-    config: &WhitenoiseConfig,
-    group_id: &str,
-    options: &FakePhoneRoundtrip,
-) -> Result<ReplyOutcome> {
-    let group_id = group_id.to_string();
-    let sent_message = options.message.clone();
-    let (tx, rx) = mpsc::channel();
-    let mut children = vec![subscribe_replies(
-        client,
-        config,
-        &group_id,
-        &sent_message,
-        tx.clone(),
-    )?];
-    let mut subscribed_groups = vec![group_id.clone()];
+    // Wait for desktop to receive the welcome.
+    let desktop_id_match = desktop_id.clone();
+    let group_id_match = group_id.clone();
+    wait_for_event(&mut events, Duration::from_secs(5), move |event| {
+        matches!(
+            event,
+            MarmotAppEvent::GroupJoined { account_id_hex, group_id: gid, .. }
+                if account_id_hex == &desktop_id_match && gid == &group_id_match
+        )
+    })
+    .await
+    .context("desktop did not receive GroupJoined event within 5s")?;
 
-    let started = Instant::now();
-    let mut last_send = Instant::now() - Duration::from_secs(10);
-    let mut sent_after_reply = false;
-    let mut outcome = ReplyOutcome::new(options);
-    while started.elapsed() < options.timeout {
-        if !sent_after_reply && last_send.elapsed() >= Duration::from_secs(5) {
-            client.send_to(&group_id, &options.message)?;
-            last_send = Instant::now();
-        }
-        match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Ok(reply)) => {
-                if reply_should_stop_resending(&reply, &outcome.expected) {
-                    sent_after_reply = true;
-                }
-                if let Some(next_group_id) = extract_chat_uri_group_id(&reply)
-                    && !subscribed_groups
-                        .iter()
-                        .any(|group_id| group_id == &next_group_id)
-                {
-                    children.push(subscribe_replies(
-                        client,
-                        config,
-                        &next_group_id,
-                        &sent_message,
-                        tx.clone(),
-                    )?);
-                    subscribed_groups.push(next_group_id);
-                }
-                outcome.record(reply);
-                if outcome.satisfied() {
-                    break;
-                }
+    // Spawn the desktop responder: wraps every received message in an agent
+    // text stream lifecycle and echoes a synthetic reply.
+    let runtime_for_desktop = runtime.clone();
+    let desktop_id_for_handler = desktop_id.clone();
+    let group_id_for_handler = group_id.clone();
+    let group_id_hex_for_handler = group_id_hex.clone();
+    let pin_for_handler = options.pin.clone();
+    let desktop_task = tokio::spawn(async move {
+        let mut subscription = match runtime_for_desktop.subscribe_messages(
+            &desktop_id_for_handler,
+            AppMessageQuery {
+                group_id_hex: Some(group_id_hex_for_handler.clone()),
+                limit: None,
+            },
+        ) {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                eprintln!("fake-phone: desktop subscribe_messages failed: {error:#}");
+                return;
             }
-            Ok(Err(error)) => {
-                for child in &mut children {
-                    child.kill().ok();
-                }
-                return Err(error);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    for child in &mut children {
-        child.kill().ok();
-    }
-    Ok(outcome)
-}
-
-fn subscribe_replies(
-    client: &WnClient,
-    config: &WhitenoiseConfig,
-    group_id: &str,
-    sent_message: &str,
-    tx: mpsc::Sender<Result<String>>,
-) -> Result<Child> {
-    if let Err(error) = whitenoise_cli::accept_group(config, group_id) {
-        eprintln!("agentnoise fake-phone: failed to accept group {group_id}: {error:#}");
-    }
-    let mut child = client.subscribe_group_with_limit(group_id, 0)?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("fake phone subscribe did not expose stdout")?;
-    let reader_group_id = group_id.to_string();
-    let sent_message = sent_message.to_string();
-    thread::spawn(move || {
-        for value in WnClient::parse_events_from_reader(stdout) {
-            let value = match value {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = tx.send(Err(error));
-                    return;
-                }
+        };
+        while let Some(update) = subscription.recv().await {
+            let RuntimeMessageUpdate::Message(received) = update else {
+                continue;
             };
-            for event in WnClient::parse_events_for_group(&value, &reader_group_id) {
-                if is_command_reply(&event.text, &sent_message) {
-                    let _ = tx.send(Ok(event.text));
-                }
+            if received.message.sender == desktop_id_for_handler {
+                continue;
+            }
+            if let Err(error) = handle_desktop_message(
+                &runtime_for_desktop,
+                &desktop_id_for_handler,
+                &group_id_for_handler,
+                &received.message.plaintext,
+                pin_for_handler.as_deref(),
+            )
+            .await
+            {
+                eprintln!("fake-phone: desktop reply failed: {error:#}");
             }
         }
     });
-    Ok(child)
-}
 
-fn is_command_reply(text: &str, sent_message: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty()
-        && text != sent_message.trim()
-        && text != "Paired. Send /help for commands."
-        && text != "paired\nsend /help"
-        && !text.starts_with("agentnoise up ")
-        && !is_pairing_pin_message(text)
-        && !text.starts_with("I saw this while catching up after startup,")
-}
+    // Phone subscribes for the reply stream BEFORE sending so it doesn't miss
+    // anything.
+    let mut phone_messages = runtime
+        .subscribe_messages(
+            &phone_id,
+            AppMessageQuery {
+                group_id_hex: Some(group_id_hex.clone()),
+                limit: None,
+            },
+        )
+        .map_err(|err| anyhow::anyhow!("phone subscribe_messages: {err}"))?;
+    let mut phone_events = runtime.subscribe();
 
-fn reply_should_stop_resending(reply: &str, expected: &[String]) -> bool {
-    if expected.is_empty() {
-        return true;
+    runtime
+        .send_message(&phone_id, &group_id, options.message.as_bytes().to_vec())
+        .await
+        .map_err(|err| anyhow::anyhow!("phone send_message: {err}"))?;
+
+    let mut replies: Vec<String> = Vec::new();
+    let mut saw_start = false;
+    let mut saw_finalize = false;
+    let deadline = Instant::now() + options.timeout;
+
+    while Instant::now() < deadline {
+        let satisfied = replies.len() >= options.min_replies.max(1)
+            && options
+                .expect
+                .iter()
+                .all(|needle| replies.iter().any(|reply| reply.contains(needle)))
+            && (!options.require_job_final || saw_finalize);
+        if satisfied {
+            break;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let tick = std::cmp::min(remaining, Duration::from_millis(250));
+        tokio::select! {
+            _ = tokio::time::sleep(tick) => {}
+            update = phone_messages.recv() => {
+                match update {
+                    Some(RuntimeMessageUpdate::Message(message))
+                        if message.message.sender == desktop_id =>
+                    {
+                        replies.push(message.message.plaintext);
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            event = phone_events.recv() => {
+                match event {
+                    Ok(MarmotAppEvent::AgentStreamStarted(stream))
+                        if stream.account_id_hex == phone_id =>
+                    {
+                        saw_start = true;
+                    }
+                    Ok(MarmotAppEvent::AgentStreamFinalized(stream))
+                        if stream.account_id_hex == phone_id =>
+                    {
+                        saw_finalize = true;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => {}
+                }
+            }
+        }
     }
-    expected.iter().any(|expected| reply.contains(expected))
-        || is_job_session_started_reply(reply)
-        || is_job_ack_reply(reply)
-        || is_job_final_reply(reply)
+
+    desktop_task.abort();
+    runtime.shutdown().await;
+    let _ = saw_start;
+
+    let matched: Vec<String> = options
+        .expect
+        .iter()
+        .filter(|needle| replies.iter().any(|reply| reply.contains(needle.as_str())))
+        .cloned()
+        .collect();
+
+    Ok(FakePhoneResult {
+        phone_npub,
+        group_id: group_id_hex,
+        replies,
+        matched,
+        saw_job_final: saw_finalize,
+    })
 }
 
-fn is_job_session_started_reply(text: &str) -> bool {
-    let text = text.trim();
-    (text.starts_with("Started session: ") || text.starts_with("started "))
-        && text.contains("whitenoise://chat/")
-}
+async fn handle_desktop_message(
+    runtime: &MarmotAppRuntime,
+    account_id_hex: &str,
+    group_id: &cgka_traits::GroupId,
+    text: &str,
+    pin: Option<&str>,
+) -> Result<()> {
+    let stream_id = stream_id_for_message(text);
+    let started_at = current_unix_seconds();
 
-fn is_job_ack_reply(text: &str) -> bool {
-    let text = text.trim();
-    ((text.starts_with("Got it: ") || text.contains("\nGot it: ")) && text.contains(" job queued"))
-        || (text.starts_with("Job ") && text.contains(": started"))
-        || text
-            .lines()
-            .next()
-            .is_some_and(|line| line.ends_with(" queued") || line.ends_with(" started"))
-}
+    // The brokered-QUIC route requires at least one candidate even if the
+    // harness never opens a real QUIC channel — the start/finish envelopes
+    // alone exercise the protocol-layer wiring.
+    let quic_candidates = vec!["quic://127.0.0.1:0".to_string()];
+    let (_envelope, _summary) = runtime
+        .start_agent_text_stream(
+            account_id_hex,
+            group_id,
+            &stream_id,
+            started_at,
+            quic_candidates,
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("start_agent_text_stream: {err}"))?;
 
-fn extract_chat_uri_group_id(text: &str) -> Option<String> {
-    let (_, rest) = text.split_once("whitenoise://chat/")?;
-    let group_id = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_hexdigit())
-        .collect::<String>();
-    (!group_id.is_empty()).then_some(group_id)
-}
+    let reply = render_fake_desktop_reply(text, pin);
+    runtime
+        .send_message(account_id_hex, group_id, reply.as_bytes().to_vec())
+        .await
+        .map_err(|err| anyhow::anyhow!("desktop reply send_message: {err}"))?;
 
-fn is_job_final_reply(text: &str) -> bool {
-    let text = text.trim();
-    let Some(first) = text.lines().next().map(str::trim) else {
-        return false;
+    let mut hasher = Sha256::new();
+    hasher.update(reply.as_bytes());
+    let transcript_hash: [u8; 32] = hasher.finalize().into();
+
+    let finish_request = AgentTextStreamFinishRequest {
+        stream_id: stream_id.to_vec(),
+        final_text_or_reference: reply,
+        transcript_hash,
+        chunk_count: 1,
+        finished_at: current_unix_seconds(),
     };
-    (first.starts_with("Job ") || first.starts_with("an-"))
-        && (first.contains(" done")
-            || first.contains(" succeeded")
-            || first.contains(" failed")
-            || first.contains(" cancelled")
-            || first.contains(" interrupted"))
-        && text.contains("\n/tail ")
+    runtime
+        .finish_agent_text_stream(account_id_hex, group_id, finish_request)
+        .await
+        .map_err(|err| anyhow::anyhow!("finish_agent_text_stream: {err}"))?;
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fake_phone_plan_is_isolated_under_data_dir() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = Config::template();
-        config.runner.data_dir = temp.path().join("data").display().to_string();
-        let plan = plan(&config, None);
-        assert!(plan.root.ends_with("fake-phone"));
-        assert!(plan.socket.ends_with("wnd.sock"));
+fn render_fake_desktop_reply(prompt: &str, pin: Option<&str>) -> String {
+    let trimmed = prompt.trim();
+    if let Some(pin) = pin
+        && trimmed == pin
+    {
+        return format!("paired (PIN {pin})");
     }
-
-    #[test]
-    fn fake_phone_identity_uses_reused_burner_nsec_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = Config::template();
-        config.runner.data_dir = temp.path().join("data").display().to_string();
-        let plan = plan(&config, Some(temp.path()));
-
-        let nsec = load_or_create_burner_nsec(&plan).unwrap();
-        let npub = npub_from_nsec(&nsec).unwrap();
-        assert!(nsec.starts_with("nsec1"));
-        assert!(npub.starts_with("npub1"));
-        assert!(plan.nsec_file.is_file());
-
-        let reused = load_or_create_burner_nsec(&plan).unwrap();
-        assert_eq!(reused, nsec);
-        assert_eq!(npub_from_nsec(&reused).unwrap(), npub);
+    if let Some(rest) = trimmed.strip_prefix("/help") {
+        let _ = rest;
+        return "agentnoise (fake-phone) commands: /help /status /codex <prompt>".to_string();
     }
-
-    #[test]
-    fn fake_phone_reply_filter_ignores_harness_noise() {
-        assert!(!is_command_reply("", "/status"));
-        assert!(!is_command_reply("/status", "/status"));
-        assert!(!is_command_reply("123456", "/status"));
-        assert!(!is_command_reply("/pair 123-456", "/status"));
-        assert!(!is_command_reply(
-            " Paired. Send /help for commands. ",
-            "/status"
-        ));
-        assert!(!is_command_reply("paired\nsend /help", "/status"));
-        assert!(!is_command_reply(
-            "I saw this while catching up after startup, so I did not run it:\n/status\nSend it again now, or send /help.",
-            "/status"
-        ));
-        assert!(!is_command_reply(
-            "agentnoise up 19:31Z\nfrontier\nsandbox:/\n/status /help",
-            "/status"
-        ));
-        assert!(is_command_reply(
-            "running | bondage\nmain | sandbox:/",
-            "/status"
-        ));
+    if let Some(rest) = trimmed.strip_prefix("/codex") {
+        let prompt = rest.trim();
+        return format!("codex queued: {prompt}\ncompleted in 0s (synthetic)");
     }
+    format!("agentnoise (fake-phone) received: {trimmed}")
+}
 
-    #[test]
-    fn fake_phone_only_stops_resending_on_useful_expected_replies() {
-        let expected = vec!["done".to_string()];
-        assert!(!reply_should_stop_resending(
-            "This sender is not paired with agentnoise.",
-            &expected
-        ));
-        assert!(reply_should_stop_resending(
-            "codex queued\nsandbox:/\nI'll reply here when done.",
-            &expected
-        ));
-        assert!(reply_should_stop_resending(
-            "an-12345 started\ncodex",
-            &expected
-        ));
-        assert!(reply_should_stop_resending(
-            "started m5-research\nopen: whitenoise://chat/abcdef0123456789\ncontinue there",
-            &expected
-        ));
-        assert!(reply_should_stop_resending("all done", &expected));
-        assert!(reply_should_stop_resending(
-            "This sender is not paired with agentnoise.",
-            &[]
-        ));
-    }
+fn stream_id_for_message(message: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentnoise.fake-phone.stream:");
+    hasher.update(message.as_bytes());
+    hasher.finalize().into()
+}
 
-    #[test]
-    fn fake_phone_detects_final_job_reply() {
-        assert!(!is_job_final_reply("Job an-123 codex: started"));
-        assert!(!is_job_final_reply("Job an-123 codex: succeeded"));
-        assert!(is_job_final_reply("an-12345 done\nok\n\n/tail an-12345"));
-        assert!(is_job_final_reply(
-            "an-12345 failed\nboom\n\n/tail an-12345"
-        ));
-    }
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
-    #[test]
-    fn fake_phone_extracts_job_session_group_link() {
-        assert_eq!(
-            extract_chat_uri_group_id(
-                "Started session: m5\nOpen: whitenoise://chat/abcdef0123456789\nnext"
-            )
-            .as_deref(),
-            Some("abcdef0123456789")
-        );
-        assert!(extract_chat_uri_group_id("Open: https://example.com").is_none());
-    }
+fn npub_from_account_id(account_id_hex: &str) -> Result<String> {
+    use nostr::PublicKey;
+    use nostr::nips::nip19::ToBech32;
+    let pk = PublicKey::from_hex(account_id_hex).context("decoding account id hex")?;
+    pk.to_bech32().context("encoding npub bech32")
+}
 
-    #[test]
-    fn fake_phone_outcome_requires_expected_text_and_final_job() {
-        let options = FakePhoneRoundtrip {
-            root: PathBuf::from("/tmp/fake"),
-            pin: None,
-            message: "/codex hi".to_string(),
-            group_name: "test".to_string(),
-            timeout: Duration::from_secs(1),
-            expect: vec!["ok".to_string()],
-            min_replies: 2,
-            require_job_final: true,
-        };
-        let mut outcome = ReplyOutcome::new(&options);
-        outcome.record("codex queued".to_string());
-        assert!(!outcome.satisfied());
-        outcome.record("an-12345 done\nok\n\n/tail an-12345".to_string());
-        assert!(outcome.satisfied());
+async fn wait_for_event<F>(
+    events: &mut tokio::sync::broadcast::Receiver<MarmotAppEvent>,
+    timeout: Duration,
+    mut matches_event: F,
+) -> Result<MarmotAppEvent>
+where
+    F: FnMut(&MarmotAppEvent) -> bool + Send,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("timed out waiting for event");
+        }
+        let received = tokio::time::timeout(remaining, events.recv())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for event"))?;
+        match received {
+            Ok(event) => {
+                if matches_event(&event) {
+                    return Ok(event);
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                anyhow::bail!("event broadcast closed before match");
+            }
+        }
     }
 }

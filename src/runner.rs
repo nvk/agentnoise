@@ -389,7 +389,7 @@ impl Runner {
         }
         if request.agent == AgentKind::Codex && launchd_service_context() {
             bail!(
-                "Codex jobs cannot run reliably from macOS launchd/brew services: `codex exec` can start but never produce output. Start agentnoise from a login shell instead, for example `tmux new -s agentnoise 'agentnoise up --no-daemon'` after the White Noise daemon is running. Manual: https://github.com/nvk/agentnoise/blob/main/docs/services.md#macos"
+                "Codex jobs cannot run reliably from macOS launchd/brew services: `codex exec` can start but never produce output. Start agentnoise from a login shell instead, for example `tmux new -s agentnoise 'agentnoise up'`. Manual: https://github.com/nvk/agentnoise/blob/main/docs/services.md#macos"
             );
         }
         let permission_mode = self.config.effective_permission_mode_for_request(request)?;
@@ -426,10 +426,17 @@ impl Runner {
                     "-p".to_string(),
                     "--output-format".to_string(),
                     "stream-json".to_string(),
-                    "--resume".to_string(),
-                    session.to_string(),
-                    prompt,
+                    "--verbose".to_string(),
                 ]);
+                if let Some(model) = agent
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                {
+                    args.extend(["--model".to_string(), model.to_string()]);
+                }
+                args.extend(["--resume".to_string(), session.to_string(), prompt]);
                 None
             }
             (AgentKind::Claude, None) => {
@@ -438,16 +445,27 @@ impl Runner {
                     "-p".to_string(),
                     "--output-format".to_string(),
                     "stream-json".to_string(),
+                    "--verbose".to_string(),
                 ]);
+                if let Some(model) = agent
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                {
+                    args.extend(["--model".to_string(), model.to_string()]);
+                }
                 if let Some(permission_mode) = &permission_mode
                     && !permission_mode.trim().is_empty()
                 {
                     args.extend(["--permission-mode".to_string(), permission_mode.clone()]);
                 }
+                // `--add-dir` is variadic in Claude Code; keep the prompt before it
+                // so the parser does not consume the prompt as another directory.
                 args.extend([
+                    prompt,
                     "--add-dir".to_string(),
                     repo_root.display().to_string(),
-                    prompt,
                 ]);
                 Some(workdir)
             }
@@ -1029,7 +1047,7 @@ fn content_item_text(value: &Value) -> Option<String> {
 fn agentnoise_prompt(request: &AgentRequest) -> String {
     let mut context = vec![
         "Agentnoise context:".to_string(),
-        "- You are running under agentnoise, a White Noise phone-to-desktop control bridge.".to_string(),
+        "- You are running under agentnoise, a Marmot v2 phone-to-desktop control bridge.".to_string(),
         "- The user is chatting from a phone; reply concise, outcome-first, with no Markdown tables or raw logs unless asked.".to_string(),
         "- Full logs stay local; mention /tail <job> when extra detail is useful.".to_string(),
         "- The selected repo, cwd, and session come from agentnoise. Do not ask the user to SSH into this machine.".to_string(),
@@ -1372,7 +1390,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.progress_interval_seconds = 1;
         config.runner.silence_ping_seconds = 1;
-        config.runner.startup_silence_timeout_seconds = 1;
+        config.runner.startup_silence_timeout_seconds = 2;
         config.runner.startup_retry_attempts = 1;
         config.runner.job_timeout_seconds = 20;
         config.agents.codex.bin = bin.display().to_string();
@@ -1437,7 +1455,63 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
         assert!(plan.args.contains(&"--resume".to_string()));
         assert!(plan.args.contains(&"session-1".to_string()));
+        assert!(plan.args.contains(&"--verbose".to_string()));
         assert_eq!(plan.args.last().unwrap(), &agentnoise_prompt(&request));
+    }
+
+    #[test]
+    fn claude_prompt_precedes_variadic_add_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.launcher = crate::config::RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let request = AgentRequest::new(AgentKind::Claude, "work", "hello");
+        let plan = runner.build_command(&request).unwrap();
+
+        let prompt_index = plan
+            .args
+            .iter()
+            .position(|arg| arg == &agentnoise_prompt(&request))
+            .unwrap();
+        let add_dir_index = plan.args.iter().position(|arg| arg == "--add-dir").unwrap();
+
+        assert!(prompt_index < add_dir_index);
+        assert!(plan.args.contains(&"--verbose".to_string()));
+        assert_eq!(
+            plan.args[add_dir_index + 1],
+            repo.path().display().to_string()
+        );
+    }
+
+    #[test]
+    fn claude_command_uses_configured_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.launcher = crate::config::RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.agents.claude.model = Some("sonnet".to_string());
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let plan = runner
+            .build_command(&AgentRequest::new(AgentKind::Claude, "work", "hello"))
+            .unwrap();
+
+        let model_index = plan.args.iter().position(|arg| arg == "--model").unwrap();
+        assert_eq!(plan.args[model_index + 1], "sonnet");
     }
 
     #[test]

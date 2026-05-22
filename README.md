@@ -6,9 +6,11 @@
 ░▀░▀░▀▀▀░▀▀▀░▀░▀░░▀░░▀░▀░▀▀▀░▀▀▀░▀▀▀░▀▀▀
 ```
 
-Chat with local coding agents through White Noise.
+Chat with local coding agents over Marmot v2.
 
-`agentnoise` is a native desktop helper for using a phone running White Noise as the control surface for local Codex, Claude, and optional Hermes sessions. It is intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
+`agentnoise` is a native desktop helper that lets a phone running a Marmot v2 client drive local Codex, Claude, and optional Hermes sessions. It's intentionally Rust-first and keeps Node/npm/bun out of the trusted bridge path.
+
+As of **v0.2.0** agentnoise embeds the Marmot v2 protocol stack (the [`darkmatter`](https://github.com/marmot-protocol/darkmatter) `marmot-app` crate) directly — no more `wn` / `wnd` subprocess install. See [docs/darkmatter.md](docs/darkmatter.md) for the integration architecture and [docs/release-notes.md](docs/release-notes.md) for the changelog.
 
 agentnoise exists because the available agent-chat bridges were too heavy,
 too slow-moving, or too awkward for the simple workflow this project needs: a
@@ -130,7 +132,7 @@ starting a second listener, and disposable development identities can use
 
 ## What It Does
 
-agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher, [`bondage`](https://agentbondage.org/) by default or direct raw CLIs by explicit opt-in, stores job state and logs locally, and posts results back through White Noise. The primary paired chat acts like an inbox: starting a new job there creates a new White Noise work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
+agentnoise listens to one or more Marmot v2 chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher, [`bondage`](https://agentbondage.org/) by default or direct raw CLIs by explicit opt-in, stores job state and logs locally, and posts results back through Marmot v2. The primary paired chat acts like an inbox: starting a new job there creates a new Marmot v2 work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each Marmot group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The most tested target is macOS. Linux and FreeBSD service templates are
 included and should be treated as newer paths.
@@ -141,9 +143,9 @@ included and should be treated as newer paths.
 - recommended/default: `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
 - Codex CLI and Claude Code CLI
 - optional: Hermes Agent CLI plus a dedicated `bondage` profile, or direct Hermes mode
-- `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
-- OS keychain access if using automatic White Noise login repair with a real identity
-- a dedicated White Noise group for agent control
+- The Marmot v2 stack ([`darkmatter`](https://github.com/marmot-protocol/darkmatter)) is embedded as a Cargo dependency — no external `wn` / `wnd` install
+- OS keychain access for the desktop helper `nsec` (managed by the embedded engine)
+- a dedicated Marmot v2 group for agent control (created from a Marmot v2 phone client)
 
 agentnoise launches coding agents through dedicated `bondage` profiles by
 default: `codex-agentnoise`, `claude-agentnoise`, and optional
@@ -173,7 +175,7 @@ launcher = "direct"
 ```
 
 Direct mode does not require `bondage` at runtime. It still uses structured argv
-and the same White Noise pairing/allowlist, but local filesystem, network,
+and the same Marmot v2 pairing/allowlist, but local filesystem, network,
 secret, and approval behavior is whatever the raw agent CLI enforces. Use
 `agentnoise doctor` or `agentnoise agents` to confirm the active launcher.
 
@@ -190,14 +192,14 @@ like `/codex-fix`.
 
 ## Security Stack
 
-agentnoise is the phone and White Noise control plane. It does not try to make
+agentnoise is the phone and Marmot v2 control plane. It does not try to make
 remote chat messages safe by itself; it keeps command parsing small, requires a
 first-pairing PIN before trusting a sender, and hands local execution to the
 agent security stack.
 
 The intended stack is:
 
-- [White Noise](https://www.whitenoise.chat/) carries the phone chat and desktop identity discovery.
+- The [Marmot v2 protocol](https://github.com/marmot-protocol/darkmatter) (embedded `marmot-app` crate) carries the phone chat and desktop identity discovery.
 - The OS keychain stores the dedicated desktop helper `nsec` for normal use; `config.toml` stores only public identity and runtime configuration.
 - [`bondage`](https://agentbondage.org/) is the local launcher/policy boundary for Codex, Claude, and other agent profiles. It keeps launch decisions explicit: pinned target, expected hash, configured args, and selected sandbox profile.
 - [`envchain-xtra`](https://envchain-xtra.org/) can be used under bondage when an agent profile needs explicit secret release instead of ambient shell environment.
@@ -240,8 +242,9 @@ Then start it. Homebrew services are the simple setup and boot path:
 brew services start nvk/tap/agentnoise
 ```
 
-The service starts White Noise, repairs login when needed, discovers chats,
-handles pairing, and keeps non-Codex commands available after reboot.
+The service starts the embedded Marmot v2 engine, ensures the desktop account
+is logged in, discovers chats, handles pairing, and keeps non-Codex commands
+available after reboot.
 
 For `/codex` jobs on macOS, run the engine from a login shell instead of the
 Homebrew/launchd service. Current Codex CLI builds can hang before producing
@@ -249,13 +252,13 @@ output when launched directly by launchd:
 
 ```sh
 brew services stop nvk/tap/agentnoise
-agentnoise up --no-daemon
+agentnoise up
 ```
 
 Over SSH, keep that foreground engine alive with tmux:
 
 ```sh
-tmux new -s agentnoise 'agentnoise up --no-daemon'
+tmux new -s agentnoise 'agentnoise up'
 ```
 
 `agentnoise up` is still safe to run while the Homebrew service is enabled. If
@@ -265,14 +268,14 @@ service process, so stop the service first when you want phone-launched Codex
 jobs on macOS.
 
 On first run, agentnoise creates the desktop identity, stores its `nsec` in the
-OS keychain, starts White Noise, publishes the profile/key package, and opens
-the pairing window.
+OS keychain, starts the embedded Marmot v2 engine, publishes the profile/key
+package, and opens the pairing window.
 
 After the desktop `npub` is written to config, service restarts use that public
-identity for QR/profile setup and avoid reading the `nsec` unless White Noise
-login repair is needed. The listener still requires a logged-in White Noise
-signing account before it can send replies. If macOS blocks background Keychain
-access during repair, authorize it from Terminal once:
+identity for QR/profile setup and avoid reading the `nsec` unless the engine
+needs to log in. The listener still requires a logged-in Marmot v2 signing
+account before it can send replies. If macOS blocks background Keychain access
+during repair, authorize it from Terminal once:
 
 ```sh
 agentnoise keychain status
@@ -281,8 +284,8 @@ agentnoise keychain status
 Pair the phone:
 
 1. Look for the macOS `agentnoise pairing` window.
-2. Scan the QR from White Noise on the phone.
-3. Create a White Noise chat/group with the agentnoise desktop identity.
+2. Scan the QR with your Marmot v2 phone client.
+3. Create a Marmot v2 chat/group with the agentnoise desktop identity.
 4. Type the 6-digit PIN shown on the desktop as the first phone message.
 5. Send `/status`, then `/help`.
 
@@ -316,7 +319,7 @@ agentnoise up --ssh --phone npub1... --name agentnoise-mbp
 In `--ssh` mode, agentnoise prints the pairing PIN in the SSH session and does
 not open a desktop GUI alert. Pass the phone `npub`, not an `nsec`; the remote
 machine creates and stores its own desktop identity locally. Use a distinct
-`--name` per machine so White Noise can show `agentnoise-mbp`,
+`--name` per machine so your Marmot v2 phone client can show `agentnoise-mbp`,
 `agentnoise-linuxbox`, or whatever label makes sense.
 
 After setup, check or change the published machine label without passing any
@@ -327,7 +330,7 @@ agentnoise identity status
 agentnoise identity rename agentnoise-linuxbox
 ```
 
-The service is expected to start even before the White Noise chat exists. It
+The service is expected to start even before the Marmot v2 chat exists. It
 waits, keeps showing a rotating PIN while pairing is required, and discovers
 the phone-created chat automatically. During first pairing it also reads a small
 initial message window, so a PIN sent right after chat creation can still be
@@ -343,12 +346,13 @@ target/release/agentnoise up
 The QR scans as the desktop `npub`. The terminal also prints the `nprofile`
 with relay hints. Neither value exposes the desktop `nsec`.
 
-Pairing relay hints are for discovery. Message delivery uses the White Noise
-account relay list. agentnoise now keeps a broader message relay list in config
-and reconciles it through `wn relays add` after login:
+Pairing relay hints are for discovery. Message delivery uses the Marmot v2
+account relay list. agentnoise keeps a broader message relay list in config
+and publishes it via the embedded engine's `runtime.publish_account_relay_lists`:
 
 ```toml
-[whitenoise]
+[darkmatter]
+agent_text_stream_broker = "https://quic-broker.ipf.dev:4450"
 message_relays = [
   "wss://index.hzrd149.com",
   "wss://relay.primal.net",
@@ -358,11 +362,14 @@ message_relays = [
 ]
 ```
 
-Inspect or apply those relays manually:
+`agent_text_stream_broker` is used for live QUIC previews while an agent is
+responding. agentnoise announces the configured broker to Marmot clients as a
+`quic://` candidate in the stream start payload.
+
+Smoke-test the embedded engine + relay list:
 
 ```sh
-agentnoise whitenoise relays
-agentnoise whitenoise ensure-relays
+agentnoise darkmatter probe --relay wss://relay.primal.net
 ```
 
 If the phone does not show a reply, first check whether the desktop created one:
@@ -372,11 +379,11 @@ agentnoise status
 tail -f "$HOME/Library/Application Support/agentnoise/runtime-events.jsonl"
 ```
 
-`reply-sent` means agentnoise handed the message to White Noise and stored it
-locally. The phone can still render it late if the White Noise relay or mobile
-sync path is delayed. Reopening the chat or restarting the local `agentnoise up`
-/ `wnd` pair can flush old replies, but treat that as a transport diagnostic,
-not proof that the agent ignored the command.
+`reply-sent` means agentnoise handed the message to the embedded Marmot v2
+engine and stored it locally. The phone can still render it late if the relay
+or mobile sync path is delayed. Reopening the chat or restarting the local
+`agentnoise up` can flush old replies, but treat that as a transport
+diagnostic, not proof that the agent ignored the command.
 
 ### Development Burner Identity
 
@@ -388,40 +395,29 @@ agentnoise up --dev-burner-nsec
 
 That creates a burner `nsec` at
 `~/Library/Application Support/agentnoise/dev-burner.nsec`, sets
-`whitenoise.dev_burner_nsec = true`, and makes future `agentnoise up` or
+`darkmatter.dev_burner_nsec = true`, and makes future `agentnoise up` or
 Homebrew service runs use that file instead of the OS keychain. This is
 plaintext by design. Do not use it for a real phone identity or a production
 desktop helper.
 
-This flag bypasses the agentnoise keychain store. White Noise still owns its
-own daemon account store after `wn login`; on platforms where that store is
-unavailable, `agentnoise doctor` or startup will show the upstream White Noise
-login error explicitly.
+This flag bypasses the agentnoise keychain store. The embedded Marmot v2 engine
+imports the nsec on startup and manages its own per-account SQLCipher state
+under `~/.local/agentnoise/darkmatter/`.
 
-If you already have the phone identity `npub`, agentnoise can create the White
-Noise control chat too:
-
-```sh
-target/release/agentnoise up --phone npub... --name agentnoise-mbp
-```
-
-Otherwise scan the QR, create a White Noise chat/group with the desktop
-identity, and leave the listener running. If you used `--no-listen` or stopped
+Under Marmot v2 the phone creates the control group (the desktop discovers it
+via `MarmotAppEvent::GroupJoined`). Scan the QR with your Marmot v2 phone
+client, create a chat/group with the desktop identity, and leave the listener
+running. If you used `--no-listen` or stopped
 the process, start or attach again:
 
 ```sh
 target/release/agentnoise up
 ```
 
-To open another independent session, create another White Noise chat with the
-same agentnoise desktop identity. The running listener discovers visible chats
-periodically; each chat has separate `/use`, `/cd`, and prompt context.
-
-If `wn`/`wnd` are not already packaged beside `agentnoise`, install them under agentnoise's managed data directory:
-
-```sh
-target/release/agentnoise whitenoise install
-```
+To open another independent session, create another Marmot v2 chat with the
+same agentnoise desktop identity. The running listener picks up new groups via
+`MarmotAppEvent::GroupJoined` from the embedded engine; each chat has separate
+`/use`, `/cd`, and prompt context.
 
 Install as a user LaunchAgent:
 
@@ -442,12 +438,8 @@ cargo build --release
 install -Dm755 target/release/agentnoise ~/.local/bin/agentnoise
 ```
 
-Install the bundled White Noise CLI tools if `wn` and `wnd` are not already on
-the service user's `PATH`:
-
-```sh
-agentnoise whitenoise install
-```
+Under Marmot v2 the protocol stack is embedded — no external CLI install is
+needed.
 
 Run the first pairing in the foreground. On Linux the QR and rotating PIN are
 printed to the terminal/logs:
@@ -491,7 +483,6 @@ sudo install -m 0755 target/release/agentnoise /usr/local/bin/agentnoise
 Create the config and do first pairing as the user that should own the helper:
 
 ```sh
-agentnoise whitenoise install
 agentnoise up
 ```
 
@@ -590,12 +581,13 @@ Plain text and unknown slash commands are not executed, but they are answered.
 The reply points the user at `/help` and `/codex <prompt>` so a mistyped phone
 message does not look like a dead daemon.
 
-Codex and Claude JSON streams are converted into occasional progress messages
-while a job runs. The default interval is conservative
-(`runner.progress_interval_seconds = 15`) so the phone chat does not become
-unreadable. If a running job goes quiet, agentnoise sends a "still running"
-ping after `runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel
-<job>` hints. If a new launch emits no output at all for
+Codex and Claude JSON streams are converted into occasional live stream
+previews while a job runs. The default interval is conservative
+(`runner.progress_interval_seconds = 15`) so the phone preview does not become
+noisy; if the QUIC broker is unavailable, agentnoise falls back to chat progress.
+If a running job goes quiet, agentnoise sends a "still running" ping after
+`runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel <job>` hints.
+If a new launch emits no output at all for
 `runner.startup_silence_timeout_seconds = 90`, agentnoise terminates that
 attempt and retries once by default. Final job output still arrives as one
 normal reply, with `/tail <job>` for logs.
@@ -777,7 +769,7 @@ defaults to 30 seconds.
 
 ## More
 
-- [White Noise setup](docs/whitenoise.md)
+- [Marmot v2 (darkmatter) integration](docs/darkmatter.md)
 - [Local bring-up](docs/local-bringup.md)
 - [Remote SSH pairing](docs/remote-ssh.md)
 - [Fake phone testing](docs/fake-phone-testing.md)

@@ -130,7 +130,7 @@ fn platform_spawn_pairing_pin_alert(
 fn platform_show_pairing_success_alert() -> Result<()> {
     let script = format!(
         "display dialog {} buttons {{\"OK\"}} default button \"OK\" with title \"agentnoise pairing\"",
-        applescript_string("agentnoise paired.\n\nSend /help from White Noise.")
+        applescript_string("agentnoise paired.\n\nSend /help from your Marmot v2 phone client.")
     );
     let mut handle = spawn_osascript(script)?;
     handle.child.wait().ok();
@@ -219,7 +219,7 @@ function label(text, x, y, width, height, size, bold) {
 }
 
 label('Pair agentnoise', 25, 600, 450, 30, 22, true);
-label('Scan this desktop identity in White Noise, then send the PIN.', 45, 568, 410, 28, 13, false);
+label('Scan this desktop identity in your Marmot v2 phone client, then send the PIN.', 45, 568, 410, 28, 13, false);
 
 const image = $.NSImage.alloc.initWithContentsOfFile(qrPath);
 const imageView = $.NSImageView.alloc.initWithFrame($.NSMakeRect(80, 230, 340, 340));

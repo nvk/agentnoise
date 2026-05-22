@@ -7,12 +7,21 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{default_config_path, default_data_dir, default_log_dir, expand_tilde};
+use crate::paths::{
+    default_config_path, default_data_dir, default_log_dir, expand_tilde, instance_config_path,
+    instance_data_dir, instance_log_dir, instance_name_from_config_path, instance_root,
+    normalize_instance_name,
+};
 use crate::runner::{AgentKind, AgentRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub whitenoise: WhitenoiseConfig,
+    #[serde(default)]
+    pub instance: Option<String>,
+    // `alias = "whitenoise"` lets pre-0.2 configs that still write the
+    // `[whitenoise]` section deserialize into the new `darkmatter` field.
+    #[serde(alias = "whitenoise")]
+    pub darkmatter: DarkmatterConfig,
     pub runner: RunnerConfig,
     #[serde(default)]
     pub local_sessions: LocalSessionsConfig,
@@ -21,34 +30,18 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhitenoiseConfig {
+pub struct DarkmatterConfig {
     pub group_id: String,
     #[serde(default)]
     pub group_ids: Vec<String>,
     #[serde(default)]
     pub account: Option<String>,
-    #[serde(default = "default_wn_bin")]
-    pub wn_bin: String,
-    #[serde(default)]
-    pub socket: Option<String>,
-    #[serde(default)]
-    pub transport: WhitenoiseTransport,
-    #[serde(default)]
-    pub use_keychain_nsec: bool,
-    #[serde(default)]
-    pub dev_burner_nsec: bool,
-    #[serde(default)]
-    pub dev_burner_nsec_file: Option<String>,
-    #[serde(default)]
-    pub login_relay: Option<String>,
+    #[serde(default = "default_agent_text_stream_broker")]
+    pub agent_text_stream_broker: String,
     #[serde(default = "default_pairing_relays")]
     pub pairing_relays: Vec<String>,
     #[serde(default = "default_message_relays")]
     pub message_relays: Vec<String>,
-    #[serde(default = "default_keychain_service")]
-    pub keychain_service: String,
-    #[serde(default = "default_keychain_item")]
-    pub keychain_item: String,
     #[serde(default = "default_subscribe_limit")]
     pub subscribe_limit: u32,
     #[serde(default = "default_max_message_chars")]
@@ -145,14 +138,6 @@ impl fmt::Display for RunnerLauncher {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum WhitenoiseTransport {
-    #[default]
-    Cli,
-    Socket,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentsConfig {
     pub codex: AgentConfig,
@@ -167,6 +152,8 @@ pub struct AgentConfig {
     pub enabled: bool,
     pub profile: String,
     pub bin: String,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -188,8 +175,14 @@ pub struct RepoConfig {
 }
 
 impl Config {
-    pub fn path_or_default(path: Option<PathBuf>) -> PathBuf {
-        path.unwrap_or_else(default_config_path)
+    pub fn path_or_default(path: Option<PathBuf>, instance: Option<&str>) -> PathBuf {
+        if let Some(path) = path {
+            return path;
+        }
+        instance
+            .and_then(normalize_instance_name)
+            .map(|name| instance_config_path(&name))
+            .unwrap_or_else(default_config_path)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -205,7 +198,7 @@ impl Config {
         if path.exists() {
             Self::load(path)
         } else {
-            Ok(Self::template())
+            Ok(Self::template_for_path(path))
         }
     }
 
@@ -219,7 +212,7 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let mut config = Self::template();
+        let mut config = Self::template_for_path(path);
         config.runner.launcher = launcher;
         fs::write(
             path,
@@ -250,21 +243,14 @@ impl Config {
             .to_string();
 
         Self {
-            whitenoise: WhitenoiseConfig {
+            instance: None,
+            darkmatter: DarkmatterConfig {
                 group_id: String::new(),
                 group_ids: Vec::new(),
                 account: None,
-                wn_bin: default_wn_bin(),
-                socket: None,
-                transport: WhitenoiseTransport::Cli,
-                use_keychain_nsec: false,
-                dev_burner_nsec: false,
-                dev_burner_nsec_file: None,
-                login_relay: None,
+                agent_text_stream_broker: default_agent_text_stream_broker(),
                 pairing_relays: default_pairing_relays(),
                 message_relays: default_message_relays(),
-                keychain_service: default_keychain_service(),
-                keychain_item: default_keychain_item(),
                 subscribe_limit: default_subscribe_limit(),
                 max_message_chars: default_max_message_chars(),
                 ignore_initial_messages: true,
@@ -300,6 +286,7 @@ impl Config {
                     enabled: true,
                     profile: recommended_agentnoise_profile(AgentKind::Codex).to_string(),
                     bin: "codex".to_string(),
+                    model: None,
                     permission_mode: None,
                     profiles: Vec::new(),
                 },
@@ -307,6 +294,7 @@ impl Config {
                     enabled: true,
                     profile: recommended_agentnoise_profile(AgentKind::Claude).to_string(),
                     bin: "claude".to_string(),
+                    model: None,
                     permission_mode: Some("auto".to_string()),
                     profiles: Vec::new(),
                 },
@@ -316,6 +304,44 @@ impl Config {
                 alias: "sandbox".to_string(),
                 path: repo_path,
             }],
+        }
+    }
+
+    pub fn template_for_path(path: &Path) -> Self {
+        if let Some(instance) = instance_name_from_config_path(path) {
+            Self::template_for_instance(&instance)
+        } else {
+            Self::template()
+        }
+    }
+
+    pub fn template_for_instance(name: &str) -> Self {
+        let mut config = Self::template();
+        config.apply_instance_defaults(name);
+        config
+    }
+
+    /// Repoint every per-instance artifact (data/log/worktree dirs, profile
+    /// name, sandbox repo path) at an isolated `instances/<name>/` root. Note:
+    /// keychain isolation is handled separately — the embedded engine keys
+    /// secrets per `account_id_hex`, and the per-instance data_dir already
+    /// gives each instance its own account-home + group DBs. The keychain
+    /// *service* name is derived per-instance in `DarkmatterEngine::open`.
+    pub fn apply_instance_defaults(&mut self, name: &str) {
+        let Some(name) = normalize_instance_name(name) else {
+            return;
+        };
+        self.instance = Some(name.clone());
+        self.darkmatter.profile_name = format!("agentnoise-{name}");
+        self.darkmatter.profile_display_name = format!("agentnoise {name}");
+        self.runner.data_dir = instance_data_dir(&name).display().to_string();
+        self.runner.log_dir = instance_log_dir(&name).display().to_string();
+        self.runner.worktree_dir = instance_data_dir(&name)
+            .join("worktrees")
+            .display()
+            .to_string();
+        if self.repos.len() == 1 && self.repos[0].alias == "sandbox" {
+            self.repos[0].path = instance_root(&name).join("sandbox").display().to_string();
         }
     }
 
@@ -338,21 +364,27 @@ impl Config {
         if self.local_sessions.notify_limit == 0 {
             bail!("local_sessions.notify_limit must be greater than zero");
         }
-        if self.whitenoise.pairing_pin_seconds < 10 {
-            bail!("whitenoise.pairing_pin_seconds must be at least 10");
+        if self.darkmatter.pairing_pin_seconds < 10 {
+            bail!("darkmatter.pairing_pin_seconds must be at least 10");
         }
-        if self.whitenoise.profile_name.trim().is_empty() {
-            bail!("whitenoise.profile_name cannot be empty");
+        if self.darkmatter.agent_text_stream_broker.trim().is_empty() {
+            bail!("darkmatter.agent_text_stream_broker must not be empty");
         }
-        if self.whitenoise.profile_display_name.trim().is_empty() {
-            bail!("whitenoise.profile_display_name cannot be empty");
+        if self.darkmatter.profile_name.trim().is_empty() {
+            bail!("darkmatter.profile_name cannot be empty");
         }
-        if self.whitenoise.transport == WhitenoiseTransport::Socket
-            && self.whitenoise.resolved_socket().is_none()
-        {
-            bail!("whitenoise.transport = \"socket\" requires whitenoise.socket");
+        if self.darkmatter.profile_display_name.trim().is_empty() {
+            bail!("darkmatter.profile_display_name cannot be empty");
         }
-
+        if let Some(instance) = self.instance.as_deref() {
+            let normalized = normalize_instance_name(instance)
+                .with_context(|| format!("invalid instance name: {instance}"))?;
+            if normalized != instance {
+                bail!(
+                    "instance name `{instance}` must normalize to `{normalized}`; use lowercase letters, digits, and dashes"
+                );
+            }
+        }
         let mut aliases = HashSet::new();
         for repo in &self.repos {
             if repo.alias.trim().is_empty() {
@@ -545,16 +577,9 @@ impl Config {
     pub fn resolved_bondage_conf(&self) -> PathBuf {
         expand_tilde(&self.runner.bondage_conf)
     }
-
-    pub fn secret_store(&self) -> crate::secrets::SecretStore {
-        crate::secrets::SecretStore::new(
-            &self.whitenoise.keychain_service,
-            &self.whitenoise.keychain_item,
-        )
-    }
 }
 
-impl WhitenoiseConfig {
+impl DarkmatterConfig {
     pub fn control_group_ids(&self) -> Vec<String> {
         let mut group_ids = Vec::new();
         push_unique_group_id(&mut group_ids, &self.group_id);
@@ -590,14 +615,6 @@ impl WhitenoiseConfig {
         self.group_id = normalized.first().cloned().unwrap_or_default();
         self.group_ids = normalized;
     }
-
-    pub fn resolved_socket(&self) -> Option<PathBuf> {
-        self.socket
-            .as_deref()
-            .map(str::trim)
-            .filter(|socket| !socket.is_empty())
-            .map(expand_tilde)
-    }
 }
 
 fn push_unique_group_id(group_ids: &mut Vec<String>, group_id: &str) {
@@ -610,18 +627,6 @@ fn push_unique_group_id(group_ids: &mut Vec<String>, group_id: &str) {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_wn_bin() -> String {
-    "wn".to_string()
-}
-
-fn default_keychain_service() -> String {
-    crate::secrets::DEFAULT_SERVICE.to_string()
-}
-
-fn default_keychain_item() -> String {
-    crate::secrets::DEFAULT_ITEM.to_string()
 }
 
 fn default_pairing_relays() -> Vec<String> {
@@ -644,6 +649,10 @@ fn default_subscribe_limit() -> u32 {
 
 fn default_max_message_chars() -> usize {
     1_800
+}
+
+pub fn default_agent_text_stream_broker() -> String {
+    "https://quic-broker.ipf.dev:4450".to_string()
 }
 
 fn default_pairing_pin_seconds() -> u64 {
@@ -727,6 +736,7 @@ fn default_hermes_agent_config() -> AgentConfig {
         enabled: false,
         profile: recommended_agentnoise_profile(AgentKind::Hermes).to_string(),
         bin: "hermes".to_string(),
+        model: None,
         permission_mode: None,
         profiles: Vec::new(),
     }
@@ -772,7 +782,7 @@ mod tests {
 
     #[test]
     fn control_group_ids_deduplicate_legacy_and_list_values() {
-        let mut config = Config::template().whitenoise;
+        let mut config = Config::template().darkmatter;
         config.group_id = "abc".to_string();
         config.group_ids = vec![
             "abc".to_string(),
@@ -789,7 +799,7 @@ mod tests {
 
     #[test]
     fn add_control_group_id_keeps_legacy_first_group() {
-        let mut config = Config::template().whitenoise;
+        let mut config = Config::template().darkmatter;
         config.add_control_group_id("abc");
         config.add_control_group_id("def");
         config.add_control_group_id("abc");
@@ -804,7 +814,7 @@ mod tests {
 
     #[test]
     fn set_control_group_ids_replaces_stale_groups() {
-        let mut config = Config::template().whitenoise;
+        let mut config = Config::template().darkmatter;
         config.group_id = "stale".to_string();
         config.group_ids = vec!["stale".to_string(), "old".to_string()];
 
@@ -823,6 +833,16 @@ mod tests {
         assert_eq!(
             config.control_group_ids(),
             vec!["active".to_string(), "next".to_string()]
+        );
+    }
+
+    #[test]
+    fn template_uses_public_agent_text_stream_broker() {
+        let config = Config::template();
+
+        assert_eq!(
+            config.darkmatter.agent_text_stream_broker,
+            "https://quic-broker.ipf.dev:4450"
         );
     }
 
@@ -865,8 +885,8 @@ path = "/tmp"
         assert!(!config.local_sessions.watch);
         assert_eq!(config.local_sessions.watch_interval_seconds, 60);
         assert_eq!(config.local_sessions.notify_limit, 5);
-        assert_eq!(config.whitenoise.profile_name, "agentnoise");
-        assert_eq!(config.whitenoise.profile_display_name, "agentnoise desktop");
+        assert_eq!(config.darkmatter.profile_name, "agentnoise");
+        assert_eq!(config.darkmatter.profile_display_name, "agentnoise desktop");
     }
 
     #[test]
@@ -895,6 +915,40 @@ path = "/tmp"
                 .to_string()
                 .contains("local_sessions.notify_limit")
         );
+    }
+
+    #[test]
+    fn instance_template_sets_isolated_defaults() {
+        let path = crate::paths::instance_config_path("alice");
+        let config = Config::template_for_path(&path);
+
+        assert_eq!(config.instance.as_deref(), Some("alice"));
+        assert_eq!(config.darkmatter.profile_name, "agentnoise-alice");
+        assert!(
+            config
+                .runner
+                .data_dir
+                .ends_with("/agentnoise/instances/alice/data")
+        );
+        assert!(
+            config
+                .runner
+                .log_dir
+                .ends_with("/agentnoise/instances/alice")
+        );
+        assert!(
+            config.repos[0]
+                .path
+                .ends_with("/agentnoise/instances/alice/sandbox")
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn path_or_default_uses_named_instance_path() {
+        let path = Config::path_or_default(None, Some("Alice Laptop"));
+
+        assert!(path.ends_with("agentnoise/instances/alice-laptop/config.toml"));
     }
 
     #[test]

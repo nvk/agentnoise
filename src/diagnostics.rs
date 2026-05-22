@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::events::{EventSummary, summarize_event_log};
 use crate::jobs::JobStore;
 use crate::runtime;
-use crate::whitenoise_cli;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
@@ -19,7 +18,10 @@ pub struct StatusReport {
     pub recent_jobs: usize,
     pub active_jobs: usize,
     pub key_store: String,
-    pub whitenoise_daemon: String,
+    /// v2 migration: see [`crate::darkmatter_app::DarkmatterEngine`] for the
+    /// embedded engine state. Live engine introspection (relay health, account
+    /// running state) needs a tokio runtime and is a follow-up to this phase.
+    pub darkmatter_engine: String,
 }
 
 pub fn status_report(config: &Config) -> Result<StatusReport> {
@@ -29,32 +31,19 @@ pub fn status_report(config: &Config) -> Result<StatusReport> {
         .iter()
         .filter(|job| job.status.is_active())
         .count();
-    let key_store = if config.whitenoise.dev_burner_nsec {
-        "dev-burner".to_string()
-    } else if config.whitenoise.use_keychain_nsec {
-        "keychain:configured".to_string()
-    } else {
-        "none".to_string()
-    };
-    let wn = whitenoise_cli::resolve_wn(&config.whitenoise.wn_bin);
-    let whitenoise_daemon = match whitenoise_cli::daemon_status_with_socket(
-        &wn,
-        config.whitenoise.resolved_socket().as_deref(),
-    ) {
-        Ok(status) => status,
-        Err(error) => format!("unavailable: {error:#}"),
-    };
+    let key_store = "keychain (via marmot-account KeychainSecretStore)".to_string();
+    let darkmatter_engine = "embedded (use `agentnoise darkmatter probe` for liveness)".to_string();
 
     Ok(StatusReport {
         engine_running: runtime::engine_is_running(config)?,
         runtime: runtime::read_status(config)?,
         agent_launcher: config.runner.launcher.to_string(),
-        groups: config.whitenoise.control_group_ids(),
+        groups: config.darkmatter.control_group_ids(),
         event_summary: summarize_event_log(&config.resolved_event_log_path())?,
         recent_jobs: recent_jobs.len(),
         active_jobs,
         key_store,
-        whitenoise_daemon,
+        darkmatter_engine,
     })
 }
 
@@ -86,7 +75,7 @@ pub fn render_status_report(config_path: &Path, config: &Config) -> String {
                     report.event_summary.failed_outbound
                 ),
                 format!("identity store: {}", report.key_store),
-                format!("wn daemon: {}", report.whitenoise_daemon),
+                format!("darkmatter: {}", report.darkmatter_engine),
             ];
             if let Some(runtime) = report.runtime {
                 lines.push(format!("pid: {}", runtime.pid));

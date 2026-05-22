@@ -1,5 +1,7 @@
 # Supervisor Services
 
+> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
+
 agentnoise does not daemonize itself. The engine is a foreground process owned
 by either a supervisor or the terminal. The host supervisor owns boot, restart,
 stop, and logs.
@@ -30,6 +32,25 @@ agentnoise service uninstall --target launchd --unload
 ```
 
 `agentnoise launchd ...` remains as a macOS-specific compatibility command.
+
+For multiple isolated helpers on one machine, install named instances instead
+of sharing one service:
+
+```sh
+agentnoise --instance alice service install --target launchd --force --load
+agentnoise --instance bob service install --target launchd --force --load
+```
+
+Those write separate LaunchAgents:
+
+```text
+~/Library/LaunchAgents/com.agentnoise.agentnoise.alice.plist
+~/Library/LaunchAgents/com.agentnoise.agentnoise.bob.plist
+```
+
+On Linux they become named units (`systemctl --user status agentnoise-alice.service`);
+on FreeBSD/OpenBSD separate rc.d scripts (`/usr/local/etc/rc.d/agentnoise-alice`
+with the `agentnoise_alice_enable` rc variable).
 
 Current Codex CLI releases do not run reliably when `codex exec` is launched
 directly by launchd. They can start and then produce no output forever. The

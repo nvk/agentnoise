@@ -1,8 +1,8 @@
 [package]
 name = "agentnoise"
-version = "0.1.24"
+version = "0.2.0"
 edition = "2024"
-description = "Chat with local coding agents through White Noise"
+description = "Chat with local coding agents through Marmot / Darkmatter"
 homepage = "https://agentnoise.com"
 repository = "https://github.com/nvk/agentnoise"
 license = "MIT"
@@ -12,6 +12,7 @@ readme = "README.md"
 anyhow = "1.0.100"
 clap = { version = "4.5.51", features = ["derive"] }
 dirs = "6.0.0"
+hex = "0.4"
 hmac = "0.12.1"
 nostr = "0.44.2"
 qrcode = "0.14.1"
@@ -19,13 +20,28 @@ rpassword = "7.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+tempfile = "3.23.0"
 time = { version = "0.3.44", features = ["formatting", "macros", "parsing", "serde"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 toml = "0.9.8"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 zeroize = "1.8.2"
 
+# Darkmatter (v2 Marmot) protocol stack. Pin to a concrete upstream commit so
+# agentnoise builds from a clean checkout without a sibling darkmatter repo.
+marmot-app = { git = "https://github.com/marmot-protocol/darkmatter.git", rev = "026a3be7157ea04134ff6919f656eaa23f6159f8" }
+marmot-account = { git = "https://github.com/marmot-protocol/darkmatter.git", rev = "026a3be7157ea04134ff6919f656eaa23f6159f8" }
+cgka-traits = { git = "https://github.com/marmot-protocol/darkmatter.git", rev = "026a3be7157ea04134ff6919f656eaa23f6159f8" }
+transport-quic-broker = { git = "https://github.com/marmot-protocol/darkmatter.git", rev = "026a3be7157ea04134ff6919f656eaa23f6159f8" }
+transport-quic-stream = { git = "https://github.com/marmot-protocol/darkmatter.git", rev = "026a3be7157ea04134ff6919f656eaa23f6159f8" }
+# In-process Nostr relay used by `agentnoise fake-phone roundtrip` to drive a
+# fully-local dual-runtime smoke test without external infrastructure.
+nostr-relay-builder = "0.44"
+
 [dev-dependencies]
-tempfile = "3.23.0"
+# tempfile promoted to a regular dep above so the fake-phone harness can use it.
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"] }

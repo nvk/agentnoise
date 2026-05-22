@@ -1,35 +1,30 @@
-use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, ExitStatus};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentnoise::app::{AgentApp, NewSessionRequest, RouteAction};
+use agentnoise::app::{AgentApp, RouteAction};
 use agentnoise::auth::PairingGate;
 use agentnoise::config::{Config, RunnerLauncher};
+use agentnoise::darkmatter_app::DarkmatterEngine;
 use agentnoise::desktop_alert;
+use agentnoise::dm::DmClient;
 use agentnoise::doctor::render_doctor;
 use agentnoise::events::EventJournal;
 use agentnoise::identity;
 use agentnoise::launchd;
-use agentnoise::local_sessions::{self, LocalAgentSession};
+use agentnoise::local_sessions;
 use agentnoise::runner::{AgentKind, AgentRequest};
 use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo, RuntimePairingPin};
-use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
-use agentnoise::text::compact_timestamp;
-use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
-use agentnoise::wn::WnClient;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use zeroize::Zeroize;
-
-const FIRST_PAIRING_SUBSCRIBE_LIMIT: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListenerMode {
@@ -53,11 +48,18 @@ enum PairingDisplay {
 
 #[derive(Debug, Parser)]
 #[command(name = "agentnoise")]
-#[command(about = "Chat with local coding agents through White Noise")]
+#[command(about = "Chat with local coding agents through Marmot / Darkmatter")]
 #[command(version)]
 struct Cli {
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help = "Use a named isolated instance with separate config, data, logs, keychain, and service"
+    )]
+    instance: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -79,7 +81,7 @@ enum Command {
     Agents(AgentsArgs),
     #[command(about = "List recent local Codex/Claude sessions by metadata")]
     LocalSessions(LocalSessionsArgs),
-    #[command(about = "Run an isolated fake White Noise phone for local testing")]
+    #[command(about = "Run an in-process Marmot v2 fake phone for local testing")]
     FakePhone(FakePhoneArgs),
     Config(ConfigArgs),
     Parse {
@@ -98,7 +100,7 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         prompt: Vec<String>,
     },
-    #[command(about = "Start the daemon/login repair and listen for White Noise commands")]
+    #[command(about = "Acquire the engine lock and start the Marmot v2 listener")]
     Start(StartArgs),
     Listen,
     Send {
@@ -108,11 +110,10 @@ enum Command {
     #[command(about = "Manage native launchd/systemd/rc supervisor files")]
     Service(ServiceArgs),
     Launchd(LaunchdArgs),
-    Whitenoise(WhitenoiseArgs),
+    #[command(about = "Marmot v2 embedded engine (darkmatter): probe + diagnostics")]
+    Darkmatter(DarkmatterArgs),
     #[command(about = "Create and pair agentnoise identities")]
     Identity(IdentityArgs),
-    #[command(about = "Manage the agentnoise OS keychain bootstrap secret")]
-    Keychain(KeychainArgs),
 }
 
 #[derive(Debug, Args)]
@@ -130,10 +131,10 @@ struct InitArgs {
 struct SetupArgs {
     #[arg(
         long,
-        help = "Phone White Noise npub; creates a control chat when provided"
+        help = "Phone Marmot v2 npub; legacy hint (group creation is phone-initiated under v2)"
     )]
     phone: Option<String>,
-    #[arg(long, help = "Unique White Noise/Nostr profile name for this machine")]
+    #[arg(long, help = "Unique Marmot/Nostr profile name for this machine")]
     name: Option<String>,
     #[arg(long, default_value = setup::DEFAULT_GROUP_NAME)]
     group_name: String,
@@ -141,11 +142,6 @@ struct SetupArgs {
     force_identity: bool,
     #[arg(long = "relay")]
     relays: Vec<String>,
-    #[arg(
-        long,
-        help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
-    )]
-    dev_burner_nsec: bool,
     #[arg(
         long,
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
@@ -157,26 +153,21 @@ struct SetupArgs {
 struct UpArgs {
     #[arg(
         long,
-        help = "Phone White Noise npub; creates a control chat when provided"
+        help = "Phone Marmot v2 npub; legacy hint (group creation is phone-initiated under v2)"
     )]
     phone: Option<String>,
-    #[arg(long, help = "Unique White Noise/Nostr profile name for this machine")]
+    #[arg(long, help = "Unique Marmot/Nostr profile name for this machine")]
     name: Option<String>,
     #[arg(long, default_value = setup::DEFAULT_GROUP_NAME)]
     group_name: String,
-    #[arg(long, help = "Add a White Noise group id before starting")]
+    #[arg(long, help = "Add a Marmot group id before starting")]
     group: Option<String>,
     #[arg(long = "relay")]
     relays: Vec<String>,
     #[arg(long, help = "Stop after setup/group discovery instead of listening")]
     no_listen: bool,
-    #[arg(long, help = "Do not start wn daemon before listening")]
+    #[arg(long, help = "(legacy v1 flag, no-op under Marmot v2 embedded engine)")]
     no_daemon: bool,
-    #[arg(
-        long,
-        help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
-    )]
-    dev_burner_nsec: bool,
     #[arg(
         long,
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
@@ -229,9 +220,9 @@ struct FakePhoneArgs {
 
 #[derive(Debug, Args)]
 struct StartArgs {
-    #[arg(long, help = "Add a White Noise group id before starting")]
+    #[arg(long, help = "Add a Marmot group id before starting")]
     group: Option<String>,
-    #[arg(long, help = "Do not start wn daemon automatically")]
+    #[arg(long, help = "(legacy v1 flag, no-op under Marmot v2 embedded engine)")]
     no_daemon: bool,
     #[arg(
         long,
@@ -280,9 +271,36 @@ struct LaunchdArgs {
 }
 
 #[derive(Debug, Args)]
-struct WhitenoiseArgs {
+struct DarkmatterArgs {
     #[command(subcommand)]
-    command: WhitenoiseCommand,
+    command: DarkmatterCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DarkmatterCommand {
+    #[command(
+        about = "Bootstrap the embedded Marmot v2 engine (darkmatter) and report account state"
+    )]
+    Probe {
+        #[arg(
+            long,
+            default_value = "agentnoise-desktop",
+            help = "Managed account label inside the darkmatter home"
+        )]
+        label: String,
+        #[arg(
+            long = "relay",
+            help = "Relay URL(s) to bootstrap with; defaults to config message_relays when empty"
+        )]
+        relays: Vec<String>,
+        #[arg(
+            long,
+            help = "Path to the darkmatter home; defaults to <data-dir>/darkmatter"
+        )]
+        home: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -292,46 +310,9 @@ struct IdentityArgs {
 }
 
 #[derive(Debug, Args)]
-struct KeychainArgs {
-    #[command(subcommand)]
-    command: KeychainCommand,
-}
-
-#[derive(Debug, Args)]
 struct ServiceArgs {
     #[command(subcommand)]
     command: ServiceCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum WhitenoiseCommand {
-    #[command(about = "Show resolved White Noise CLI paths and daemon state")]
-    Status,
-    #[command(about = "List White Noise account relays used for message delivery")]
-    Relays,
-    #[command(about = "Add configured message relays to the White Noise account")]
-    EnsureRelays,
-    #[command(about = "Print the resolved wn path")]
-    Path,
-    #[command(about = "Install wn and wnd under agentnoise's managed data directory")]
-    Install {
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        root: Option<PathBuf>,
-    },
-    #[command(about = "Show wn daemon status")]
-    DaemonStatus,
-    #[command(about = "Run wn login using the configured bootstrap nsec")]
-    LoginFromKeychain {
-        #[arg(long)]
-        relay: Option<String>,
-    },
-    #[command(about = "Send one raw JSON-line request to wnd's Unix socket")]
-    SocketProbe {
-        #[arg(long, default_value = "ping")]
-        method: String,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -386,50 +367,22 @@ enum LaunchdCommand {
 enum IdentityCommand {
     #[command(about = "Show the configured desktop identity and published profile labels")]
     Status,
-    #[command(about = "Change the configured White Noise/Nostr profile name for this machine")]
+    #[command(about = "Change the configured Marmot/Nostr profile name for this machine")]
     Rename {
         name: String,
-        #[arg(long, help = "Save config only; publish on the next setup/up run")]
+        #[arg(
+            long,
+            help = "Save config only; the next listener startup re-publishes"
+        )]
         no_publish: bool,
     },
-    #[command(
-        about = "Generate one or more Nostr identities and store nsecs in the configured identity store"
-    )]
-    Create {
-        #[arg(long, default_value = "desktop")]
-        name: String,
-        #[arg(long, default_value_t = 1)]
-        count: usize,
-        #[arg(long)]
-        force: bool,
-    },
-    #[command(about = "Show a stored identity's public key")]
-    Show {
-        #[arg(long, default_value = "desktop")]
-        name: String,
-    },
-    #[command(about = "Render a phone-pairing QR for a stored identity")]
+    #[command(about = "Show the configured desktop identity npub")]
+    Show,
+    #[command(about = "Render a phone-pairing QR for the configured desktop identity")]
     Qr {
-        #[arg(long, default_value = "desktop")]
-        name: String,
         #[arg(long = "relay")]
         relays: Vec<String>,
     },
-    #[command(about = "Delete a named identity nsec from the configured identity store")]
-    Delete {
-        #[arg(long, default_value = "desktop")]
-        name: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum KeychainCommand {
-    #[command(about = "Store a White Noise nsec in the OS keychain")]
-    StoreNsec,
-    #[command(about = "Check whether the OS keychain contains an agentnoise nsec")]
-    Status,
-    #[command(about = "Delete the stored White Noise nsec from the OS keychain")]
-    DeleteNsec,
 }
 
 #[derive(Debug, Subcommand)]
@@ -462,8 +415,20 @@ enum ServiceCommand {
 }
 
 fn main() -> Result<()> {
+    init_logging();
     let cli = Cli::parse_from(normalized_cli_args());
-    let config_path = Config::path_or_default(cli.config);
+    if cli.config.is_some() && cli.instance.is_some() {
+        bail!("--instance cannot be combined with --config");
+    }
+    let instance = cli
+        .instance
+        .as_deref()
+        .map(|name| {
+            agentnoise::paths::normalize_instance_name(name)
+                .with_context(|| format!("invalid instance name: {name}"))
+        })
+        .transpose()?;
+    let config_path = Config::path_or_default(cli.config, instance.as_deref());
 
     match cli.command {
         Command::Init(args) => {
@@ -487,9 +452,7 @@ fn main() -> Result<()> {
                     group_name: args.group_name,
                     force_identity: args.force_identity,
                     relays: args.relays,
-                    dev_burner_nsec: args.dev_burner_nsec,
                     direct_agents: args.direct_agents,
-                    start_daemon: true,
                 },
             )?;
             print_setup_result(&result);
@@ -554,7 +517,11 @@ fn main() -> Result<()> {
         }
         Command::Config(args) => match args.command {
             ConfigCommand::Path => println!("{}", config_path.display()),
-            ConfigCommand::PrintTemplate => println!("{}", Config::template_toml()?),
+            ConfigCommand::PrintTemplate => println!(
+                "{}",
+                toml::to_string_pretty(&Config::template_for_path(&config_path))
+                    .context("serializing template config")?
+            ),
             ConfigCommand::Launcher { launcher } => {
                 let mut config = Config::load_or_template(&config_path)?;
                 config.runner.launcher = launcher;
@@ -593,7 +560,7 @@ fn main() -> Result<()> {
                     println!("New chat: {}", request.group_name());
                     println!("{}", request.ready_text());
                     println!(
-                        "Note: `agentnoise handle` does not create the White Noise chat; run this from the live listener for real delivery."
+                        "Note: `agentnoise handle` does not create the Marmot chat; run this from the live listener for real delivery."
                     );
                 }
                 RouteAction::ResumeSession(request) => {
@@ -625,13 +592,12 @@ fn main() -> Result<()> {
             let pairing = pairing_for_listener(&config_path, &config, PairingDisplay::Desktop)?;
             run_listener_with_mode(&config_path, config, pairing, ListenerMode::Try)?;
         }
-        Command::Send { text } => {
-            let config = Config::load(&config_path)?;
-            if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
-                eprintln!("agentnoise: restored White Noise login from configured nsec");
-            }
-            let wn = WnClient::new(config.whitenoise);
-            wn.send_reply(&text.join(" "))?;
+        Command::Send { text: _ } => {
+            bail!(
+                "`agentnoise send` is being rewritten for darkmatter — the v2 listener owns the \
+                 send path. For now use `agentnoise darkmatter probe` to validate the engine and \
+                 check docs/darkmatter.md for status."
+            );
         }
         Command::Service(args) => {
             service_command(&config_path, args)?;
@@ -652,80 +618,17 @@ fn main() -> Result<()> {
                 println!("installed {}", path.display());
             }
             LaunchdCommand::Uninstall { unload } => {
-                let removed = launchd::uninstall(unload)?;
+                let config = Config::load_or_template(&config_path)?;
+                let removed = launchd::uninstall(&config, unload)?;
                 if removed {
-                    println!("removed {}", launchd::plist_path().display());
+                    println!("removed {}", launchd::plist_path(&config).display());
                 } else {
                     println!("not installed");
                 }
             }
         },
-        Command::Whitenoise(args) => {
-            let config = Config::load_or_template(&config_path)?;
-            match args.command {
-                WhitenoiseCommand::Status => {
-                    println!("{}", whitenoise_cli::render_status(&config.whitenoise));
-                }
-                WhitenoiseCommand::Relays => {
-                    print_whitenoise_relays(&config)?;
-                }
-                WhitenoiseCommand::EnsureRelays => {
-                    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
-                        eprintln!("agentnoise: restored White Noise login from configured nsec");
-                    }
-                    let summary = whitenoise_cli::ensure_message_relays(&config.whitenoise)?;
-                    println!("configured relays: {}", summary.configured_relays);
-                    println!("added relay entries: {}", summary.added_entries);
-                    println!(
-                        "already present entries: {}",
-                        summary.already_present_entries
-                    );
-                }
-                WhitenoiseCommand::Path => {
-                    println!(
-                        "{}",
-                        whitenoise_cli::resolve_wn(&config.whitenoise.wn_bin).display()
-                    );
-                }
-                WhitenoiseCommand::Install { force, root } => {
-                    let options = WhitenoiseInstall {
-                        root: root.unwrap_or_else(agentnoise::paths::managed_whitenoise_root),
-                        force,
-                    };
-                    whitenoise_cli::install(&options)?;
-                    println!("installed White Noise CLI under {}", options.root.display());
-                }
-                WhitenoiseCommand::DaemonStatus => {
-                    let wn = whitenoise_cli::resolve_wn(&config.whitenoise.wn_bin);
-                    println!(
-                        "{}",
-                        whitenoise_cli::daemon_status_with_socket(
-                            &wn,
-                            config.whitenoise.resolved_socket().as_deref()
-                        )?
-                    );
-                }
-                WhitenoiseCommand::LoginFromKeychain { relay } => {
-                    let output = whitenoise_cli::login_from_configured_nsec(
-                        &config.whitenoise,
-                        relay.as_deref(),
-                    )?;
-                    if output.is_empty() {
-                        println!("logged in from configured nsec");
-                    } else {
-                        println!("{output}");
-                    }
-                }
-                WhitenoiseCommand::SocketProbe { method } => {
-                    let Some(socket) = config.whitenoise.resolved_socket() else {
-                        bail!("whitenoise.socket is not configured");
-                    };
-                    println!(
-                        "{}",
-                        agentnoise::wnd_socket::render_socket_probe(&socket, &method)
-                    );
-                }
-            }
+        Command::Darkmatter(args) => {
+            darkmatter_command(&config_path, args)?;
         }
         Command::Identity(args) => {
             let mut config = Config::load_or_template(&config_path)?;
@@ -736,31 +639,24 @@ fn main() -> Result<()> {
                 IdentityCommand::Rename { name, no_publish } => {
                     rename_identity_profile(&config_path, &mut config, &name, no_publish)?;
                 }
-                IdentityCommand::Create { name, count, force } => {
-                    let identities =
-                        identity::create_identities(&config.whitenoise, &name, count, force)?;
-                    println!("stored agentnoise identity nsecs");
-                    for identity in identities {
-                        println!();
-                        println!("name: {}", identity.name);
-                        println!("npub: {}", identity.npub);
-                        println!(
-                            "store: {}",
-                            identity::identity_secret_label(&config.whitenoise, &identity.name)
+                IdentityCommand::Show => match config.darkmatter.account.as_deref() {
+                    Some(npub) => println!("npub: {npub}"),
+                    None => println!(
+                        "no desktop identity configured yet; run `agentnoise setup` or `agentnoise listen` once"
+                    ),
+                },
+                IdentityCommand::Qr { relays } => {
+                    let Some(npub) = config.darkmatter.account.as_deref() else {
+                        bail!(
+                            "no desktop identity configured yet; run `agentnoise setup` or `agentnoise listen` once"
                         );
-                    }
-                }
-                IdentityCommand::Show { name } => {
-                    let public = identity::load_public_identity(&config.whitenoise, &name)?;
-                    println!("name: {}", public.name);
-                    println!("npub: {}", public.npub);
-                    println!(
-                        "store: {}",
-                        identity::identity_secret_label(&config.whitenoise, &public.name)
-                    );
-                }
-                IdentityCommand::Qr { name, relays } => {
-                    let payload = identity::pairing_payload(&config.whitenoise, &name, &relays)?;
+                    };
+                    let payload = identity::pairing_payload_from_npub(
+                        &config.darkmatter,
+                        identity::DEFAULT_IDENTITY_NAME,
+                        npub,
+                        &relays,
+                    )?;
                     println!("agentnoise pairing");
                     println!("name: {}", payload.name);
                     println!("npub: {}", payload.npub);
@@ -772,42 +668,25 @@ fn main() -> Result<()> {
                     println!();
                     println!("{}", identity::render_qr(&payload.npub)?);
                 }
-                IdentityCommand::Delete { name } => {
-                    let label = identity::delete_identity_nsec(&config.whitenoise, &name)?;
-                    println!("deleted agentnoise identity nsec from {label}");
-                }
-            }
-        }
-        Command::Keychain(args) => {
-            let config = Config::load_or_template(&config_path)?;
-            let store = config.secret_store();
-            match args.command {
-                KeychainCommand::StoreNsec => {
-                    let mut nsec = secrets::read_nsec_interactive()?;
-                    store.store_nsec(&nsec)?;
-                    nsec.zeroize();
-                    println!("stored White Noise nsec in OS keychain: {}", store.label());
-                }
-                KeychainCommand::Status => {
-                    let status = if store.nsec_status()? {
-                        "present"
-                    } else {
-                        "missing"
-                    };
-                    println!("{}: {status}", store.label());
-                }
-                KeychainCommand::DeleteNsec => {
-                    store.delete_nsec()?;
-                    println!(
-                        "deleted White Noise nsec from OS keychain: {}",
-                        store.label()
-                    );
-                }
             }
         }
     }
 
     Ok(())
+}
+
+fn init_logging() {
+    let filter = std::env::var("AGENTNOISE_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "warn".to_string());
+    let Ok(filter) = tracing_subscriber::EnvFilter::try_new(filter) else {
+        return;
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .try_init();
 }
 
 fn normalized_cli_args() -> Vec<String> {
@@ -835,84 +714,51 @@ fn print_setup_result(result: &SetupResult) {
     if result.created_config {
         println!("config file: created");
     }
-    if result.daemon_started {
-        println!("daemon: started");
+    println!("relays:");
+    for relay in &result.relays {
+        println!("- {relay}");
     }
-    if result.login_repaired {
-        println!("login: restored from configured nsec");
-    }
-    if result.profile_published {
-        println!("profile: published");
-    }
-    if result.key_package_published {
-        println!("key package: published");
-    }
-    if result.message_relay_entries_added > 0 {
-        println!(
-            "message relay entries added: {}",
-            result.message_relay_entries_added
-        );
-    }
-    if let Some(path) = &result.dev_burner_nsec_file {
-        println!("dev burner nsec: {}", path.display());
-        println!("warning: development-only plaintext secret; do not use for a real identity");
-    }
-    if let Some(group_id) = &result.group_id {
-        println!("group: {group_id}");
-        println!();
-        println!("next: agentnoise up");
-    } else if let Some(output) = &result.group_output {
-        println!("group: created, but the group id was not recognized in wn output");
-        println!("{output}");
-        println!();
-        println!("next: agentnoise up --group <group-id>");
-    } else {
-        println!("relays:");
-        for relay in &result.relays {
-            println!("- {relay}");
-        }
-        println!();
-        println!("{}", result.qr);
-        println!("next: create a White Noise group with this desktop identity.");
-        println!("If agentnoise is already running, it will discover the chat automatically.");
-        println!("Otherwise run: agentnoise up");
-    }
+    println!();
+    println!("{}", result.qr);
+    println!(
+        "next: have the phone scan this QR and start a Marmot group with the desktop identity."
+    );
+    println!(
+        "Then run: agentnoise listen (or `agentnoise darkmatter probe` to smoke-test the engine first)."
+    );
 }
 
 fn print_identity_status(config: &Config) {
     println!("identity: {}", identity::DEFAULT_IDENTITY_NAME);
-    println!("profile name: {}", config.whitenoise.profile_name);
+    println!("profile name: {}", config.darkmatter.profile_name);
     println!(
         "profile display: {}",
-        config.whitenoise.profile_display_name
+        config.darkmatter.profile_display_name
     );
-    println!("profile about: {}", config.whitenoise.profile_about);
-    println!(
-        "store: {}",
-        identity::identity_secret_label(&config.whitenoise, identity::DEFAULT_IDENTITY_NAME)
-    );
+    println!("profile about: {}", config.darkmatter.profile_about);
+    println!("secret store: OS keychain (service: \"agentnoise\", item: <account_id_hex>)");
     if let Some(npub) = config
-        .whitenoise
+        .darkmatter
         .account
         .as_deref()
-        .or(config.whitenoise.bot_npub.as_deref())
+        .or(config.darkmatter.bot_npub.as_deref())
     {
         println!("npub: {npub}");
     } else {
-        println!("npub: unavailable; run `agentnoise up` once to create the desktop identity");
+        println!("npub: unavailable; run `agentnoise listen` once to create the desktop identity");
     }
-    let groups = config.whitenoise.control_group_ids();
+    let groups = config.darkmatter.control_group_ids();
     println!("groups: {}", groups.len());
     println!(
         "allowed senders: {}",
-        config.whitenoise.allowed_senders.len()
+        config.darkmatter.allowed_senders.len()
     );
     println!("pairing relays:");
-    for relay in identity::pairing_relays(&config.whitenoise, &[]) {
+    for relay in identity::pairing_relays(&config.darkmatter, &[]) {
         println!("- {relay}");
     }
     println!("message relays:");
-    for relay in &config.whitenoise.message_relays {
+    for relay in &config.darkmatter.message_relays {
         println!("- {relay}");
     }
 }
@@ -928,74 +774,25 @@ fn rename_identity_profile(
         bail!("profile name cannot be empty");
     }
 
-    config.whitenoise.profile_name = setup::normalize_profile_name(display_name);
-    config.whitenoise.profile_display_name = display_name.to_string();
+    config.darkmatter.profile_name = setup::normalize_profile_name(display_name);
+    config.darkmatter.profile_display_name = display_name.to_string();
     config.save(config_path)?;
 
-    println!("profile name: {}", config.whitenoise.profile_name);
+    println!("profile name: {}", config.darkmatter.profile_name);
     println!(
         "profile display: {}",
-        config.whitenoise.profile_display_name
+        config.darkmatter.profile_display_name
     );
     if no_publish {
-        println!("profile: saved; next agentnoise setup/up publishes it");
+        println!("profile: saved; next `agentnoise listen` startup publishes it");
         return Ok(());
     }
 
-    if config.whitenoise.account.is_none()
-        && let Ok(public) =
-            identity::load_public_identity(&config.whitenoise, identity::DEFAULT_IDENTITY_NAME)
-    {
-        config.whitenoise.account = Some(public.npub.clone());
-        config.whitenoise.bot_npub = Some(public.npub);
-        config.save(config_path)?;
-    }
-
-    match publish_configured_profile(config) {
-        Ok(()) => println!("profile: published"),
-        Err(error) => {
-            println!("profile: saved; publish failed: {error:#}");
-            println!("run `agentnoise up` after fixing White Noise login to publish it");
-        }
-    }
-
-    Ok(())
-}
-
-fn publish_configured_profile(config: &Config) -> Result<()> {
-    let _daemon = whitenoise_cli::ensure_daemon(&config.whitenoise)?;
-    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
-        eprintln!("agentnoise: restored White Noise login from configured nsec");
-    }
-    whitenoise_cli::update_profile(
-        &config.whitenoise,
-        &config.whitenoise.profile_name,
-        &config.whitenoise.profile_display_name,
-        &config.whitenoise.profile_about,
-    )?;
-    Ok(())
-}
-
-fn print_whitenoise_relays(config: &Config) -> Result<()> {
-    let relays = whitenoise_cli::list_relays(&config.whitenoise)?;
-    println!("configured message relays:");
-    for relay in &config.whitenoise.message_relays {
-        println!("- {relay}");
-    }
-    println!("White Noise account relays:");
-    if relays.is_empty() {
-        println!("- none");
-    } else {
-        for relay in relays {
-            let types = if relay.types.is_empty() {
-                "-".to_string()
-            } else {
-                relay.types.join(",")
-            };
-            let status = relay.status.unwrap_or_else(|| "unknown".to_string());
-            println!("- {} [{}] {}", relay.url, types, status);
-        }
-    }
+    // The embedded engine publishes the user profile (Nostr kind 0) on
+    // listener startup via `runtime.publish_user_profile`. We don't have
+    // a long-lived engine here, so we just note that the publish happens
+    // on next listen.
+    println!("profile: saved; restart `agentnoise listen` to publish the new label to relays");
     Ok(())
 }
 
@@ -1033,7 +830,8 @@ fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
             path,
         } => {
             let target = target.unwrap_or_else(service::default_target);
-            match service::uninstall(target, unload, path.as_deref())? {
+            let config = Config::load_or_template(config_path)?;
+            match service::uninstall(target, &config, unload, path.as_deref())? {
                 Some(path) => println!("removed {}", path.display()),
                 None => println!("not installed"),
             }
@@ -1105,9 +903,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             group_name: args.group_name,
             force_identity: false,
             relays: args.relays.clone(),
-            dev_burner_nsec: args.dev_burner_nsec,
             direct_agents: args.direct_agents,
-            start_daemon: !args.no_daemon,
         },
     )?;
 
@@ -1118,11 +914,11 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
         .map(str::trim)
         .filter(|group| !group.is_empty())
     {
-        config.whitenoise.add_control_group_id(group);
+        config.darkmatter.add_control_group_id(group);
         config.save(config_path)?;
     }
 
-    if !config.whitenoise.has_control_group() {
+    if !config.darkmatter.has_control_group() {
         match discover_group(&mut config, config_path) {
             Err(error) => {
                 print_setup_result(&result);
@@ -1130,25 +926,23 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
                 return Ok(());
             }
             Ok(GroupDiscovery::Ready) => {
-                println!("agentnoise: discovered White Noise control chat(s)");
+                println!("agentnoise: discovered Marmot control chat(s)");
             }
             Ok(GroupDiscovery::NeedsPairing) => {
                 print_setup_result(&result);
                 println!();
                 if args.no_listen {
-                    println!(
-                        "next: scan the QR, create a White Noise chat with agentnoise, then run:"
-                    );
+                    println!("next: scan the QR, create a Marmot chat with agentnoise, then run:");
                     println!("agentnoise up");
                     return Ok(());
                 }
-                println!("agentnoise: waiting for a White Noise control chat");
+                println!("agentnoise: waiting for a Marmot control chat");
                 println!("agentnoise: scan the QR, create the chat, then send the pairing PIN");
             }
         }
     }
 
-    let groups = config.whitenoise.control_group_ids();
+    let groups = config.darkmatter.control_group_ids();
     if groups.is_empty() {
         println!("agentnoise ready for first pairing");
     } else {
@@ -1165,7 +959,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
     if let Some(first_repo) = config.default_repo_alias() {
         println!("default workspace: {first_repo}:/");
     }
-    if config.whitenoise.allowed_senders.is_empty() && config.whitenoise.require_pairing_pin {
+    if config.darkmatter.allowed_senders.is_empty() && config.darkmatter.require_pairing_pin {
         println!("phone: scan the QR and send the desktop PIN as the first message");
     } else {
         println!("phone: send /help");
@@ -1198,7 +992,6 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
         || args.group.is_some()
         || args.name.is_some()
         || !args.relays.is_empty()
-        || args.dev_burner_nsec
         || args.direct_agents
         || args.ssh
         || !config_path.exists()
@@ -1210,8 +1003,87 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
     runtime::engine_is_running(&config)
 }
 
+fn darkmatter_command(config_path: &Path, args: DarkmatterArgs) -> Result<()> {
+    match args.command {
+        DarkmatterCommand::Probe {
+            label,
+            relays,
+            home,
+            json,
+        } => {
+            let config = Config::load_or_template(config_path)?;
+            let resolved_home =
+                home.unwrap_or_else(|| config.resolved_data_dir().join("darkmatter"));
+            let bootstrap_relays: Vec<String> = if relays.is_empty() {
+                config.darkmatter.message_relays.clone()
+            } else {
+                relays
+            };
+            if bootstrap_relays.is_empty() {
+                bail!(
+                    "no relay urls available: pass --relay <url> or configure darkmatter.message_relays"
+                );
+            }
+
+            let keychain_service = agentnoise::darkmatter_app::keychain_service_for_instance(
+                config.instance.as_deref(),
+            );
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime for darkmatter probe")?;
+
+            // Reuse the configured desktop account when present so probe
+            // reports the same identity the listener uses, instead of minting
+            // a throwaway one.
+            let configured_account = config.darkmatter.account.clone();
+
+            rt.block_on(async {
+                let engine = DarkmatterEngine::open(
+                    resolved_home,
+                    bootstrap_relays.clone(),
+                    &keychain_service,
+                )?;
+                engine.start().await?;
+                let account_id_hex = engine
+                    .ensure_account(configured_account.as_deref(), &bootstrap_relays)
+                    .await?;
+
+                let report = DarkmatterProbeReport {
+                    home: engine.home().display().to_string(),
+                    account_label: label,
+                    account_id_hex,
+                    relays: bootstrap_relays,
+                };
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("darkmatter engine started");
+                    println!("home:    {}", report.home);
+                    println!("label:   {}", report.account_label);
+                    println!("account: {}", report.account_id_hex);
+                    println!("relays:  {}", report.relays.join(", "));
+                }
+
+                engine.shutdown().await;
+                anyhow::Ok(())
+            })
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DarkmatterProbeReport {
+    home: String,
+    account_label: String,
+    account_id_hex: String,
+    relays: Vec<String>,
+}
+
 fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
-    let config = Config::load(config_path)?;
+    let config = Config::load_or_template(config_path)?;
     match args.command {
         FakePhoneCommand::Plan { root, json } => {
             let plan = agentnoise::fake_phone::plan(&config, root.as_deref());
@@ -1286,7 +1158,6 @@ fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> 
         || args.group.is_some()
         || args.name.is_some()
         || !args.relays.is_empty()
-        || args.dev_burner_nsec
         || args.ssh
         || !config_path.exists()
     {
@@ -1294,7 +1165,19 @@ fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> 
     }
 
     let config = Config::load(config_path)?;
+    let mut last_notice = Instant::now() - Duration::from_secs(30);
     while runtime::engine_is_running(&config)? {
+        if last_notice.elapsed() >= Duration::from_secs(30) {
+            match runtime::engine_lock_owner(&config)? {
+                Some(pid) => eprintln!(
+                    "agentnoise: another listener is running as pid {pid}; service startup is waiting for it to exit"
+                ),
+                None => eprintln!(
+                    "agentnoise: another listener is running; service startup is waiting for it to exit"
+                ),
+            }
+            last_notice = Instant::now();
+        }
         thread::sleep(Duration::from_secs(1));
     }
     Ok(())
@@ -1313,18 +1196,15 @@ enum GroupDiscovery {
     NeedsPairing,
 }
 
-fn discover_group(config: &mut Config, config_path: &Path) -> Result<GroupDiscovery> {
-    let groups = whitenoise_cli::list_groups(&config.whitenoise)?;
-    if groups.is_empty() {
-        return Ok(GroupDiscovery::NeedsPairing);
+fn discover_group(config: &mut Config, _config_path: &Path) -> Result<GroupDiscovery> {
+    // Under v2, group discovery is event-driven via `MarmotAppEvent::GroupJoined`
+    // from the embedded `MarmotAppRuntime`. Until the listener fully ports,
+    // we rely on the configured control group id (set after first pairing).
+    if config.darkmatter.has_control_group() {
+        Ok(GroupDiscovery::Ready)
+    } else {
+        Ok(GroupDiscovery::NeedsPairing)
     }
-
-    whitenoise_cli::accept_pending_groups(&config.whitenoise, &groups)?;
-    config
-        .whitenoise
-        .set_control_group_ids(groups.into_iter().map(|group| group.group_id));
-    config.save(config_path)?;
-    Ok(GroupDiscovery::Ready)
 }
 
 fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Result<()> {
@@ -1335,7 +1215,7 @@ fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Re
         .map(str::trim)
         .filter(|group| !group.is_empty())
     {
-        config.whitenoise.add_control_group_id(group);
+        config.darkmatter.add_control_group_id(group);
         config.save(config_path)?;
     }
 
@@ -1345,15 +1225,11 @@ fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Re
         return Ok(());
     };
 
-    let _daemon = if args.no_daemon {
-        None
-    } else {
-        let daemon = whitenoise_cli::ensure_daemon(&config.whitenoise)?;
-        if daemon.is_some() {
-            eprintln!("agentnoise: started White Noise daemon");
-        }
-        daemon
-    };
+    if !args.no_daemon {
+        // v1 used to spawn `wnd` here. The v2 embedded engine starts inside
+        // run_listener via `DarkmatterEngine::start`.
+        eprintln!("agentnoise: darkmatter engine starts inline with the listener");
+    }
 
     let pairing_display = if args.ssh {
         PairingDisplay::TerminalOnly
@@ -1372,11 +1248,11 @@ fn pairing_for_listener(
     config: &Config,
     display: PairingDisplay,
 ) -> Result<Option<PairingRuntime>> {
-    if !config.whitenoise.require_pairing_pin || !config.whitenoise.allowed_senders.is_empty() {
+    if !config.darkmatter.require_pairing_pin || !config.darkmatter.allowed_senders.is_empty() {
         return Ok(None);
     }
 
-    let gate = PairingGate::new(config.whitenoise.pairing_pin_seconds);
+    let gate = PairingGate::new(config.darkmatter.pairing_pin_seconds);
     let payload = setup::pairing(config_path, &[])?;
     println!("agentnoise pairing required");
     println!("QR contains the desktop npub. The printed nprofile includes relay hints.");
@@ -1435,81 +1311,386 @@ fn pairing_runtime_info(
         npub: pairing.payload.npub.clone(),
         nprofile: pairing.payload.nprofile.clone(),
         relays: pairing.payload.relays.clone(),
-        pin_seconds: config.whitenoise.pairing_pin_seconds,
+        pin_seconds: config.darkmatter.pairing_pin_seconds,
         current_pin: None,
     })
 }
 
 fn run_listener(
     config_path: &Path,
-    mut config: Config,
+    config: Config,
     pairing: Option<PairingRuntime>,
     _guard: EngineGuard,
 ) -> Result<()> {
-    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
-        eprintln!("agentnoise: restored White Noise login from configured nsec");
+    let dm_home = config.resolved_data_dir().join("darkmatter");
+    let bootstrap_relays = config.darkmatter.message_relays.clone();
+    if bootstrap_relays.is_empty() {
+        bail!(
+            "darkmatter.message_relays is empty; set at least one relay in {} before listening",
+            config_path.display()
+        );
     }
-    match whitenoise_cli::ensure_message_relays(&config.whitenoise) {
-        Ok(summary) if summary.added_entries > 0 => {
-            eprintln!(
-                "agentnoise: added {} White Noise message relay entries",
-                summary.added_entries
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            eprintln!("agentnoise: failed to ensure White Noise message relays: {error:#}");
-        }
+
+    let keychain_service =
+        agentnoise::darkmatter_app::keychain_service_for_instance(config.instance.as_deref());
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for the darkmatter listener")?;
+    let tokio_handle = tokio_runtime.handle().clone();
+
+    let engine = DarkmatterEngine::open(dm_home, bootstrap_relays.clone(), &keychain_service)?;
+    tokio_handle.block_on(engine.start())?;
+    let account_id_hex = tokio_handle
+        .block_on(engine.ensure_account(config.darkmatter.account.as_deref(), &bootstrap_relays))?;
+    eprintln!("agentnoise: darkmatter account ready: {account_id_hex}");
+
+    if let Some(pairing_runtime) = pairing.clone() {
+        spawn_pairing_pin_display(config.clone(), pairing_runtime);
     }
-    reconcile_discovered_groups(config_path, &mut config);
-    if let Some(pairing) = pairing.clone() {
-        spawn_pairing_pin_display(config.clone(), pairing);
-    }
+
     let app = Arc::new(AgentApp::new_with_auth(
         config_path.to_path_buf(),
-        config,
+        config.clone(),
         pairing.map(|pairing| pairing.gate),
     )?);
     let recovered = app.recover_interrupted_jobs()?;
     if recovered > 0 {
         eprintln!("agentnoise: marked {recovered} unfinished job(s) interrupted after restart");
     }
-    let wn = Arc::new(WnClient::new(app.config().whitenoise.clone()));
-    listen(config_path, app, wn)
+
+    let event_journal = Arc::new(Mutex::new(EventJournal::open(
+        &app.config().resolved_event_log_path(),
+    )?));
+
+    let max_chars = config.darkmatter.max_message_chars;
+    let dm = Arc::new(DmClient::new(
+        engine.clone(),
+        account_id_hex.clone(),
+        max_chars,
+        tokio_handle.clone(),
+    ));
+
+    let group_ids = config.darkmatter.control_group_ids();
+    if group_ids.is_empty() {
+        println!(
+            "agentnoise listening (no paired group yet — show the QR and let the phone create one)"
+        );
+    } else {
+        for group_id in &group_ids {
+            println!("agentnoise listening on group {group_id}");
+        }
+    }
+
+    let (tx, rx) = mpsc::channel::<agentnoise::dm::MessageEvent>();
+    for group_id in &group_ids {
+        let dm_clone = Arc::clone(&dm);
+        let tx_clone = tx.clone();
+        let group_id = group_id.clone();
+        tokio_handle.spawn(async move {
+            let mut subscription = match dm_clone.subscribe_group(&group_id).await {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
+                    return;
+                }
+            };
+            for event in subscription.snapshot() {
+                if tx_clone.send(event).is_err() {
+                    return;
+                }
+            }
+            while let Some(event) = subscription.next_message().await {
+                if tx_clone.send(event).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    spawn_local_session_watcher_simple(config_path, &config, &dm, &event_journal);
+    spawn_group_join_discovery(
+        &tokio_handle,
+        engine.clone(),
+        Arc::clone(&dm),
+        account_id_hex.clone(),
+        config_path.to_path_buf(),
+        group_ids.iter().cloned().collect(),
+        tx.clone(),
+    );
+    drop(tx);
+
+    let ignore_initial = config.darkmatter.ignore_initial_messages;
+
+    for event in rx {
+        let Some(group_id) = event.group_id.clone() else {
+            continue;
+        };
+        {
+            let mut journal = event_journal
+                .lock()
+                .map_err(|_| anyhow::anyhow!("event journal lock poisoned"))?;
+            if journal.already_seen(&group_id, event.id.as_deref()) {
+                continue;
+            }
+            if let Err(error) = journal.record_inbound(&event) {
+                eprintln!("agentnoise: failed to record inbound event: {error:#}");
+            }
+        }
+        if ignore_initial && event.is_initial {
+            continue;
+        }
+
+        let action = match app.route_message(
+            event.group_id.as_deref(),
+            event.sender.as_deref(),
+            &event.text,
+        ) {
+            Ok(action) => action,
+            Err(error) => {
+                eprintln!("agentnoise: routing failed: {error:#}");
+                continue;
+            }
+        };
+
+        match action {
+            RouteAction::Ignore => {}
+            RouteAction::Reply(reply) => {
+                if let Err(error) = dm.send_reply_to_blocking(&group_id, &reply) {
+                    eprintln!("agentnoise: failed to send reply: {error:#}");
+                }
+            }
+            RouteAction::NewSession(_) | RouteAction::ResumeSession(_) => {
+                let _ = dm.send_reply_to_blocking(
+                    &group_id,
+                    "agentnoise: parallel/resume sessions are not yet wired through darkmatter v2 (Phase 3 follow-up)",
+                );
+            }
+            RouteAction::Run(request) => {
+                let app_clone = Arc::clone(&app);
+                let dm_clone = Arc::clone(&dm);
+                let event_journal_clone = Arc::clone(&event_journal);
+                let engine_clone = engine.clone();
+                let account_id_clone = account_id_hex.clone();
+                let group = group_id.clone();
+                let handle_clone = tokio_handle.clone();
+                thread::spawn(move || {
+                    let job_id = uuid::Uuid::new_v4().to_string();
+                    let started_at = agentnoise::dm_streams::current_unix_seconds();
+                    let broker_endpoint = app_clone
+                        .config()
+                        .darkmatter
+                        .agent_text_stream_broker
+                        .clone();
+
+                    let stream_result = agentnoise::dm_streams::AgentTextStream::start_blocking(
+                        engine_clone,
+                        account_id_clone,
+                        &group,
+                        &job_id,
+                        started_at,
+                        &broker_endpoint,
+                        &handle_clone,
+                    );
+                    let stream_state = match stream_result {
+                        Ok((stream, _summary)) => Some(stream),
+                        Err(error) => {
+                            eprintln!(
+                                "agentnoise: failed to open agent text stream: {error:#}; \
+                                 falling back to chunked replies"
+                            );
+                            None
+                        }
+                    };
+                    let stream_cell: Arc<Mutex<Option<agentnoise::dm_streams::AgentTextStream>>> =
+                        Arc::new(Mutex::new(stream_state));
+                    let streamed_progress = Arc::new(AtomicBool::new(false));
+                    let stream_broker_finished = Arc::new(AtomicBool::new(false));
+
+                    let progress_dm = Arc::clone(&dm_clone);
+                    let progress_group = group.clone();
+                    let progress_stream = Arc::clone(&stream_cell);
+                    let progress_journal = Arc::clone(&event_journal_clone);
+                    let progress_handle = handle_clone.clone();
+                    let progress_streamed = Arc::clone(&streamed_progress);
+                    let progress_callback = move |text: String| {
+                        let mut sent_to_stream = false;
+                        if let Ok(mut slot) = progress_stream.lock()
+                            && let Some(stream) = slot.as_mut()
+                            && stream.live_preview_active()
+                        {
+                            match stream.append_text_blocking(&text, &progress_handle) {
+                                Ok(report) => {
+                                    if report.chunks_published > 0 {
+                                        progress_streamed.store(true, Ordering::Relaxed);
+                                        sent_to_stream = true;
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "agentnoise: failed to publish stream progress: {error:#}; \
+                                         falling back to final chat reply"
+                                    );
+                                }
+                            }
+                        }
+                        if sent_to_stream {
+                            return;
+                        }
+                        if progress_stream
+                            .lock()
+                            .map(|slot| slot.is_some())
+                            .unwrap_or(false)
+                        {
+                            return;
+                        }
+                        if let Err(error) =
+                            progress_dm.send_reply_to_blocking(&progress_group, &text)
+                        {
+                            eprintln!("agentnoise: failed to send progress: {error:#}");
+                            return;
+                        }
+                        if let Ok(mut journal) = progress_journal.lock() {
+                            let _ = journal.record_outbound(&progress_group, &text, true, None);
+                        }
+                    };
+
+                    let result = app_clone.run_request_with_progress(request, progress_callback);
+                    let reply = result.unwrap_or_else(|err| format!("Error: {err:#}"));
+
+                    let mut stream_finalized = false;
+                    if let Ok(mut slot) = stream_cell.lock()
+                        && let Some(mut stream) = slot.take()
+                    {
+                        if stream.live_preview_active() {
+                            match stream.append_text_blocking(&reply, &handle_clone) {
+                                Ok(_report) => {}
+                                Err(error) => {
+                                    eprintln!(
+                                        "agentnoise: failed to publish final stream chunk: {error:#}"
+                                    );
+                                }
+                            }
+                        }
+                        let finished_at = agentnoise::dm_streams::current_unix_seconds();
+                        match stream.finish_blocking(reply.clone(), finished_at, &handle_clone) {
+                            Ok(report) => {
+                                stream_finalized = true;
+                                stream_broker_finished
+                                    .store(report.broker_finished, Ordering::Relaxed);
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "agentnoise: failed to finalize agent text stream: {error:#}"
+                                );
+                            }
+                        }
+                    }
+
+                    if !should_send_plain_final_reply(
+                        stream_finalized,
+                        streamed_progress.load(Ordering::Relaxed),
+                        stream_broker_finished.load(Ordering::Relaxed),
+                    ) {
+                        return;
+                    }
+                    if let Err(error) = dm_clone.send_reply_to_blocking(&group, &reply) {
+                        eprintln!("agentnoise: failed to send job reply: {error:#}");
+                        return;
+                    }
+                    if let Ok(mut journal) = event_journal_clone.lock() {
+                        let _ = journal.record_outbound(&group, &reply, true, None);
+                    }
+                });
+            }
+        }
+    }
+
+    tokio_handle.block_on(engine.shutdown());
+    drop(tokio_runtime);
+    Ok(())
 }
 
-fn reconcile_discovered_groups(config_path: &Path, config: &mut Config) {
-    let groups = match whitenoise_cli::list_groups(&config.whitenoise) {
-        Ok(groups) => groups,
-        Err(error) => {
-            eprintln!("agentnoise: group discovery failed: {error:#}");
-            return;
+fn should_send_plain_final_reply(
+    stream_finalized: bool,
+    streamed_progress: bool,
+    stream_broker_finished: bool,
+) -> bool {
+    !stream_finalized || !streamed_progress || !stream_broker_finished
+}
+
+fn spawn_group_join_discovery(
+    tokio_handle: &tokio::runtime::Handle,
+    engine: DarkmatterEngine,
+    dm: Arc<DmClient>,
+    account_id_hex: String,
+    config_path: PathBuf,
+    initial_group_ids: std::collections::HashSet<String>,
+    tx: mpsc::Sender<agentnoise::dm::MessageEvent>,
+) {
+    let mut events = engine.runtime().subscribe();
+    let mut subscribed_groups = initial_group_ids;
+    tokio_handle.spawn(async move {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            let marmot_app::MarmotAppEvent::GroupJoined {
+                account_id_hex: event_account_id,
+                group_id,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if event_account_id != account_id_hex {
+                continue;
+            }
+            let group_id_hex = hex::encode(group_id.as_slice());
+            if !subscribed_groups.insert(group_id_hex.clone()) {
+                continue;
+            }
+            eprintln!("agentnoise: joined group {group_id_hex} via darkmatter welcome");
+            if let Err(error) = persist_discovered_group(&config_path, &group_id_hex) {
+                eprintln!(
+                    "agentnoise: failed to persist discovered group {group_id_hex}: {error:#}"
+                );
+            }
+            let dm_inner = Arc::clone(&dm);
+            let tx_inner = tx.clone();
+            let group_id_hex_inner = group_id_hex.clone();
+            tokio::spawn(async move {
+                let mut subscription = match dm_inner.subscribe_group(&group_id_hex_inner).await {
+                    Ok(subscription) => subscription,
+                    Err(error) => {
+                        eprintln!(
+                            "agentnoise: failed to subscribe to {group_id_hex_inner}: {error:#}"
+                        );
+                        return;
+                    }
+                };
+                for event in subscription.snapshot() {
+                    if tx_inner.send(event).is_err() {
+                        return;
+                    }
+                }
+                while let Some(event) = subscription.next_message().await {
+                    if tx_inner.send(event).is_err() {
+                        return;
+                    }
+                }
+            });
         }
-    };
-    if groups.is_empty() {
-        return;
-    }
-    if let Err(error) = whitenoise_cli::accept_pending_groups(&config.whitenoise, &groups) {
-        eprintln!("agentnoise: failed to accept pending White Noise group(s): {error:#}");
-    }
+    });
+}
 
-    let active_groups = groups
-        .into_iter()
-        .map(|group| group.group_id)
-        .collect::<Vec<_>>();
-    let previous_groups = config.whitenoise.control_group_ids();
-    if active_groups == previous_groups {
-        return;
-    }
-
-    config.whitenoise.set_control_group_ids(active_groups);
-    match config.save(config_path) {
-        Ok(()) => eprintln!(
-            "agentnoise: reconciled White Noise control chats: {} active",
-            config.whitenoise.control_group_ids().len()
-        ),
-        Err(error) => eprintln!("agentnoise: failed to save reconciled control chats: {error:#}"),
-    }
+fn persist_discovered_group(config_path: &Path, group_id_hex: &str) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    config.darkmatter.add_control_group_id(group_id_hex);
+    config.save(config_path)?;
+    Ok(())
 }
 
 fn spawn_pairing_pin_display(config: Config, pairing: PairingRuntime) {
@@ -1603,819 +1784,70 @@ fn print_pairing_pin(pin: agentnoise::auth::PairingPin) {
     std::io::stdout().flush().ok();
 }
 
-enum StreamItem {
-    Event(agentnoise::wn::MessageEvent),
-    StreamError {
-        group_id: String,
-        message: String,
-    },
-    Exited {
-        group_id: String,
-        status: ExitStatus,
-    },
-    Discovered(Vec<String>),
-    DiscoveryError(String),
-    LocalSessionsChanged(Vec<LocalAgentSession>),
-    LocalSessionsWatchError(String),
-}
-
-fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<()> {
-    let (tx, rx) = mpsc::channel();
-    let subscribed = Arc::new(Mutex::new(HashSet::new()));
-    let event_journal = Arc::new(Mutex::new(EventJournal::open(
-        &app.config().resolved_event_log_path(),
-    )?));
-
-    let initial_groups = initial_group_ids(&wn);
-    let subscribe_limit = listener_subscribe_limit(app.config());
-    let mut startup_hello_sent = HashSet::new();
-    if initial_groups.is_empty() {
-        println!("agentnoise waiting for White Noise control chat");
-        println!("agentnoise will keep discovering chats until the phone-created chat appears");
-    } else {
-        for group_id in initial_groups {
-            subscribe_group_if_needed(
-                Arc::clone(&wn),
-                Arc::clone(&subscribed),
-                tx.clone(),
-                &group_id,
-                subscribe_limit,
-            )?;
-            send_startup_hello_if_needed(
-                app.config(),
-                &wn,
-                &event_journal,
-                &mut startup_hello_sent,
-                &group_id,
-            );
-        }
-    }
-    spawn_group_discovery(Arc::clone(&wn), tx.clone());
-    spawn_local_session_watcher(app.config(), tx.clone());
-    println!("agentnoise listening");
-
-    let ignore_initial = app.config().whitenoise.ignore_initial_messages;
-
-    for item in rx {
-        match item {
-            StreamItem::Discovered(group_ids) => {
-                for group_id in group_ids {
-                    if let Err(error) = persist_control_group_id(config_path, &group_id) {
-                        eprintln!(
-                            "agentnoise: failed to persist discovered group {group_id}: {error:#}"
-                        );
-                    }
-                    if let Err(error) = subscribe_group_if_needed(
-                        Arc::clone(&wn),
-                        Arc::clone(&subscribed),
-                        tx.clone(),
-                        &group_id,
-                        subscribe_limit,
-                    ) {
-                        eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
-                        continue;
-                    }
-                    send_startup_hello_if_needed(
-                        app.config(),
-                        &wn,
-                        &event_journal,
-                        &mut startup_hello_sent,
-                        &group_id,
-                    );
-                }
-            }
-            StreamItem::DiscoveryError(message) => {
-                eprintln!("agentnoise: group discovery failed: {message}");
-            }
-            StreamItem::LocalSessionsChanged(sessions) => {
-                match local_session_notification_group(config_path, app.config()) {
-                    Ok(Some(group_id)) => {
-                        let notice = local_sessions::render_new_session_notice(&sessions);
-                        try_send_reply_recorded(&wn, &event_journal, &group_id, &notice);
-                    }
-                    Ok(None) => {
-                        eprintln!(
-                            "agentnoise: local sessions changed, but no paired primary chat is configured"
-                        );
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "agentnoise: failed to load local session notification config: {error:#}"
-                        );
-                    }
-                }
-            }
-            StreamItem::LocalSessionsWatchError(message) => {
-                eprintln!("agentnoise: local session watch failed: {message}");
-            }
-            StreamItem::StreamError { group_id, message } => {
-                eprintln!("agentnoise: wn stream error for {group_id}: {message}");
-            }
-            StreamItem::Exited { group_id, status } => {
-                remove_subscribed_group(&subscribed, &group_id)?;
-                if !status.success() {
-                    eprintln!("agentnoise: wn subscribe for {group_id} exited with {status}");
-                }
-            }
-            StreamItem::Event(event) => {
-                let Some(group_id) = event.group_id.as_deref() else {
-                    eprintln!("agentnoise: ignored message without White Noise group id");
-                    continue;
-                };
-                {
-                    let mut journal = event_journal
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("event journal lock poisoned"))?;
-                    if journal.already_seen(group_id, event.id.as_deref()) {
-                        continue;
-                    }
-                    if let Err(error) = journal.record_inbound(&event) {
-                        eprintln!("agentnoise: failed to record inbound event: {error:#}");
-                    }
-                }
-                let process_initial_pairing = event.unsupported.is_none()
-                    && app.accepts_current_pairing_pin(event.sender.as_deref(), &event.text);
-                if ignore_initial && event.is_initial && !process_initial_pairing {
-                    match app.route_initial_history_event(&event)? {
-                        RouteAction::Ignore => {}
-                        RouteAction::Reply(reply) => {
-                            try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
-                        }
-                        RouteAction::NewSession(_)
-                        | RouteAction::ResumeSession(_)
-                        | RouteAction::Run(_) => {}
-                    }
-                    continue;
-                }
-
-                if let Some(message) = event.unsupported.as_deref() {
-                    let action = if event.attachments.is_empty() {
-                        app.route_unsupported_message(event.sender.as_deref(), message)?
-                    } else {
-                        app.route_unsupported_event(&event)?
-                    };
-                    match action {
-                        RouteAction::Ignore => {}
-                        RouteAction::Reply(reply) => {
-                            try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
-                        }
-                        RouteAction::NewSession(_)
-                        | RouteAction::ResumeSession(_)
-                        | RouteAction::Run(_) => {}
-                    }
-                    continue;
-                }
-
-                match app.route_message(
-                    event.group_id.as_deref(),
-                    event.sender.as_deref(),
-                    &event.text,
-                )? {
-                    RouteAction::Ignore => {}
-                    RouteAction::Reply(reply) => {
-                        try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
-                    }
-                    RouteAction::NewSession(request) => {
-                        match create_parallel_session(
-                            config_path,
-                            Arc::clone(&app),
-                            Arc::clone(&wn),
-                            Arc::clone(&subscribed),
-                            tx.clone(),
-                            &request,
-                            subscribe_limit,
-                        ) {
-                            Ok(new_group_id) => {
-                                match send_reply_recorded(
-                                    &wn,
-                                    &event_journal,
-                                    &new_group_id,
-                                    &request.ready_text(),
-                                ) {
-                                    Ok(()) => try_send_reply_recorded(
-                                        &wn,
-                                        &event_journal,
-                                        group_id,
-                                        &request.created_text_for_group(&new_group_id),
-                                    ),
-                                    Err(error) => {
-                                        try_send_reply_recorded(
-                                            &wn,
-                                            &event_journal,
-                                            group_id,
-                                            &format!(
-                                                "{}\nWarning: failed to send the ready message to the new chat: {error:#}",
-                                                request.created_text_for_group(&new_group_id)
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                try_send_reply_recorded(
-                                    &wn,
-                                    &event_journal,
-                                    group_id,
-                                    &format!("Error: failed to create session: {error:#}"),
-                                );
-                            }
-                        }
-                    }
-                    RouteAction::ResumeSession(request) => {
-                        match resume_parallel_session(
-                            config_path,
-                            Arc::clone(&wn),
-                            Arc::clone(&subscribed),
-                            tx.clone(),
-                            &request,
-                            subscribe_limit,
-                        ) {
-                            Ok(()) => {
-                                if request.group_id == group_id {
-                                    try_send_reply_recorded(
-                                        &wn,
-                                        &event_journal,
-                                        group_id,
-                                        &request.target_text,
-                                    );
-                                } else {
-                                    match send_reply_recorded(
-                                        &wn,
-                                        &event_journal,
-                                        &request.group_id,
-                                        &request.target_text,
-                                    ) {
-                                        Ok(()) => try_send_reply_recorded(
-                                            &wn,
-                                            &event_journal,
-                                            group_id,
-                                            &request.reply_text,
-                                        ),
-                                        Err(error) => {
-                                            try_send_reply_recorded(
-                                                &wn,
-                                                &event_journal,
-                                                group_id,
-                                                &format!(
-                                                    "Error: resumed session locally, but failed to message the target chat: {error:#}"
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                try_send_reply_recorded(
-                                    &wn,
-                                    &event_journal,
-                                    group_id,
-                                    &format!("Error: failed to resume session: {error:#}"),
-                                );
-                            }
-                        }
-                    }
-                    RouteAction::Run(request) => {
-                        let mut run_group_id = group_id.to_string();
-                        match app.job_session_request(
-                            event.group_id.as_deref(),
-                            event.sender.as_deref(),
-                            &request,
-                        ) {
-                            Ok(Some(session_request)) => {
-                                match create_parallel_session(
-                                    config_path,
-                                    Arc::clone(&app),
-                                    Arc::clone(&wn),
-                                    Arc::clone(&subscribed),
-                                    tx.clone(),
-                                    &session_request,
-                                    subscribe_limit,
-                                ) {
-                                    Ok(new_group_id) => {
-                                        try_send_reply_recorded(
-                                            &wn,
-                                            &event_journal,
-                                            group_id,
-                                            &session_request
-                                                .job_started_text_for_group(&new_group_id),
-                                        );
-                                        let ack = session_request
-                                            .job_ready_text(&app.run_ack_text(&request));
-                                        match send_reply_recorded(
-                                            &wn,
-                                            &event_journal,
-                                            &new_group_id,
-                                            &ack,
-                                        ) {
-                                            Ok(()) => run_group_id = new_group_id,
-                                            Err(error) => {
-                                                try_send_reply_recorded(
-                                                    &wn,
-                                                    &event_journal,
-                                                    group_id,
-                                                    &format!(
-                                                        "Warning: created the job session, but failed to send the first message there: {error:#}\nRunning this job here instead."
-                                                    ),
-                                                );
-                                                try_send_reply_recorded(
-                                                    &wn,
-                                                    &event_journal,
-                                                    group_id,
-                                                    &app.run_ack_text(&request),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        try_send_reply_recorded(
-                                            &wn,
-                                            &event_journal,
-                                            group_id,
-                                            &format!(
-                                                "Warning: failed to create a job session: {error:#}\nRunning this job here instead."
-                                            ),
-                                        );
-                                        try_send_reply_recorded(
-                                            &wn,
-                                            &event_journal,
-                                            group_id,
-                                            &app.run_ack_text(&request),
-                                        );
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                try_send_reply_recorded(
-                                    &wn,
-                                    &event_journal,
-                                    group_id,
-                                    &app.run_ack_text(&request),
-                                );
-                            }
-                            Err(error) => {
-                                try_send_reply_recorded(
-                                    &wn,
-                                    &event_journal,
-                                    group_id,
-                                    &format!(
-                                        "Warning: failed to prepare a job session: {error:#}\nRunning this job here instead."
-                                    ),
-                                );
-                                try_send_reply_recorded(
-                                    &wn,
-                                    &event_journal,
-                                    group_id,
-                                    &app.run_ack_text(&request),
-                                );
-                            }
-                        }
-                        let app = Arc::clone(&app);
-                        let wn = Arc::clone(&wn);
-                        let event_journal = Arc::clone(&event_journal);
-                        let group_id = run_group_id;
-                        std::thread::spawn(move || {
-                            let progress_wn = Arc::clone(&wn);
-                            let progress_journal = Arc::clone(&event_journal);
-                            let progress_group = group_id.clone();
-                            let reply = match app.run_request_with_progress(request, move |text| {
-                                if let Err(error) = send_reply_recorded(
-                                    &progress_wn,
-                                    &progress_journal,
-                                    &progress_group,
-                                    &text,
-                                ) {
-                                    eprintln!(
-                                        "agentnoise: failed to send progress reply: {error:#}"
-                                    );
-                                }
-                            }) {
-                                Ok(reply) => reply,
-                                Err(error) => {
-                                    format!("Error: job failed to start: {error:#}")
-                                }
-                            };
-                            if let Err(error) =
-                                send_reply_recorded(&wn, &event_journal, &group_id, &reply)
-                            {
-                                eprintln!("agentnoise: failed to send job reply: {error:#}");
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn send_startup_hello_if_needed(
+fn spawn_local_session_watcher_simple(
+    config_path: &Path,
     config: &Config,
-    wn: &WnClient,
+    dm: &Arc<DmClient>,
     event_journal: &Arc<Mutex<EventJournal>>,
-    sent: &mut HashSet<String>,
-    group_id: &str,
 ) {
-    if !should_send_startup_hello(config, sent, group_id) {
-        return;
-    }
-    let text = startup_hello_text(config);
-    if let Err(error) = send_reply_recorded(wn, event_journal, group_id, &text) {
-        eprintln!("agentnoise: failed to send startup hello to {group_id}: {error:#}");
-    }
-}
-
-fn should_send_startup_hello(config: &Config, sent: &mut HashSet<String>, group_id: &str) -> bool {
-    let group_id = group_id.trim();
-    let primary_group = config.whitenoise.group_id.trim();
-    !group_id.is_empty()
-        && !primary_group.is_empty()
-        && group_id == primary_group
-        && !config.whitenoise.allowed_senders.is_empty()
-        && sent.insert(group_id.to_string())
-}
-
-fn startup_hello_text(config: &Config) -> String {
-    let timestamp = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "unknown".to_string());
-    render_startup_hello(config, &timestamp)
-}
-
-fn render_startup_hello(config: &Config, timestamp: &str) -> String {
-    let profile = config.whitenoise.profile_display_name.trim();
-    let workspace = config
-        .default_repo_alias()
-        .map(|alias| format!("{alias}:/"))
-        .unwrap_or_else(|| "none".to_string());
-    let mut lines = vec![format!("agentnoise up {}", compact_timestamp(timestamp))];
-    if !profile.is_empty() {
-        lines.push(profile.to_string());
-    }
-    lines.push(workspace);
-    lines.push("/status /help".to_string());
-    lines.join("\n")
-}
-
-fn send_reply_recorded(
-    wn: &WnClient,
-    event_journal: &Arc<Mutex<EventJournal>>,
-    group_id: &str,
-    text: &str,
-) -> Result<()> {
-    const ATTEMPTS: usize = 5;
-
-    if let Ok(mut journal) = event_journal.lock()
-        && let Err(error) = journal.record_outbound_queued(group_id, text)
-    {
-        eprintln!("agentnoise: failed to record queued outbound event: {error:#}");
-    }
-
-    let mut last_error = None;
-    for attempt in 1..=ATTEMPTS {
-        match wn.send_reply_to(group_id, text) {
-            Ok(()) => {
-                let detail = (attempt > 1).then(|| format!("sent after {attempt} attempts"));
-                if let Ok(mut journal) = event_journal.lock()
-                    && let Err(error) = journal.record_outbound(group_id, text, true, detail)
-                {
-                    eprintln!("agentnoise: failed to record outbound event: {error:#}");
-                }
-                return Ok(());
-            }
-            Err(error) => {
-                let detail = format!("{error:#}");
-                if attempt < ATTEMPTS {
-                    eprintln!(
-                        "agentnoise: send reply failed, retrying ({attempt}/{ATTEMPTS}): {detail}"
-                    );
-                    thread::sleep(send_retry_delay(&detail, attempt));
-                }
-                last_error = Some(detail);
-            }
-        }
-    }
-
-    let detail = last_error.unwrap_or_else(|| "unknown send failure".to_string());
-    let journal_detail = Some(format!("failed after {ATTEMPTS} attempts: {detail}"));
-    if let Ok(mut journal) = event_journal.lock()
-        && let Err(error) = journal.record_outbound(group_id, text, false, journal_detail)
-    {
-        eprintln!("agentnoise: failed to record outbound event: {error:#}");
-    }
-    bail!("failed to send reply after {ATTEMPTS} attempts: {detail}")
-}
-
-fn try_send_reply_recorded(
-    wn: &WnClient,
-    event_journal: &Arc<Mutex<EventJournal>>,
-    group_id: &str,
-    text: &str,
-) {
-    if let Err(error) = send_reply_recorded(wn, event_journal, group_id, text) {
-        eprintln!("agentnoise: failed to send reply to {group_id}: {error:#}");
-    }
-}
-
-fn send_retry_delay(detail: &str, attempt: usize) -> Duration {
-    let attempt = attempt as u64;
-    if detail.contains("pending proposal") {
-        return Duration::from_millis(750 * attempt * attempt);
-    }
-    Duration::from_millis(500 * attempt)
-}
-
-fn listener_subscribe_limit(config: &Config) -> u32 {
-    if config.whitenoise.require_pairing_pin && config.whitenoise.allowed_senders.is_empty() {
-        config
-            .whitenoise
-            .subscribe_limit
-            .max(FIRST_PAIRING_SUBSCRIBE_LIMIT)
-    } else {
-        config.whitenoise.subscribe_limit
-    }
-}
-
-fn create_parallel_session(
-    config_path: &Path,
-    app: Arc<AgentApp>,
-    wn: Arc<WnClient>,
-    subscribed: Arc<Mutex<HashSet<String>>>,
-    tx: mpsc::Sender<StreamItem>,
-    request: &NewSessionRequest,
-    subscribe_limit: u32,
-) -> Result<String> {
-    let created = whitenoise_cli::create_group(
-        &app.config().whitenoise,
-        &request.group_name(),
-        std::slice::from_ref(&request.sender),
-    )?;
-    let group_id = created
-        .group_id
-        .context("White Noise did not return the new group id")?;
-
-    app.create_session_record(&group_id, request.state.clone())?;
-    persist_control_group_id(config_path, &group_id)?;
-    subscribe_group_if_needed(wn, subscribed, tx, &group_id, subscribe_limit)?;
-
-    Ok(group_id)
-}
-
-fn resume_parallel_session(
-    config_path: &Path,
-    wn: Arc<WnClient>,
-    subscribed: Arc<Mutex<HashSet<String>>>,
-    tx: mpsc::Sender<StreamItem>,
-    request: &agentnoise::app::ResumeSessionRequest,
-    subscribe_limit: u32,
-) -> Result<()> {
-    persist_control_group_id(config_path, &request.group_id)?;
-    subscribe_group_if_needed(wn, subscribed, tx, &request.group_id, subscribe_limit)
-}
-
-fn persist_control_group_id(config_path: &Path, group_id: &str) -> Result<()> {
-    let mut config = Config::load(config_path)?;
-    config.whitenoise.add_control_group_id(group_id);
-    config.save(config_path)
-}
-
-fn initial_group_ids(wn: &WnClient) -> Vec<String> {
-    match wn.discover_group_ids() {
-        Ok(discovered) => merge_initial_group_ids(wn.configured_group_ids(), discovered),
-        Err(error) => {
-            eprintln!("agentnoise: group discovery failed: {error:#}");
-            wn.configured_group_ids()
-        }
-    }
-}
-
-fn merge_initial_group_ids(configured: Vec<String>, discovered: Vec<String>) -> Vec<String> {
-    let discovered = unique_group_ids(discovered);
-    if discovered.is_empty() {
-        return unique_group_ids(configured);
-    }
-    discovered
-}
-
-fn subscribe_group_if_needed(
-    wn: Arc<WnClient>,
-    subscribed: Arc<Mutex<HashSet<String>>>,
-    tx: mpsc::Sender<StreamItem>,
-    group_id: &str,
-    subscribe_limit: u32,
-) -> Result<()> {
-    let group_id = group_id.trim();
-    if group_id.is_empty() {
-        return Ok(());
-    }
-
-    {
-        let subscribed = subscribed
-            .lock()
-            .map_err(|_| anyhow::anyhow!("subscribed group lock poisoned"))?;
-        if subscribed.contains(group_id) {
-            return Ok(());
-        }
-    }
-
-    let group_id = group_id.to_string();
-    let mut child = wn
-        .subscribe_group_with_limit(&group_id, subscribe_limit)
-        .with_context(|| format!("starting White Noise subscription for {group_id}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("wn subscribe did not expose stdout")?;
-    {
-        let mut subscribed = subscribed
-            .lock()
-            .map_err(|_| anyhow::anyhow!("subscribed group lock poisoned"))?;
-        subscribed.insert(group_id.clone());
-    }
-    println!("agentnoise listening group {group_id}");
-    spawn_group_subscription(group_id, child, stdout, tx);
-    Ok(())
-}
-
-fn spawn_group_subscription(
-    group_id: String,
-    mut child: Child,
-    stdout: ChildStdout,
-    tx: mpsc::Sender<StreamItem>,
-) {
-    thread::spawn(move || {
-        for value in WnClient::parse_events_from_reader(stdout) {
-            let value = match value {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = tx.send(StreamItem::StreamError {
-                        group_id: group_id.clone(),
-                        message: format!("{error:#}"),
-                    });
-                    continue;
-                }
-            };
-            if let Some(error) = WnClient::error_message(&value) {
-                let _ = tx.send(StreamItem::StreamError {
-                    group_id: group_id.clone(),
-                    message: error,
-                });
-                continue;
-            }
-
-            for event in WnClient::parse_events_for_group(&value, &group_id) {
-                if tx.send(StreamItem::Event(event)).is_err() {
-                    return;
-                }
-            }
-        }
-
-        match child.wait() {
-            Ok(status) => {
-                let _ = tx.send(StreamItem::Exited { group_id, status });
-            }
-            Err(error) => {
-                let _ = tx.send(StreamItem::StreamError {
-                    group_id,
-                    message: format!("waiting for wn subscribe failed: {error:#}"),
-                });
-            }
-        }
-    });
-}
-
-fn spawn_group_discovery(wn: Arc<WnClient>, tx: mpsc::Sender<StreamItem>) {
-    thread::spawn(move || {
-        loop {
-            match wn.discover_group_ids() {
-                Ok(group_ids) => {
-                    if !group_ids.is_empty() && tx.send(StreamItem::Discovered(group_ids)).is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    if tx
-                        .send(StreamItem::DiscoveryError(format!("{error:#}")))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-            thread::sleep(Duration::from_secs(30));
-        }
-    });
-}
-
-fn spawn_local_session_watcher(config: &Config, tx: mpsc::Sender<StreamItem>) {
     if !config.local_sessions.watch {
         return;
     }
-
-    let interval = Duration::from_secs(config.local_sessions.watch_interval_seconds.max(1));
-    let notify_limit = config.local_sessions.notify_limit.clamp(1, 20);
-    println!(
-        "agentnoise local session watcher enabled; notifying up to {notify_limit} new sessions"
-    );
-
+    let watch_interval = Duration::from_secs(config.local_sessions.watch_interval_seconds.max(5));
+    let notify_limit = config.local_sessions.notify_limit;
+    let dm = Arc::clone(dm);
+    let event_journal = Arc::clone(event_journal);
+    let config_path = config_path.to_path_buf();
+    let initial_config = config.clone();
     thread::spawn(move || {
-        let mut seen: Option<HashSet<String>> = None;
-        let mut last_error: Option<String> = None;
-
+        let mut seen = std::collections::HashSet::<String>::new();
         loop {
-            match local_sessions::discover_all_local_sessions() {
+            // Reload config to pick up new pairings since startup.
+            let current_config = match Config::load(&config_path) {
+                Ok(cfg) => cfg,
+                Err(_) => initial_config.clone(),
+            };
+            let Some(group_id) = local_session_notification_group_from_config(&current_config)
+            else {
+                thread::sleep(watch_interval);
+                continue;
+            };
+            match local_sessions::discover_local_sessions(notify_limit) {
                 Ok(sessions) => {
-                    last_error = None;
-                    match &mut seen {
-                        Some(seen_keys) => {
-                            let mut new_sessions = sessions
-                                .into_iter()
-                                .filter(|session| {
-                                    seen_keys.insert(local_sessions::local_session_key(session))
-                                })
-                                .collect::<Vec<_>>();
-                            if !new_sessions.is_empty() {
-                                new_sessions.truncate(notify_limit);
-                                if tx
-                                    .send(StreamItem::LocalSessionsChanged(new_sessions))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                        None => {
-                            seen = Some(
-                                sessions
-                                    .iter()
-                                    .map(local_sessions::local_session_key)
-                                    .collect(),
-                            );
+                    let new_sessions: Vec<_> = sessions
+                        .into_iter()
+                        .filter(|session| seen.insert(format!("{}:{}", session.agent, session.id)))
+                        .collect();
+                    if !new_sessions.is_empty() {
+                        let notice = local_sessions::render_new_session_notice(&new_sessions);
+                        if let Err(error) = dm.send_reply_to_blocking(&group_id, &notice) {
+                            eprintln!("agentnoise: failed to send local session notice: {error:#}");
+                        } else if let Ok(mut journal) = event_journal.lock() {
+                            let _ = journal.record_outbound(&group_id, &notice, true, None);
                         }
                     }
                 }
                 Err(error) => {
-                    let message = format!("{error:#}");
-                    if last_error.as_deref() != Some(message.as_str()) {
-                        if tx
-                            .send(StreamItem::LocalSessionsWatchError(message.clone()))
-                            .is_err()
-                        {
-                            break;
-                        }
-                        last_error = Some(message);
-                    }
+                    eprintln!("agentnoise: local session watch failed: {error:#}");
                 }
             }
-
-            thread::sleep(interval);
+            thread::sleep(watch_interval);
         }
     });
 }
 
-fn local_session_notification_group(
-    config_path: &Path,
-    startup_config: &Config,
-) -> Result<Option<String>> {
-    let config = if config_path.exists() {
-        Config::load(config_path)
-            .with_context(|| format!("loading current config {}", config_path.display()))?
-    } else {
-        startup_config.clone()
-    };
-    Ok(local_session_notification_group_from_config(&config))
-}
-
 fn local_session_notification_group_from_config(config: &Config) -> Option<String> {
-    if !config.local_sessions.watch || config.whitenoise.allowed_senders.is_empty() {
+    if !config.local_sessions.watch {
         return None;
     }
-    let group_id = config.whitenoise.group_id.trim();
-    (!group_id.is_empty()).then(|| group_id.to_string())
-}
-
-fn remove_subscribed_group(subscribed: &Arc<Mutex<HashSet<String>>>, group_id: &str) -> Result<()> {
-    subscribed
-        .lock()
-        .map_err(|_| anyhow::anyhow!("subscribed group lock poisoned"))?
-        .remove(group_id);
-    Ok(())
-}
-
-fn extend_unique(group_ids: &mut Vec<String>, more: impl IntoIterator<Item = String>) {
-    for group_id in more {
-        let group_id = group_id.trim();
-        if !group_id.is_empty() && !group_ids.iter().any(|existing| existing == group_id) {
-            group_ids.push(group_id.to_string());
-        }
+    if config.darkmatter.allowed_senders.is_empty() {
+        return None;
     }
-}
-
-fn unique_group_ids(group_ids: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut output = Vec::new();
-    extend_unique(&mut output, group_ids);
-    output
+    let primary = config.darkmatter.group_id.trim();
+    if primary.is_empty() {
+        return None;
+    }
+    Some(primary.to_string())
 }
 
 #[cfg(test)]
@@ -2423,56 +1855,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_hello_includes_time_profile_and_workspace() {
-        let mut config = Config::template();
-        config.whitenoise.profile_display_name = "m5".to_string();
-
-        let text = render_startup_hello(&config, "2026-05-15T20:00:00Z");
-
-        assert_eq!(
-            text,
-            "agentnoise up 20:00Z\n\
-             m5\n\
-             sandbox:/\n\
-             /status /help"
-        );
-    }
-
-    #[test]
-    fn startup_hello_requires_pairing_and_only_targets_primary_group() {
-        let mut config = Config::template();
-        config.whitenoise.group_id = "group-a".to_string();
-        let mut sent = HashSet::new();
-
-        assert!(!should_send_startup_hello(&config, &mut sent, "group-a"));
-
-        config
-            .whitenoise
-            .allowed_senders
-            .push("npub1pairedphone".to_string());
-
-        assert!(should_send_startup_hello(&config, &mut sent, "group-a"));
-        assert!(!should_send_startup_hello(&config, &mut sent, "group-a"));
-        assert!(!should_send_startup_hello(&config, &mut sent, "group-b"));
-        assert!(!should_send_startup_hello(&config, &mut sent, " "));
-    }
-
-    #[test]
-    fn pending_proposal_send_retries_back_off_more() {
-        assert!(
-            send_retry_delay(
-                "MDK error: Can't create message because a pending proposal exists.",
-                2
-            ) > send_retry_delay("temporary transport failure", 2)
-        );
-    }
-
-    #[test]
     fn local_session_notifications_are_opt_in_and_primary_chat_only() {
         let mut config = Config::template();
-        config.whitenoise.group_id = "group-a".to_string();
+        config.darkmatter.group_id = "group-a".to_string();
         config
-            .whitenoise
+            .darkmatter
             .allowed_senders
             .push("npub1pairedphone".to_string());
 
@@ -2484,59 +1871,15 @@ mod tests {
             Some("group-a".to_string())
         );
 
-        config.whitenoise.group_id.clear();
+        config.darkmatter.group_id.clear();
         assert_eq!(local_session_notification_group_from_config(&config), None);
     }
 
     #[test]
-    fn local_session_notifications_use_reloaded_pairing_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join("config.toml");
-        let mut startup_config = Config::template();
-        startup_config.local_sessions.watch = true;
-        startup_config.whitenoise.group_id = "group-a".to_string();
-        startup_config.whitenoise.allowed_senders.clear();
-        startup_config.save(&config_path).unwrap();
-
-        assert_eq!(
-            local_session_notification_group(&config_path, &startup_config).unwrap(),
-            None
-        );
-
-        let mut paired_config = startup_config.clone();
-        paired_config
-            .whitenoise
-            .allowed_senders
-            .push("npub1pairedphone".to_string());
-        paired_config.save(&config_path).unwrap();
-
-        assert_eq!(
-            local_session_notification_group(&config_path, &startup_config).unwrap(),
-            Some("group-a".to_string())
-        );
-    }
-
-    #[test]
-    fn initial_group_merge_uses_discovered_groups_when_available() {
-        let groups = merge_initial_group_ids(
-            vec!["stale".to_string(), "active".to_string()],
-            vec!["active".to_string()],
-        );
-
-        assert_eq!(groups, vec!["active".to_string()]);
-    }
-
-    #[test]
-    fn initial_group_merge_falls_back_to_configured_groups_without_discovery() {
-        let groups = merge_initial_group_ids(
-            vec![
-                "configured".to_string(),
-                "configured".to_string(),
-                " ".to_string(),
-            ],
-            Vec::new(),
-        );
-
-        assert_eq!(groups, vec!["configured".to_string()]);
+    fn plain_final_reply_is_only_stream_fallback() {
+        assert!(!should_send_plain_final_reply(true, true, true));
+        assert!(should_send_plain_final_reply(true, false, true));
+        assert!(should_send_plain_final_reply(false, true, true));
+        assert!(should_send_plain_final_reply(true, true, false));
     }
 }

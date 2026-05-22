@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use nostr::PublicKey;
+use nostr::nips::nip19::ToBech32;
 
-use crate::config::{Config, RunnerLauncher, WhitenoiseConfig};
-use crate::identity::{self, DEFAULT_IDENTITY_NAME, PairingPayload, PublicIdentity};
-use crate::paths::expand_tilde;
-use crate::whitenoise_cli;
+use crate::config::{Config, RunnerLauncher};
+use crate::darkmatter_app::DarkmatterEngine;
+use crate::identity::{self, DEFAULT_IDENTITY_NAME, PairingPayload};
 
 pub const DEFAULT_GROUP_NAME: &str = "agentnoise";
 
@@ -17,9 +18,7 @@ pub struct SetupOptions {
     pub group_name: String,
     pub force_identity: bool,
     pub relays: Vec<String>,
-    pub dev_burner_nsec: bool,
     pub direct_agents: bool,
-    pub start_daemon: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -33,37 +32,22 @@ pub struct SetupResult {
     pub profile_display_name: String,
     pub relays: Vec<String>,
     pub qr: String,
-    pub daemon_started: bool,
-    pub login_repaired: bool,
-    pub profile_published: bool,
-    pub key_package_published: bool,
-    pub message_relay_entries_added: usize,
-    pub group_id: Option<String>,
-    pub group_output: Option<String>,
-    pub dev_burner_nsec_file: Option<PathBuf>,
 }
 
+/// Bootstrap agentnoise: write config, start the embedded Marmot v2 engine
+/// long enough to create (or look up) the managed desktop account, then save
+/// the resulting npub to config and render the pairing QR.
+///
+/// The engine's `KeychainSecretStore`-backed `AccountHome` owns the secret;
+/// agentnoise itself never sees the nsec.
 pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     let created_config = !config_path.exists();
     let mut config = if created_config {
-        Config::template()
+        Config::template_for_path(config_path)
     } else {
         Config::load(config_path)?
     };
 
-    if options.dev_burner_nsec {
-        config.whitenoise.dev_burner_nsec = true;
-        config.whitenoise.dev_burner_nsec_file = Some(
-            config
-                .resolved_data_dir()
-                .join("dev-burner.nsec")
-                .display()
-                .to_string(),
-        );
-        config.whitenoise.use_keychain_nsec = false;
-    } else if !config.whitenoise.dev_burner_nsec {
-        config.whitenoise.use_keychain_nsec = true;
-    }
     if options.direct_agents {
         config.runner.launcher = RunnerLauncher::Direct;
     }
@@ -73,92 +57,99 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
-        config.whitenoise.profile_name = normalize_profile_name(name);
-        config.whitenoise.profile_display_name = name.to_string();
+        config.darkmatter.profile_name = normalize_profile_name(name);
+        config.darkmatter.profile_display_name = name.to_string();
     }
-    if whitenoise_cli::should_reset_wn_bin_to_default(&config.whitenoise.wn_bin) {
-        config.whitenoise.wn_bin = "wn".to_string();
+    if !options.relays.is_empty() {
+        config.darkmatter.message_relays = options.relays.clone();
     }
     if created_config {
         config.save(config_path)?;
     }
 
-    let (identity, identity_created) =
-        load_or_create_identity(&config.whitenoise, options.force_identity)?;
-    config.whitenoise.account = Some(identity.npub.clone());
-    config.whitenoise.bot_npub = Some(identity.npub.clone());
     ensure_runtime_dirs(&config)?;
+
+    // Open the engine just long enough to ensure the managed account exists.
+    let dm_home = config.resolved_data_dir().join("darkmatter");
+    let bootstrap_relays = config.darkmatter.message_relays.clone();
+    let keychain_service =
+        crate::darkmatter_app::keychain_service_for_instance(config.instance.as_deref());
+    let (npub, identity_created) = ensure_engine_identity(
+        dm_home,
+        bootstrap_relays,
+        &keychain_service,
+        options.force_identity,
+        config.darkmatter.account.clone(),
+    )?;
+
+    config.darkmatter.account = Some(npub.clone());
+    config.darkmatter.bot_npub = Some(npub.clone());
     config.save(config_path)?;
 
     let payload = identity::pairing_payload_from_npub(
-        &config.whitenoise,
+        &config.darkmatter,
         DEFAULT_IDENTITY_NAME,
-        &identity.npub,
+        &npub,
         &options.relays,
     )?;
-    let qr = identity::render_qr(&identity.npub)?;
+    let qr = identity::render_qr(&npub)?;
 
-    let mut group_id = None;
-    let mut group_output = None;
-
-    let daemon_started = if options.start_daemon {
-        whitenoise_cli::ensure_daemon(&config.whitenoise)?.is_some()
-    } else {
-        false
-    };
-    let login_repaired = whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)?;
-    let message_relays = whitenoise_cli::ensure_message_relays(&config.whitenoise)?;
-    whitenoise_cli::update_profile(
-        &config.whitenoise,
-        &config.whitenoise.profile_name,
-        &config.whitenoise.profile_display_name,
-        &config.whitenoise.profile_about,
-    )?;
-    let profile_published = true;
-    whitenoise_cli::publish_key_package(&config.whitenoise)?;
-    let key_package_published = true;
-
-    if let Some(phone_npub) = options
-        .phone_npub
-        .as_deref()
-        .map(str::trim)
-        .filter(|phone_npub| !phone_npub.is_empty())
-    {
-        let created = whitenoise_cli::create_group(
-            &config.whitenoise,
-            &options.group_name,
-            &[phone_npub.to_string()],
-        )?;
-        group_output = Some(created.output);
-        if let Some(id) = created.group_id {
-            config.whitenoise.add_control_group_id(&id);
-            config.save(config_path)?;
-            group_id = Some(id);
-        }
+    if options.phone_npub.is_some() {
+        // Phone-initiated group creation: under v2 the phone creates the
+        // group and the desktop discovers it via MarmotAppEvent::GroupJoined
+        // once `agentnoise listen` is running.
+        eprintln!(
+            "agentnoise: phone_npub provided; under Marmot v2 the phone-side client \
+             creates the control group. Start `agentnoise listen` and have the phone scan the QR."
+        );
     }
+    let _ = options.group_name;
 
     Ok(SetupResult {
         config_path: config_path.to_path_buf(),
         created_config,
         identity_created,
-        npub: identity.npub,
+        npub,
         nprofile: payload.nprofile,
-        profile_name: config.whitenoise.profile_name,
-        profile_display_name: config.whitenoise.profile_display_name,
+        profile_name: config.darkmatter.profile_name,
+        profile_display_name: config.darkmatter.profile_display_name,
         relays: payload.relays,
         qr,
-        daemon_started,
-        login_repaired,
-        profile_published,
-        key_package_published,
-        message_relay_entries_added: message_relays.added_entries,
-        group_id,
-        group_output,
-        dev_burner_nsec_file: config
-            .whitenoise
-            .dev_burner_nsec_file
-            .as_deref()
-            .map(expand_tilde),
+    })
+}
+
+/// Boot the engine, ensure the managed account exists, return the npub.
+/// `identity_created` is true iff the engine had to mint a new keypair (i.e.
+/// the previously-configured account reference resolved to nothing on entry).
+fn ensure_engine_identity(
+    dm_home: PathBuf,
+    bootstrap_relays: Vec<String>,
+    keychain_service: &str,
+    _force: bool,
+    previous_npub: Option<String>,
+) -> Result<(String, bool)> {
+    if bootstrap_relays.is_empty() {
+        anyhow::bail!(
+            "darkmatter.message_relays is empty; set at least one relay before running setup"
+        );
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for setup")?;
+    runtime.block_on(async {
+        let engine = DarkmatterEngine::open(dm_home, bootstrap_relays.clone(), keychain_service)?;
+        engine.start().await?;
+        let configured = previous_npub.as_deref();
+        let existed = match configured.map(str::trim).filter(|r| !r.is_empty()) {
+            Some(reference) => engine.find_account(reference)?.is_some(),
+            None => false,
+        };
+        let account_id_hex = engine.ensure_account(configured, &bootstrap_relays).await?;
+        engine.shutdown().await;
+        let pk = PublicKey::from_hex(&account_id_hex).context("decoding account_id_hex")?;
+        let npub = pk.to_bech32().context("encoding npub bech32")?;
+        Ok::<_, anyhow::Error>((npub, !existed))
     })
 }
 
@@ -184,42 +175,17 @@ pub fn normalize_profile_name(name: &str) -> String {
 
 pub fn pairing(config_path: &Path, relays: &[String]) -> Result<PairingPayload> {
     let config = Config::load_or_template(config_path)?;
-    if let Some(identity) =
-        identity::configured_public_identity(&config.whitenoise, DEFAULT_IDENTITY_NAME)?
-    {
+    if let Some(npub) = config.darkmatter.account.as_deref() {
         return identity::pairing_payload_from_npub(
-            &config.whitenoise,
+            &config.darkmatter,
             DEFAULT_IDENTITY_NAME,
-            &identity.npub,
+            npub,
             relays,
         );
     }
-
-    identity::pairing_payload(&config.whitenoise, DEFAULT_IDENTITY_NAME, relays)
-}
-
-fn load_or_create_identity(
-    config: &WhitenoiseConfig,
-    force: bool,
-) -> Result<(PublicIdentity, bool)> {
-    if force {
-        let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, true)
-            .context("creating agentnoise desktop identity in configured identity store")?;
-        return Ok((identity, true));
-    }
-
-    if let Some(identity) = identity::configured_public_identity(config, DEFAULT_IDENTITY_NAME)? {
-        return Ok((identity, false));
-    }
-
-    match identity::load_public_identity(config, DEFAULT_IDENTITY_NAME) {
-        Ok(identity) => Ok((identity, false)),
-        Err(_) => {
-            let identity = identity::create_identity(config, DEFAULT_IDENTITY_NAME, false)
-                .context("creating agentnoise desktop identity in configured identity store")?;
-            Ok((identity, true))
-        }
-    }
+    anyhow::bail!(
+        "no desktop identity in config; run `agentnoise setup` or `agentnoise listen` once to create one"
+    )
 }
 
 fn ensure_runtime_dirs(config: &Config) -> Result<()> {
@@ -228,14 +194,35 @@ fn ensure_runtime_dirs(config: &Config) -> Result<()> {
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
 
     let log_dir = config.resolved_log_dir();
-    fs::create_dir_all(&log_dir).with_context(|| format!("creating log dir {}", log_dir.display()))
+    fs::create_dir_all(&log_dir)
+        .with_context(|| format!("creating log dir {}", log_dir.display()))?;
+
+    ensure_generated_sandbox_repo_dir(config)
+}
+
+fn ensure_generated_sandbox_repo_dir(config: &Config) -> Result<()> {
+    if config.instance.is_none() {
+        return Ok(());
+    }
+
+    let Some(instance_root) = config.resolved_data_dir().parent().map(Path::to_path_buf) else {
+        return Ok(());
+    };
+    let expected = instance_root.join("sandbox");
+    let Some(repo) = config.repos.iter().find(|repo| repo.alias == "sandbox") else {
+        return Ok(());
+    };
+    if config.repo_path(&repo.alias).as_deref() != Some(expected.as_path()) {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&expected)
+        .with_context(|| format!("creating sandbox repo dir {}", expected.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::Keys;
-    use nostr::nips::nip19::ToBech32;
 
     #[test]
     fn normalizes_profile_name_for_nostr_name_field() {
@@ -248,16 +235,20 @@ mod tests {
     }
 
     #[test]
-    fn load_or_create_identity_prefers_cached_public_config() {
-        let keys = Keys::generate();
-        let npub = keys.public_key().to_bech32().unwrap();
-        let mut config = Config::template().whitenoise;
-        config.account = Some(npub.clone());
-        config.use_keychain_nsec = true;
+    fn ensure_runtime_dirs_creates_named_instance_default_sandbox_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let instance_root = temp.path().join("instances/dev");
+        let mut config = Config::template();
+        config.instance = Some("dev".to_string());
+        config.runner.data_dir = instance_root.join("data").display().to_string();
+        config.runner.log_dir = instance_root.join("logs").display().to_string();
+        config.repos = vec![crate::config::RepoConfig {
+            alias: "sandbox".to_string(),
+            path: instance_root.join("sandbox").display().to_string(),
+        }];
 
-        let (identity, created) = load_or_create_identity(&config, false).unwrap();
+        ensure_runtime_dirs(&config).unwrap();
 
-        assert!(!created);
-        assert_eq!(identity.npub, npub);
+        assert!(instance_root.join("sandbox").is_dir());
     }
 }
