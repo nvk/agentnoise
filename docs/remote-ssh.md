@@ -28,10 +28,11 @@ What happens:
 
 1. agentnoise creates or reuses a desktop keypair on the remote machine.
 2. The desktop `nsec` stays on the remote machine.
-3. The phone `npub` is used to create the White Noise control chat.
+3. The phone `npub` is a hint for QR/discovery — under Marmot v2 the phone
+   creates the control group itself; the desktop joins via the welcome event.
 4. The pairing PIN is printed in the SSH terminal.
 5. No desktop GUI alert is opened in `--ssh` mode.
-6. The phone sends `/pair 123456` in that White Noise chat.
+6. The phone sends `/pair 123456` in that Marmot v2 chat.
 7. agentnoise stores the allowed sender and starts accepting commands.
 
 Keep the SSH terminal open until pairing completes, then stop the foreground
@@ -54,8 +55,9 @@ agentnoise up --ssh --phone npub1... --name agentnoise-linuxbox
 agentnoise up --ssh --phone npub1... --name agentnoise-freebsd
 ```
 
-The display name is saved in `config.toml` and published through the White
-Noise/Nostr profile. The normalized Nostr profile `name` is also saved.
+The display name is saved in `config.toml` and published as the Nostr profile
+(kind 0) by the embedded Marmot v2 engine on next startup. The normalized
+profile `name` is also saved.
 
 After setup, inspect or rename the current desktop identity without passing a
 phone `npub`:
@@ -67,18 +69,17 @@ agentnoise identity rename agentnoise-labbox
 
 `identity status` reads the stored public account from config when available,
 so it does not need the desktop `nsec`. `identity rename` saves the new machine
-label and publishes it through White Noise; use `--no-publish` to save config
-only and publish on the next `agentnoise up`.
+label; the embedded Marmot v2 engine publishes the updated profile when the
+listener starts (or via `--no-publish` to save only).
 
 ## Message Relays
 
 The QR relay hints only help the phone find the desktop identity. Actual
-message delivery uses the White Noise account relay list. Check or repair that
-state from SSH with:
+message delivery uses the Marmot v2 account relay list. Inspect engine state
+from SSH:
 
 ```sh
-agentnoise whitenoise relays
-agentnoise whitenoise ensure-relays
+agentnoise darkmatter probe --relay wss://relay.primal.net
 ```
 
 ## Secret Handling

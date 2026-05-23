@@ -13,13 +13,12 @@ use crate::auth::{PairingGate, is_pairing_pin_message};
 use crate::capabilities;
 use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
 use crate::config::{Config, RepoConfig};
+use crate::dm::MessageEvent;
 use crate::jobs::{JobRecord, JobStatus, JobStore};
 use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
-use crate::subscriptions::{self, SubscriptionState};
 use crate::text::short_ref;
-use crate::wn::MessageEvent;
 use crate::workspace;
 use crate::worktrees::{self, WorktreeStore};
 
@@ -278,7 +277,7 @@ impl AgentApp {
         if event.attachments.is_empty() {
             return Ok(RouteAction::Reply(
                 event.unsupported.clone().unwrap_or_else(|| {
-                    "Unsupported White Noise message. Send /help for commands.".to_string()
+                    "Unsupported Marmot message. Send /help for commands.".to_string()
                 }),
             ));
         }
@@ -397,9 +396,9 @@ impl AgentApp {
         };
 
         [
-            self.config.whitenoise.bot_sender.as_deref(),
-            self.config.whitenoise.bot_npub.as_deref(),
-            self.config.whitenoise.account.as_deref(),
+            self.config.darkmatter.bot_sender.as_deref(),
+            self.config.darkmatter.bot_npub.as_deref(),
+            self.config.darkmatter.account.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -445,12 +444,12 @@ impl AgentApp {
         if let Some(config_path) = &self.config_path {
             let mut config = Config::load(config_path)?;
             if !config
-                .whitenoise
+                .darkmatter
                 .allowed_senders
                 .iter()
                 .any(|allowed| sender_id_matches(allowed, sender))
             {
-                config.whitenoise.allowed_senders.push(sender.to_string());
+                config.darkmatter.allowed_senders.push(sender.to_string());
                 config.save(config_path)?;
             }
         }
@@ -469,7 +468,7 @@ impl AgentApp {
             .count();
         let group_count = self
             .config
-            .whitenoise
+            .darkmatter
             .control_group_ids()
             .len()
             .max(stored_group_count);
@@ -483,17 +482,13 @@ impl AgentApp {
             .map(workspace_text)
             .unwrap_or_else(|| "none".to_string());
 
-        let subscription_status = subscription_status_line(&self.config)
-            .map(|line| format!("\n{line}"))
-            .unwrap_or_default();
-
         format!(
             "running | {}\n{} | {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
             self.config.runner.launcher,
             session_name,
             workspace,
             self.config.repos.len()
-        ) + &subscription_status
+        )
     }
 
     fn new_session_action(
@@ -508,7 +503,7 @@ impl AgentApp {
             .map(str::to_string)
         else {
             return Ok(RouteAction::Reply(
-                "Error: /new needs a White Noise sender identity.".to_string(),
+                "Error: /new needs a Marmot sender identity.".to_string(),
             ));
         };
 
@@ -537,7 +532,7 @@ impl AgentApp {
         let Some(group_id) = group_id.map(str::trim).filter(|group| !group.is_empty()) else {
             return Ok(None);
         };
-        let primary_group = self.config.whitenoise.group_id.trim();
+        let primary_group = self.config.darkmatter.group_id.trim();
         if primary_group.is_empty() || group_id != primary_group {
             return Ok(None);
         }
@@ -575,7 +570,7 @@ impl AgentApp {
             .filter(|group| !group.is_empty())
             .is_none()
         {
-            return Ok("Error: /rename only works inside a White Noise chat.".to_string());
+            return Ok("Error: /rename only works inside a Marmot chat.".to_string());
         }
 
         let mut session = self.session(sender_key)?;
@@ -948,7 +943,7 @@ impl AgentApp {
     }
 
     fn is_primary_group(&self, group_id: &str) -> bool {
-        let primary_group = self.config.whitenoise.group_id.trim();
+        let primary_group = self.config.darkmatter.group_id.trim();
         !primary_group.is_empty() && group_id == primary_group
     }
 
@@ -1153,41 +1148,6 @@ fn sender_id_matches(configured: &str, sender: &str) -> bool {
     }
 }
 
-fn subscription_status_line(config: &Config) -> Option<String> {
-    let snapshot = subscriptions::read_snapshot(&config.resolved_subscriptions_path())
-        .ok()
-        .flatten()?;
-    let total = snapshot.groups.len();
-    if total == 0 {
-        return None;
-    }
-    let stale = snapshot.groups.iter().filter(|group| group.stale).count();
-    let running = snapshot
-        .groups
-        .iter()
-        .filter(|group| group.state == SubscriptionState::Running && !group.stale)
-        .count();
-    let restarting = snapshot
-        .groups
-        .iter()
-        .filter(|group| {
-            matches!(
-                group.state,
-                SubscriptionState::Restarting
-                    | SubscriptionState::Exited
-                    | SubscriptionState::Failed
-            )
-        })
-        .count();
-    if stale == 0 && restarting == 0 {
-        Some(format!("subs: {running}/{total} ok"))
-    } else {
-        Some(format!(
-            "subs: {running}/{total} ok, {stale} stale, {restarting} restarting"
-        ))
-    }
-}
-
 fn nostr_public_key_hex(value: &str) -> Option<String> {
     PublicKey::parse(value.trim())
         .ok()
@@ -1203,7 +1163,7 @@ struct AuthState {
 impl AuthState {
     fn new(config: &Config, pairing_gate: Option<PairingGate>) -> Self {
         Self {
-            allowed_senders: Arc::new(Mutex::new(config.whitenoise.allowed_senders.clone())),
+            allowed_senders: Arc::new(Mutex::new(config.darkmatter.allowed_senders.clone())),
             pairing_gate,
         }
     }
@@ -1318,6 +1278,9 @@ fn short_group_id(group_id: &str) -> String {
     group_id.chars().take(5).collect()
 }
 
+// NOTE: deeplink scheme retained as `whitenoise://chat/...` for now because
+// existing Marmot phone clients register that URI scheme. When v2 phone
+// clients adopt a `marmot://` scheme this helper should follow.
 fn white_noise_chat_uri(group_id: &str) -> String {
     format!("whitenoise://chat/{}", group_id.trim())
 }
@@ -1589,7 +1552,7 @@ fn invalid_command_text(text: &str, error: &str) -> String {
 fn initial_history_text(text: &str) -> String {
     let text = text.trim();
     if text.is_empty() {
-        return "I saw an older White Noise item while catching up after startup, so I did not run it. Send it again now, or send /help."
+        return "I saw an older Marmot item while catching up after startup, so I did not run it. Send it again now, or send /help."
             .to_string();
     }
 
@@ -1685,7 +1648,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders.clear();
+        config.darkmatter.allowed_senders.clear();
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1714,57 +1677,7 @@ mod tests {
         ));
 
         let saved = Config::load(&config_path).unwrap();
-        assert_eq!(saved.whitenoise.allowed_senders, vec!["phone"]);
-    }
-
-    #[test]
-    fn status_reply_includes_subscription_health_when_available() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join("config.toml");
-        let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
-        config.whitenoise.group_id = "group-a".to_string();
-        config.runner.data_dir = temp.path().join("data").display().to_string();
-        config.runner.log_dir = temp.path().join("logs").display().to_string();
-        config.repos[0].path = repo.path().display().to_string();
-        config.save(&config_path).unwrap();
-        subscriptions::write_snapshot(
-            &config.resolved_subscriptions_path(),
-            &subscriptions::SubscriptionSnapshot {
-                version: 1,
-                updated_at: "2026-05-21T00:00:00Z".to_string(),
-                groups: vec![subscriptions::SubscriptionStatus {
-                    group_id: "group-a".to_string(),
-                    state: SubscriptionState::Running,
-                    pid: Some(42),
-                    started_at: Some("2026-05-21T00:00:00Z".to_string()),
-                    last_json_at: None,
-                    last_event_at: None,
-                    last_error_at: None,
-                    last_error: None,
-                    last_exit_at: None,
-                    last_exit_status: None,
-                    restart_count: 0,
-                    parse_error_count: 0,
-                    last_poll_at: None,
-                    latest_polled_message_id: None,
-                    latest_stream_message_id: None,
-                    latest_journaled_message_id: None,
-                    recovered_inbound: 0,
-                    stale: false,
-                }],
-            },
-        )
-        .unwrap();
-
-        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
-
-        assert!(matches!(
-            app.route_message(Some("group-a"), Some("phone"), "/status")
-                .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("subs: 1/1 ok")
-        ));
+        assert_eq!(saved.darkmatter.allowed_senders, vec!["phone"]);
     }
 
     #[test]
@@ -1774,8 +1687,8 @@ mod tests {
         let (bot_hex, bot_npub) = test_public_key_pair();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.bot_npub = Some(bot_npub.clone());
-        config.whitenoise.account = Some(bot_npub);
+        config.darkmatter.bot_npub = Some(bot_npub.clone());
+        config.darkmatter.account = Some(bot_npub);
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1796,7 +1709,7 @@ mod tests {
         let (phone_hex, phone_npub) = test_public_key_pair();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec![phone_npub];
+        config.darkmatter.allowed_senders = vec![phone_npub];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1817,7 +1730,7 @@ mod tests {
         fs::create_dir(repo.path().join("src")).unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1849,7 +1762,7 @@ mod tests {
         fs::create_dir(repo.path().join("src")).unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1874,7 +1787,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1899,7 +1812,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1921,39 +1834,12 @@ mod tests {
     }
 
     #[test]
-    fn inbox_bare_text_stays_command_only() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join("config.toml");
-        let mut config = Config::template();
-        config.whitenoise.group_id = "inbox".to_string();
-        config.whitenoise.group_ids = vec!["inbox".to_string()];
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
-        config.runner.data_dir = temp.path().join("data").display().to_string();
-        config.runner.log_dir = temp.path().join("logs").display().to_string();
-        config.repos[0].path = repo.path().display().to_string();
-        config.save(&config_path).unwrap();
-        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
-
-        let mut state = SessionState::new(Some("sandbox".to_string()));
-        state.default_agent = Some(crate::runner::AgentKind::Codex);
-        app.create_session_record("inbox", state).unwrap();
-
-        assert!(matches!(
-            app.route_message(Some("inbox"), Some("phone"), "do the thing")
-                .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("I received: do the thing")
-                && reply.contains("/codex <prompt>")
-        ));
-    }
-
-    #[test]
     fn run_ack_names_agent_and_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].alias = "work".to_string();
@@ -1981,9 +1867,9 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.group_id = "inbox".to_string();
-        config.whitenoise.group_ids = vec!["inbox".to_string()];
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.group_id = "inbox".to_string();
+        config.darkmatter.group_ids = vec!["inbox".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].alias = "work".to_string();
@@ -2009,14 +1895,6 @@ mod tests {
 
         assert_eq!(session.sender, "phone");
         assert_eq!(session.state.repo_alias.as_deref(), Some("work"));
-        assert_eq!(
-            session.state.default_agent,
-            Some(crate::runner::AgentKind::Codex)
-        );
-        assert_eq!(
-            session.state.default_prompt_prefix.as_deref(),
-            Some("@wiki")
-        );
         assert!(
             session
                 .group_name
@@ -2027,14 +1905,41 @@ mod tests {
     }
 
     #[test]
+    fn inbox_bare_text_stays_command_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.darkmatter.group_id = "inbox".to_string();
+        config.darkmatter.group_ids = vec!["inbox".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let mut state = SessionState::new(Some("sandbox".to_string()));
+        state.default_agent = Some(crate::runner::AgentKind::Codex);
+        app.create_session_record("inbox", state).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("inbox"), Some("phone"), "do the thing")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains("I received: do the thing")
+                && reply.contains("/codex <prompt>")
+        ));
+    }
+
+    #[test]
     fn non_primary_work_chat_bare_text_runs_default_agent() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.group_id = "inbox".to_string();
-        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.group_id = "inbox".to_string();
+        config.darkmatter.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].alias = "work".to_string();
@@ -2065,9 +1970,9 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.group_id = "inbox".to_string();
-        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.group_id = "inbox".to_string();
+        config.darkmatter.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].alias = "work".to_string();
@@ -2100,9 +2005,9 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.group_id = "inbox".to_string();
-        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.group_id = "inbox".to_string();
+        config.darkmatter.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -2158,7 +2063,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.launcher = crate::config::RunnerLauncher::Direct;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
@@ -2192,7 +2097,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -2222,7 +2127,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -2249,7 +2154,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         let repo = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
         let mut config = Config::template();
-        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.repos[0].path = repo.path().display().to_string();

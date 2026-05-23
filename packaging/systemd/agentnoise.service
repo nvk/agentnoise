@@ -1,12 +1,12 @@
 [Unit]
-Description=agentnoise White Noise coding-agent bridge
+Description=agentnoise Marmot v2 coding-agent bridge
 Documentation=https://agentnoise.com
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/agentnoise --config %h/.local/share/agentnoise/config.toml up
+ExecStart=/usr/local/bin/agentnoise --config %h/.local/share/agentnoise/config.toml transport run
 Restart=on-failure
 RestartSec=5s
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
