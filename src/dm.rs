@@ -185,8 +185,11 @@ impl DmSubscription {
                         attachments: Vec::new(),
                     });
                 }
-                RuntimeMessageUpdate::AgentStreamStarted(_)
-                | RuntimeMessageUpdate::AgentStreamFinalized(_) => continue,
+                // A kind-1200 stream start is an open-preview signal, not a
+                // timeline message. The durable stream final is delivered as a
+                // normal kind-9 `Message` (carrying stream-* tags), so it flows
+                // through the arm above like any other chat reply.
+                RuntimeMessageUpdate::AgentStreamStarted(_) => continue,
             }
         }
     }
@@ -234,7 +237,8 @@ mod tests {
             group_id_hex: "group-1".to_string(),
             sender: "phone".to_string(),
             plaintext: "/codex old command".to_string(),
-            app_message: None,
+            kind: 9,
+            tags: Vec::new(),
             recorded_at: 1,
             received_at: 1,
         };

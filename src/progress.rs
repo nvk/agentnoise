@@ -15,6 +15,7 @@ pub enum ProgressKind {
     Approval,
     Finished,
     Error,
+    Message,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +42,12 @@ impl ProgressRateLimiter {
     }
 
     pub fn should_send(&mut self, event: &ProgressEvent) -> bool {
-        if event.final_event || matches!(event.kind, ProgressKind::Started | ProgressKind::Error) {
+        if event.final_event
+            || matches!(
+                event.kind,
+                ProgressKind::Started | ProgressKind::Error | ProgressKind::Message
+            )
+        {
             self.last_sent = Some(Instant::now());
             return true;
         }
@@ -149,6 +155,7 @@ pub fn render_progress(event: &ProgressEvent) -> String {
         .map(|detail| format!("\n{}", detail.trim()))
         .unwrap_or_default();
     match event.kind {
+        ProgressKind::Message => event.detail.clone().unwrap_or_default(),
         ProgressKind::Started => format!("{job} started\n{}", event.agent),
         ProgressKind::Approval => format!("{job} approval needed{detail}"),
         ProgressKind::Error => format!("{job} error{detail}"),
@@ -199,6 +206,11 @@ fn parse_codex(value: &Value) -> Option<ProgressEvent> {
     if item_type.contains("tool") || item_type.contains("command") {
         return Some(event(ProgressKind::Tool, item_type, text_field(item)));
     }
+    if item_type == "agent_message"
+        && let Some(text) = crate::runner::assistant_message_text(AgentKind::Codex, value)
+    {
+        return Some(message_event(text));
+    }
     if matches!(item_type, "reasoning" | "task" | "plan" | "agent_message") {
         return Some(event(ProgressKind::Step, item_type, text_field(item)));
     }
@@ -212,7 +224,11 @@ fn parse_claude(value: &Value) -> Option<ProgressEvent> {
         .unwrap_or_default();
     match event_type {
         "system" => Some(event(ProgressKind::Step, "system", None)),
-        "assistant" => Some(event(ProgressKind::Step, "assistant", text_field(value))),
+        "assistant" => Some(
+            crate::runner::assistant_message_text(AgentKind::Claude, value)
+                .map(message_event)
+                .unwrap_or_else(|| event(ProgressKind::Step, "assistant", None)),
+        ),
         "tool_use" | "tool_result" => {
             Some(event(ProgressKind::Tool, event_type, text_field(value)))
         }
@@ -228,6 +244,19 @@ fn event(kind: ProgressKind, label: &str, detail: Option<String>) -> ProgressEve
         job_id: None,
         label: label.to_string(),
         detail,
+        final_event: false,
+    }
+}
+
+// Full assistant text, streamed un-throttled and rendered raw (see `should_send`
+// and `render_progress`) so the live preview shows the actual response.
+fn message_event(text: String) -> ProgressEvent {
+    ProgressEvent {
+        kind: ProgressKind::Message,
+        agent: AgentKind::Codex,
+        job_id: None,
+        label: "message".to_string(),
+        detail: Some(text),
         final_event: false,
     }
 }

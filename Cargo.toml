@@ -30,13 +30,13 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 zeroize = "1.8.2"
 
-# Darkmatter (v2 Marmot) protocol stack. Pin to a concrete upstream commit so
-# agentnoise builds from a clean checkout without a sibling darkmatter repo.
-marmot-app = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "a3eb7d727135eb80221601e8b46981137386e9b7" }
-marmot-account = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "a3eb7d727135eb80221601e8b46981137386e9b7" }
-cgka-traits = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "a3eb7d727135eb80221601e8b46981137386e9b7" }
-transport-quic-broker = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "a3eb7d727135eb80221601e8b46981137386e9b7" }
-transport-quic-stream = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "a3eb7d727135eb80221601e8b46981137386e9b7" }
+# Darkmatter (v2 Marmot) protocol stack. Pinned by git rev so agentnoise builds
+# from a clean checkout without a sibling darkmatter repo.
+marmot-app = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "6455b99ebf634b4c7f6c2ca4f6efcbc2e1c06d6a" }
+marmot-account = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "6455b99ebf634b4c7f6c2ca4f6efcbc2e1c06d6a" }
+cgka-traits = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "6455b99ebf634b4c7f6c2ca4f6efcbc2e1c06d6a" }
+transport-quic-broker = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "6455b99ebf634b4c7f6c2ca4f6efcbc2e1c06d6a" }
+transport-quic-stream = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "6455b99ebf634b4c7f6c2ca4f6efcbc2e1c06d6a" }
 # In-process Nostr relay used by `agentnoise fake-phone roundtrip` to drive a
 # fully-local dual-runtime smoke test without external infrastructure.
 nostr-relay-builder = "0.44"

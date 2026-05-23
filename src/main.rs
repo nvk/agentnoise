@@ -3,7 +3,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
     mpsc,
 };
 use std::thread;
@@ -1645,15 +1644,12 @@ fn run_listener(
                     };
                     let stream_cell: Arc<Mutex<Option<agentnoise::dm_streams::AgentTextStream>>> =
                         Arc::new(Mutex::new(stream_state));
-                    let streamed_progress = Arc::new(AtomicBool::new(false));
-                    let stream_broker_finished = Arc::new(AtomicBool::new(false));
 
                     let progress_dm = Arc::clone(&dm_clone);
                     let progress_group = group.clone();
                     let progress_stream = Arc::clone(&stream_cell);
                     let progress_journal = Arc::clone(&event_journal_clone);
                     let progress_handle = handle_clone.clone();
-                    let progress_streamed = Arc::clone(&streamed_progress);
                     let progress_callback = move |text: String| {
                         let mut sent_to_stream = false;
                         if let Ok(mut slot) = progress_stream.lock()
@@ -1663,7 +1659,6 @@ fn run_listener(
                             match stream.append_text_blocking(&text, &progress_handle) {
                                 Ok(report) => {
                                     if report.chunks_published > 0 {
-                                        progress_streamed.store(true, Ordering::Relaxed);
                                         sent_to_stream = true;
                                     }
                                 }
@@ -1715,10 +1710,8 @@ fn run_listener(
                         }
                         let finished_at = agentnoise::dm_streams::current_unix_seconds();
                         match stream.finish_blocking(reply.clone(), finished_at, &handle_clone) {
-                            Ok(report) => {
+                            Ok(_) => {
                                 stream_finalized = true;
-                                stream_broker_finished
-                                    .store(report.broker_finished, Ordering::Relaxed);
                             }
                             Err(error) => {
                                 eprintln!(
@@ -1728,11 +1721,7 @@ fn run_listener(
                         }
                     }
 
-                    if !should_send_plain_final_reply(
-                        stream_finalized,
-                        streamed_progress.load(Ordering::Relaxed),
-                        stream_broker_finished.load(Ordering::Relaxed),
-                    ) {
+                    if !should_send_plain_final_reply(stream_finalized) {
                         return;
                     }
                     if let Err(error) = dm_clone.send_reply_to_blocking(&group, &reply) {
@@ -1752,12 +1741,11 @@ fn run_listener(
     Ok(())
 }
 
-fn should_send_plain_final_reply(
-    stream_finalized: bool,
-    streamed_progress: bool,
-    stream_broker_finished: bool,
-) -> bool {
-    !stream_finalized || !streamed_progress || !stream_broker_finished
+fn should_send_plain_final_reply(stream_finalized: bool) -> bool {
+    // The Final MLS envelope (AgentStreamFinalized) is the canonical record and
+    // is always published when the stream finalizes; only fall back to a plain
+    // chat reply when no durable Final envelope was published.
+    !stream_finalized
 }
 
 struct GroupSubscriptionContext<'a> {
@@ -2100,9 +2088,9 @@ mod tests {
 
     #[test]
     fn plain_final_reply_is_only_stream_fallback() {
-        assert!(!should_send_plain_final_reply(true, true, true));
-        assert!(should_send_plain_final_reply(true, false, true));
-        assert!(should_send_plain_final_reply(false, true, true));
-        assert!(should_send_plain_final_reply(true, true, false));
+        // The plain reply is sent only when the stream did not finalize (no
+        // durable Final envelope); a finalized stream is the canonical record.
+        assert!(!should_send_plain_final_reply(true));
+        assert!(should_send_plain_final_reply(false));
     }
 }

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use cgka_traits::TransportEndpoint;
+use cgka_traits::app_event::STREAM_TAG;
 use marmot_app::{
     AccountSetupRequest, AgentTextStreamFinishRequest, AppMessageQuery, MarmotApp, MarmotAppEvent,
     MarmotAppRuntime, RuntimeMessageUpdate,
@@ -231,6 +232,14 @@ async fn run_roundtrip(options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
                     Some(RuntimeMessageUpdate::Message(message))
                         if message.message.sender == desktop_id =>
                     {
+                        // The durable stream final is now a kind-9 chat carrying
+                        // a `stream` tag (no separate finalized event exists).
+                        // It is both a real reply and the finalization signal.
+                        if message.message.tags.iter().any(|tag| {
+                            tag.first().is_some_and(|name| name == STREAM_TAG)
+                        }) {
+                            saw_finalize = true;
+                        }
                         replies.push(message.message.plaintext);
                     }
                     Some(_) => {}
@@ -243,11 +252,6 @@ async fn run_roundtrip(options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
                         if stream.account_id_hex == phone_id =>
                     {
                         saw_start = true;
-                    }
-                    Ok(MarmotAppEvent::AgentStreamFinalized(stream))
-                        if stream.account_id_hex == phone_id =>
-                    {
-                        saw_finalize = true;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

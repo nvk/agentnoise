@@ -979,7 +979,7 @@ fn final_result_text(agent: AgentKind, value: &Value) -> Option<String> {
     }
 }
 
-fn assistant_message_text(agent: AgentKind, value: &Value) -> Option<String> {
+pub(crate) fn assistant_message_text(agent: AgentKind, value: &Value) -> Option<String> {
     match agent {
         AgentKind::Codex => codex_message_text(value),
         AgentKind::Claude => claude_message_text(value),
