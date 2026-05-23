@@ -1,12 +1,13 @@
 class Agentnoise < Formula
   desc "Chat with local coding agents through White Noise"
   homepage "https://agentnoise.org"
-  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.27.tar.gz"
-  sha256 "bc67a2e70e4fc0f8c0a140eef2fd48f308efa7013e77fe9e2af56de2603064c3"
+  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.28.tar.gz"
+  sha256 "2ea25346c0215f20682fdf0f005fb69561f2099a7d63884714325b22793bf3b9"
   license "MIT"
   head "https://github.com/nvk/agentnoise.git", branch: "main"
 
   depends_on "rust" => :build
+  depends_on "sqlite"
 
   resource "whitenoise-rs" do
     url "https://github.com/marmot-protocol/whitenoise-rs.git",
@@ -29,7 +30,7 @@ class Agentnoise < Formula
   end
 
   service do
-    run [opt_bin/"agentnoise", "up"]
+    run [opt_bin/"agentnoise", "transport", "run"]
     environment_variables PATH: "#{HOMEBREW_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     keep_alive true
     log_path var/"log/agentnoise.log"
@@ -38,21 +39,26 @@ class Agentnoise < Formula
 
   def caveats
     <<~EOS
-      Quick start with raw Codex/Claude:
+      Quick start without agentbondage, using raw Codex/Claude:
+        agentnoise up --direct-agents --no-listen
+        brew services start nvk/tap/agentnoise
+        agentnoise worker start
+
+      Or run foreground setup/listening from a terminal:
         agentnoise up --direct-agents
 
-      To keep setup/pairing alive in the background:
-        brew services start nvk/tap/agentnoise
-
-      Current Codex CLI builds do not run reliably from macOS launchd. For
-      /codex jobs on macOS, run agentnoise from a login shell or tmux:
-        agentnoise up --no-daemon
+      Homebrew keeps the White Noise transport alive. Local Codex/Claude/Hermes
+      jobs run from your login shell worker:
+        agentnoise worker start
+      If tmux is installed, detach it with:
+        agentnoise worker start --tmux
 
       Use agentnoise up anytime as the local console. If the service is already
       running, it attaches instead of starting a second listener.
 
       Config:
         agentnoise config path
+        agentnoise config launcher direct
         agentnoise config print-template
         agentnoise doctor
 
@@ -62,6 +68,6 @@ class Agentnoise < Formula
   end
 
   test do
-    assert_match "agentnoise 0.1.27", shell_output("#{bin}/agentnoise --version")
+    assert_match "agentnoise 0.1.28", shell_output("#{bin}/agentnoise --version")
   end
 end
