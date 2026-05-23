@@ -13,11 +13,8 @@ export AGENTNOISE="$PWD/target/release/agentnoise"
 
 ## Agent Launcher
 
-The recommended path uses `bondage` profiles named `codex-agentnoise` and
-`claude-agentnoise` so phone-triggered jobs run behind a local policy boundary.
-
-If you only have raw Codex or Claude installed, initialize direct mode before
-pairing:
+The simplest path does not require `agentbondage`. If you have raw Codex or
+Claude installed and logged in, initialize direct mode before pairing:
 
 ```sh
 "$AGENTNOISE" init --direct-agents
@@ -37,6 +34,10 @@ mode with:
 "$AGENTNOISE" doctor
 "$AGENTNOISE" agents
 ```
+
+For the hardened local-agent-stack setup, use `bondage` profiles named
+`codex-agentnoise` and `claude-agentnoise` so phone-triggered jobs run behind a
+local policy boundary.
 
 Existing configs can switch without re-running setup:
 

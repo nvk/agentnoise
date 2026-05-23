@@ -546,6 +546,10 @@ impl Config {
         self.resolved_data_dir().join("jobs.json")
     }
 
+    pub fn resolved_queue_path(&self) -> PathBuf {
+        self.resolved_data_dir().join("queue.sqlite3")
+    }
+
     pub fn resolved_event_log_path(&self) -> PathBuf {
         self.resolved_data_dir().join("runtime-events.jsonl")
     }

@@ -82,7 +82,7 @@ used in Marmot agent-text-stream start payloads.
 
 ## Agent Launcher
 
-Simple setup for raw Codex/Claude:
+Simple setup for raw Codex/Claude, with no `agentbondage` required:
 
 ```toml
 [runner]
@@ -109,6 +109,8 @@ permission_mode = "auto"
 Set it from the CLI:
 
 ```sh
+agentnoise init --direct-agents
+# or during first setup
 agentnoise up --direct-agents
 # or
 agentnoise config launcher direct
