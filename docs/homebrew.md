@@ -18,48 +18,56 @@ Local tap install shape:
 
 ```sh
 brew install nvk/tap/agentnoise
-agentnoise init
+agentnoise up --direct-agents --no-listen
 brew services start nvk/tap/agentnoise
+agentnoise worker start
+# or, if tmux is installed:
+agentnoise worker start --tmux
 ```
 
 The formula builds and installs `agentnoise`, `wn`, and `wnd` under the same
-Homebrew prefix. The service uses `agentnoise up`, so setup repair, daemon
-startup, group discovery, first-pairing PIN auth, and keychain login repair stay
-in one code path. On a fresh install the service starts before a control chat
-exists, shows the QR/PIN pairing flow, and keeps discovering White Noise chats
-until the phone-created chat appears. Homebrew owns restart and boot through
-`brew services`.
+Homebrew prefix. The service uses `agentnoise transport run`: it starts White
+Noise, repairs login when needed, subscribes to paired chats, handles pairing,
+and writes agent jobs into the local SQLite queue. `agentnoise worker start` is
+the login-shell side that claims queued jobs and runs Codex, Claude, or Hermes;
+add `--tmux` when tmux is installed and you want the worker detached. Homebrew
+owns restart and boot for the transport through `brew services`.
 
-`agentnoise up` is also the local console. If the Homebrew service is already
-running, an interactive `agentnoise up` attaches to the existing engine and
+The `--direct-agents` setup is the no-agentbondage path. It runs the raw
+`codex` and `claude` CLIs with structured argv, so the only local agent setup
+required is having those CLIs installed and logged in. Use `agentnoise init`
+without `--direct-agents` only when you want `bondage` profiles such as
+`codex-agentnoise` and `claude-agentnoise`.
+
+`agentnoise up` is still the all-in-one local console. If the Homebrew
+transport is already running, an interactive `agentnoise up` attaches and
 follows logs instead of starting a second listener. If the service is not
-running, it takes the foreground engine lock and behaves like the service until
-the terminal exits.
+running, it takes the foreground engine lock and runs transport plus jobs in
+one process until the terminal exits.
 
 Current macOS Codex CLI builds can hang before producing output when launched
-directly by launchd. Use Homebrew services for setup, pairing, White Noise
-startup, status, and boot. For phone-launched `/codex` jobs on macOS, stop the
-service and run the listener from a login shell or tmux:
+directly by launchd. The split transport/worker path avoids that by keeping the
+Homebrew service responsible for White Noise only and running jobs from tmux or
+your login shell.
 
 ```sh
-brew services stop nvk/tap/agentnoise
-agentnoise up --no-daemon
-```
-
-```sh
-tmux new -s agentnoise 'agentnoise up --no-daemon'
+agentnoise worker start
+# or, if tmux is installed:
+agentnoise worker start --tmux
 ```
 
 For config examples:
 
 ```sh
 agentnoise config path
+agentnoise worker status
 agentnoise config print-template
 agentnoise doctor
 ```
 
-See [Configuration](configuration.md) for raw Codex/Claude mode, `bondage`
-profile mode, repo aliases, and profile variants such as `/codex-fix`.
+See [Configuration](configuration.md) for the no-agentbondage raw Codex/Claude
+mode, `bondage` profile mode, repo aliases, and profile variants such as
+`/codex-fix`.
 
 For development-only installs where keychain prompts are noise, run:
 

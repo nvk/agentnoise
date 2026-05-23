@@ -389,7 +389,7 @@ impl Runner {
         }
         if request.agent == AgentKind::Codex && launchd_service_context() {
             bail!(
-                "Codex jobs cannot run reliably from macOS launchd/brew services: `codex exec` can start but never produce output. Start agentnoise from a login shell instead, for example `tmux new -s agentnoise 'agentnoise up --no-daemon'` after the White Noise daemon is running. Manual: https://github.com/nvk/agentnoise/blob/main/docs/services.md#macos"
+                "Codex jobs cannot run reliably from macOS launchd/brew services: `codex exec` can start but never produce output. Keep the service on transport and run jobs from a login shell with `agentnoise worker start --tmux`. Manual: https://github.com/nvk/agentnoise/blob/main/docs/services.md#macos"
             );
         }
         let permission_mode = self.config.effective_permission_mode_for_request(request)?;

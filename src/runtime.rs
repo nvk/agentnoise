@@ -78,6 +78,58 @@ pub struct EngineGuard {
     status_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeRole {
+    Transport,
+    Worker,
+}
+
+impl RuntimeRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Worker => "worker",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoleRuntimeStatus {
+    pub version: u8,
+    pub role: RuntimeRole,
+    pub pid: u32,
+    pub started_at: String,
+    pub config_path: String,
+    pub data_dir: String,
+    pub log_dir: String,
+}
+
+pub struct RoleGuard {
+    role: RuntimeRole,
+    lock: File,
+    lock_path: PathBuf,
+    status_path: PathBuf,
+}
+
+impl RoleGuard {
+    pub fn role(&self) -> RuntimeRole {
+        self.role
+    }
+
+    pub fn update_status(&self, config_path: &Path, config: &Config) -> Result<()> {
+        write_role_status(&self.status_path, self.role, config_path, config)
+    }
+}
+
+impl Drop for RoleGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.status_path);
+        let _ = self.lock.sync_all();
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
 impl EngineGuard {
     pub fn update_status(
         &self,
@@ -132,6 +184,39 @@ pub fn acquire_engine(
     Ok(Some(guard))
 }
 
+pub fn acquire_role(
+    config_path: &Path,
+    config: &Config,
+    role: RuntimeRole,
+    mode: AcquireMode,
+) -> Result<Option<RoleGuard>> {
+    fs::create_dir_all(config.resolved_data_dir())
+        .with_context(|| format!("creating data dir {}", config.resolved_data_dir().display()))?;
+    let lock_path = role_lock_path(config, role);
+    let lock = match mode {
+        AcquireMode::Try => match try_create_engine_lock(&lock_path)? {
+            Some(lock) => lock,
+            None => return Ok(None),
+        },
+        AcquireMode::Wait => loop {
+            if let Some(lock) = try_create_engine_lock(&lock_path)? {
+                break lock;
+            }
+            thread::sleep(Duration::from_secs(1));
+        },
+    };
+
+    write_lock_owner(&lock)?;
+    let guard = RoleGuard {
+        role,
+        lock,
+        lock_path,
+        status_path: role_status_path(config, role),
+    };
+    guard.update_status(config_path, config)?;
+    Ok(Some(guard))
+}
+
 fn try_create_engine_lock(path: &Path) -> Result<Option<File>> {
     loop {
         match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -182,14 +267,73 @@ pub fn engine_lock_owner(config: &Config) -> Result<Option<u32>> {
     Ok(parse_lock_pid(&text).filter(|pid| process_is_alive(*pid)))
 }
 
+pub fn role_is_running(config: &Config, role: RuntimeRole) -> Result<bool> {
+    let data_dir = config.resolved_data_dir();
+    if !data_dir.exists() {
+        return Ok(false);
+    }
+    let lock_path = role_lock_path(config, role);
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    if lock_owner_is_active(&lock_path)? {
+        return Ok(true);
+    }
+    fs::remove_file(&lock_path).ok();
+    Ok(false)
+}
+
+pub fn role_lock_owner(config: &Config, role: RuntimeRole) -> Result<Option<u32>> {
+    let lock_path = role_lock_path(config, role);
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&lock_path)
+        .with_context(|| format!("reading role lock owner {}", lock_path.display()))?;
+    Ok(parse_lock_pid(&text).filter(|pid| process_is_alive(*pid)))
+}
+
+pub fn read_role_status(config: &Config, role: RuntimeRole) -> Result<Option<RoleRuntimeStatus>> {
+    let path = role_status_path(config, role);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("reading role status {}", path.display()))?;
+    let status = serde_json::from_str(&text)
+        .with_context(|| format!("parsing role status {}", path.display()))?;
+    Ok(Some(status))
+}
+
 pub fn attach_ui(config_path: &Path, config: &Config) -> Result<()> {
     println!("agentnoise already running");
-    match read_status(config)? {
-        Some(status) => print_status(&status),
-        None => {
-            println!("status: runtime lock is held, but no status file was found");
-            println!("config: {}", config_path.display());
+    let engine_status = read_status(config)?;
+    let transport_status = read_role_status(config, RuntimeRole::Transport)?;
+    match &engine_status {
+        Some(status) => print_status(status),
+        None => match &transport_status {
+            Some(status) => {
+                println!("role: {}", status.role.as_str());
+                println!("pid: {}", status.pid);
+                println!("started: {}", status.started_at);
+            }
+            None => {
+                println!("status: runtime lock is held, but no status file was found");
+            }
+        },
+    }
+    if let Ok(Some(status)) = read_role_status(config, RuntimeRole::Worker)
+        && role_is_running(config, RuntimeRole::Worker).unwrap_or(false)
+    {
+        println!("worker pid: {}", status.pid);
+        println!("worker started: {}", status.started_at);
+    }
+    if engine_status.is_none() {
+        if let Some(status) = transport_status {
+            println!("transport data: {}", status.data_dir);
+            println!("transport logs: {}", status.log_dir);
         }
+        println!("config: {}", config_path.display());
     }
 
     let logs = existing_log_paths(config);
@@ -309,6 +453,30 @@ fn write_status(
         pairing,
     };
     write_runtime_status(path, &status)
+}
+
+fn write_role_status(
+    path: &Path,
+    role: RuntimeRole,
+    config_path: &Path,
+    config: &Config,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let status = RoleRuntimeStatus {
+        version: 1,
+        role,
+        pid: std::process::id(),
+        started_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_string()),
+        config_path: config_path.display().to_string(),
+        data_dir: config.resolved_data_dir().display().to_string(),
+        log_dir: config.resolved_log_dir().display().to_string(),
+    };
+    let text = serde_json::to_string_pretty(&status).context("serializing role status")?;
+    fs::write(path, text).with_context(|| format!("writing role status {}", path.display()))
 }
 
 fn write_runtime_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
@@ -493,6 +661,18 @@ fn status_path(config: &Config) -> PathBuf {
     config.resolved_data_dir().join(STATUS_FILE)
 }
 
+fn role_lock_path(config: &Config, role: RuntimeRole) -> PathBuf {
+    config
+        .resolved_data_dir()
+        .join(format!("{}.lock", role.as_str()))
+}
+
+fn role_status_path(config: &Config, role: RuntimeRole) -> PathBuf {
+    config
+        .resolved_data_dir()
+        .join(format!("{}.json", role.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +736,43 @@ mod tests {
         assert_eq!(status.npub.as_deref(), Some("npub-test"));
         assert_eq!(status.groups, vec!["group-a"]);
         assert_eq!(status.pairing.unwrap().pin_seconds, 30);
+    }
+
+    #[test]
+    fn role_locks_are_independent() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path());
+        let config_path = temp.path().join("config.toml");
+
+        let transport = acquire_role(
+            &config_path,
+            &config,
+            RuntimeRole::Transport,
+            AcquireMode::Try,
+        )
+        .unwrap()
+        .unwrap();
+        let worker = acquire_role(&config_path, &config, RuntimeRole::Worker, AcquireMode::Try)
+            .unwrap()
+            .unwrap();
+
+        assert!(role_is_running(&config, RuntimeRole::Transport).unwrap());
+        assert!(role_is_running(&config, RuntimeRole::Worker).unwrap());
+        assert!(
+            acquire_role(
+                &config_path,
+                &config,
+                RuntimeRole::Transport,
+                AcquireMode::Try
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        drop(transport);
+        assert!(!role_is_running(&config, RuntimeRole::Transport).unwrap());
+        assert!(role_is_running(&config, RuntimeRole::Worker).unwrap());
+        drop(worker);
     }
 
     #[test]

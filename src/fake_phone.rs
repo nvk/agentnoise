@@ -13,6 +13,7 @@ use zeroize::Zeroize;
 
 use crate::auth::is_pairing_pin_message;
 use crate::config::{Config, WhitenoiseConfig};
+use crate::runtime;
 use crate::secrets;
 use crate::whitenoise_cli;
 use crate::wn::WnClient;
@@ -24,6 +25,7 @@ pub struct FakePhonePlan {
     pub logs_dir: PathBuf,
     pub socket: PathBuf,
     pub nsec_file: PathBuf,
+    pub group_file: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +38,7 @@ pub struct FakePhoneRoundtrip {
     pub expect: Vec<String>,
     pub min_replies: usize,
     pub require_job_final: bool,
+    pub shared_daemon: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,12 +58,14 @@ pub fn plan(config: &Config, root: Option<&Path>) -> FakePhonePlan {
     let logs_dir = root.join("wnd-logs");
     let socket = data_dir.join("release").join("wnd.sock");
     let nsec_file = root.join("fake-phone.nsec");
+    let group_file = root.join("fake-phone.group.json");
     FakePhonePlan {
         root,
         data_dir,
         logs_dir,
         socket,
         nsec_file,
+        group_file,
     }
 }
 
@@ -72,11 +77,17 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
     fs::create_dir_all(&plan.logs_dir)
         .with_context(|| format!("creating {}", plan.logs_dir.display()))?;
 
-    let mut daemon = ChildGuard::new(start_fake_wnd(config, &plan)?);
-    wait_for_socket(&plan, &mut daemon.child, Duration::from_secs(10))?;
+    let mut daemon = if options.shared_daemon {
+        None
+    } else {
+        let mut daemon = ChildGuard::new(start_fake_wnd(config, &plan)?);
+        wait_for_socket(&plan, &mut daemon.child, Duration::from_secs(10))?;
+        Some(daemon)
+    };
 
-    let fake_config = fake_whitenoise_config(config, &plan);
+    let mut fake_config = fake_whitenoise_config(config, &plan, options.shared_daemon);
     let phone_npub = create_or_reuse_identity(&fake_config, &plan)?;
+    fake_config.account = Some(phone_npub.clone());
     let agent_npub = config
         .whitenoise
         .bot_npub
@@ -85,7 +96,7 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
         .map(str::trim)
         .filter(|npub| !npub.is_empty())
         .context("config has no agentnoise npub; run `agentnoise setup` first")?;
-    let group_id = create_group(&fake_config, &options.group_name, agent_npub)?;
+    let group_id = create_or_reuse_group(&fake_config, &plan, &options.group_name, agent_npub)?;
     let client = WnClient::new(fake_config.clone_with_group(&group_id));
     if let Some(pin) = options
         .pin
@@ -97,10 +108,11 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
         thread::sleep(Duration::from_secs(1));
     }
 
-    let outcome = send_until_replies(&client, &fake_config, &group_id, &options)?;
+    let outcome = send_until_replies(config, &client, &fake_config, &group_id, &options)?;
     if !outcome.satisfied() {
         bail!("{}", outcome.failure_message());
     }
+    drop(daemon.take());
     Ok(FakePhoneResult {
         phone_npub,
         group_id,
@@ -217,12 +229,18 @@ fn log_excerpt(path: &Path) -> Option<String> {
     Some(lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
 }
 
-fn fake_whitenoise_config(config: &Config, plan: &FakePhonePlan) -> WhitenoiseConfig {
+fn fake_whitenoise_config(
+    config: &Config,
+    plan: &FakePhonePlan,
+    shared_daemon: bool,
+) -> WhitenoiseConfig {
     let mut fake = config.whitenoise.clone();
     fake.group_id.clear();
     fake.group_ids.clear();
     fake.account = None;
-    fake.socket = Some(plan.socket.display().to_string());
+    if !shared_daemon {
+        fake.socket = Some(plan.socket.display().to_string());
+    }
     fake.allowed_senders.clear();
     fake.use_keychain_nsec = false;
     fake.dev_burner_nsec = false;
@@ -309,6 +327,56 @@ fn set_burner_file_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_burner_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredFakePhoneGroup {
+    agent_npub: String,
+    group_id: String,
+}
+
+fn create_or_reuse_group(
+    config: &WhitenoiseConfig,
+    plan: &FakePhonePlan,
+    name: &str,
+    agent_npub: &str,
+) -> Result<String> {
+    if let Some(group) = load_stored_group(plan, agent_npub)? {
+        return Ok(group.group_id);
+    }
+    let group_id = create_group(config, name, agent_npub)?;
+    store_group(plan, agent_npub, &group_id)?;
+    Ok(group_id)
+}
+
+fn load_stored_group(
+    plan: &FakePhonePlan,
+    agent_npub: &str,
+) -> Result<Option<StoredFakePhoneGroup>> {
+    let text = match fs::read_to_string(&plan.group_file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", plan.group_file.display()));
+        }
+    };
+    let group: StoredFakePhoneGroup = serde_json::from_str(&text)
+        .with_context(|| format!("parsing {}", plan.group_file.display()))?;
+    if group.agent_npub == agent_npub && !group.group_id.trim().is_empty() {
+        Ok(Some(group))
+    } else {
+        Ok(None)
+    }
+}
+
+fn store_group(plan: &FakePhonePlan, agent_npub: &str, group_id: &str) -> Result<()> {
+    let group = StoredFakePhoneGroup {
+        agent_npub: agent_npub.to_string(),
+        group_id: group_id.to_string(),
+    };
+    let text = serde_json::to_string_pretty(&group).context("serializing fake phone group")?;
+    fs::write(&plan.group_file, text)
+        .with_context(|| format!("writing {}", plan.group_file.display()))
 }
 
 fn create_group(config: &WhitenoiseConfig, name: &str, agent_npub: &str) -> Result<String> {
@@ -399,6 +467,7 @@ impl ReplyOutcome {
 }
 
 fn send_until_replies(
+    agent_config: &Config,
     client: &WnClient,
     config: &WhitenoiseConfig,
     group_id: &str,
@@ -418,6 +487,7 @@ fn send_until_replies(
 
     let started = Instant::now();
     let mut last_send = Instant::now() - Duration::from_secs(10);
+    let mut last_pairing_pin_sent = options.pin.as_ref().map(|pin| pin.trim().to_string());
     let mut sent_after_reply = false;
     let mut outcome = ReplyOutcome::new(options);
     while started.elapsed() < options.timeout {
@@ -444,6 +514,14 @@ fn send_until_replies(
                     )?);
                     subscribed_groups.push(next_group_id);
                 }
+                if reply_requests_pairing_pin(&reply)
+                    && let Some(pin) = current_runtime_pairing_pin(agent_config)?
+                    && last_pairing_pin_sent.as_deref() != Some(pin.as_str())
+                {
+                    client.send_to(&group_id, &pin)?;
+                    last_pairing_pin_sent = Some(pin);
+                    last_send = Instant::now() - Duration::from_secs(10);
+                }
                 outcome.record(reply);
                 if outcome.satisfied() {
                     break;
@@ -463,6 +541,20 @@ fn send_until_replies(
         child.kill().ok();
     }
     Ok(outcome)
+}
+
+fn current_runtime_pairing_pin(config: &Config) -> Result<Option<String>> {
+    let Some(status) = runtime::read_status(config)? else {
+        return Ok(None);
+    };
+    let Some(pin) = status
+        .pairing
+        .and_then(|pairing| pairing.current_pin)
+        .filter(|pin| pin.remaining_seconds().unwrap_or(0) > 1)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(pin.code))
 }
 
 fn subscribe_replies(
@@ -520,6 +612,13 @@ fn reply_should_stop_resending(reply: &str, expected: &[String]) -> bool {
         || is_job_session_started_reply(reply)
         || is_job_ack_reply(reply)
         || is_job_final_reply(reply)
+}
+
+fn reply_requests_pairing_pin(reply: &str) -> bool {
+    let reply = reply.trim();
+    reply.starts_with("Pairing required.")
+        || reply.starts_with("Pairing PIN invalid or expired.")
+        || reply.contains("current desktop/SSH PIN")
 }
 
 fn is_job_session_started_reply(text: &str) -> bool {
@@ -594,6 +693,23 @@ mod tests {
     }
 
     #[test]
+    fn fake_phone_group_store_is_scoped_to_agent_npub() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        let plan = plan(&config, Some(temp.path()));
+
+        store_group(&plan, "npub1agent", "abcdef").unwrap();
+        assert_eq!(
+            load_stored_group(&plan, "npub1agent")
+                .unwrap()
+                .map(|group| group.group_id),
+            Some("abcdef".to_string())
+        );
+        assert!(load_stored_group(&plan, "npub1other").unwrap().is_none());
+    }
+
+    #[test]
     fn fake_phone_reply_filter_ignores_harness_noise() {
         assert!(!is_command_reply("", "/status"));
         assert!(!is_command_reply("/status", "/status"));
@@ -645,6 +761,19 @@ mod tests {
     }
 
     #[test]
+    fn fake_phone_detects_pairing_pin_requests() {
+        assert!(reply_requests_pairing_pin(
+            "Pairing required. Send the current desktop/SSH PIN as `/pair 123456`, then send `/help`."
+        ));
+        assert!(reply_requests_pairing_pin(
+            "Pairing PIN invalid or expired. Check the desktop log for the current PIN."
+        ));
+        assert!(!reply_requests_pairing_pin(
+            "running | direct\nmain | sandbox:/"
+        ));
+    }
+
+    #[test]
     fn fake_phone_detects_final_job_reply() {
         assert!(!is_job_final_reply("Job an-123 codex: started"));
         assert!(!is_job_final_reply("Job an-123 codex: succeeded"));
@@ -677,6 +806,7 @@ mod tests {
             expect: vec!["ok".to_string()],
             min_replies: 2,
             require_job_final: true,
+            shared_daemon: false,
         };
         let mut outcome = ReplyOutcome::new(&options);
         outcome.record("codex queued".to_string());

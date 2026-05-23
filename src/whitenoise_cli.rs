@@ -487,11 +487,66 @@ pub fn publish_key_package(config: &WhitenoiseConfig) -> Result<String> {
                 last_error = Some(error);
                 thread::sleep(Duration::from_secs(attempt * 2));
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Ok(count) = key_package_count(config)
+                    && count > 0
+                {
+                    eprintln!(
+                        "agentnoise: wn keys publish failed after publishing key package(s); continuing with {count} visible package(s): {error:#}"
+                    );
+                    return Ok(format!(
+                        r#"{{"result":{{"key_packages_visible":{count}}}}}"#
+                    ));
+                }
+                return Err(error);
+            }
         }
     }
 
-    Err(last_error.expect("key package publish retry error"))
+    let error = last_error.expect("key package publish retry error");
+    if let Ok(count) = key_package_count(config)
+        && count > 0
+    {
+        eprintln!(
+            "agentnoise: wn keys publish failed after publishing key package(s); continuing with {count} visible package(s): {error:#}"
+        );
+        return Ok(format!(
+            r#"{{"result":{{"key_packages_visible":{count}}}}}"#
+        ));
+    }
+    Err(error)
+}
+
+fn key_package_count(config: &WhitenoiseConfig) -> Result<usize> {
+    let wn = resolve_wn(&config.wn_bin);
+    let mut command = Command::new(&wn);
+    add_socket_arg(&mut command, config.resolved_socket().as_deref());
+    command.arg("keys").arg("list").arg("--json");
+    add_account_arg(&mut command, config.account.as_deref());
+    let output = checked_output(command, &wn, "keys list")?;
+    key_package_count_from_output(&output)
+}
+
+fn key_package_count_from_output(text: &str) -> Result<usize> {
+    let value: Value = serde_json::from_str(text.trim()).context("parsing wn keys list JSON")?;
+    Ok(count_key_package_arrays(&value))
+}
+
+fn count_key_package_arrays(value: &Value) -> usize {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| {
+                if key == "key_packages" {
+                    value.as_array().map_or(0, Vec::len)
+                } else {
+                    count_key_package_arrays(value)
+                }
+            })
+            .sum(),
+        Value::Array(values) => values.iter().map(count_key_package_arrays).sum(),
+        _ => 0,
+    }
 }
 
 pub fn login_from_configured_nsec(
@@ -1184,6 +1239,20 @@ mod tests {
         let output = include_str!("../tests/fixtures/wn/whoami/empty.json");
 
         assert!(!account_logged_in_from_stdout(output, None).unwrap());
+    }
+
+    #[test]
+    fn counts_key_packages_from_wn_json() {
+        let output = r#"{
+          "result": {
+            "key_packages": [
+              {"event_id": "a"},
+              {"event_id": "b"}
+            ]
+          }
+        }"#;
+
+        assert_eq!(key_package_count_from_output(output).unwrap(), 2);
     }
 
     #[test]

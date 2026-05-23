@@ -352,6 +352,15 @@ impl AgentApp {
         request: AgentRequest,
         send_progress: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<String> {
+        let record = self.run_request_record_with_progress(request, send_progress)?;
+        Ok(render_job_reply(&record))
+    }
+
+    pub fn run_request_record_with_progress(
+        &self,
+        request: AgentRequest,
+        send_progress: impl Fn(String) + Send + Sync + 'static,
+    ) -> Result<JobRecord> {
         let mut limiter = ProgressRateLimiter::new(self.config.runner.progress_interval_seconds);
         let callback = Arc::new(Mutex::new(move |event: crate::progress::ProgressEvent| {
             if event.kind == ProgressKind::Finished {
@@ -369,7 +378,11 @@ impl AgentApp {
                 }
             }),
         )?;
-        Ok(render_job_reply(&record))
+        Ok(record)
+    }
+
+    pub fn render_job_record(&self, record: &JobRecord) -> String {
+        render_job_reply(record)
     }
 
     pub fn create_session_record(&self, group_id: &str, state: SessionState) -> Result<String> {

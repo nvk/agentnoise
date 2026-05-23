@@ -16,6 +16,7 @@ pub mod launchd;
 pub mod local_sessions;
 pub mod paths;
 pub mod progress;
+pub mod queue;
 pub mod runner;
 pub mod runtime;
 pub mod secrets;

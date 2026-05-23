@@ -13,11 +13,8 @@ export AGENTNOISE="$PWD/target/release/agentnoise"
 
 ## Agent Launcher
 
-The recommended path uses `bondage` profiles named `codex-agentnoise` and
-`claude-agentnoise` so phone-triggered jobs run behind a local policy boundary.
-
-If you only have raw Codex or Claude installed, initialize direct mode before
-pairing:
+The simplest path does not require `agentbondage`. If you have raw Codex or
+Claude installed and logged in, initialize direct mode before pairing:
 
 ```sh
 "$AGENTNOISE" init --direct-agents
@@ -37,6 +34,10 @@ mode with:
 "$AGENTNOISE" doctor
 "$AGENTNOISE" agents
 ```
+
+For the hardened local-agent-stack setup, use `bondage` profiles named
+`codex-agentnoise` and `claude-agentnoise` so phone-triggered jobs run behind a
+local policy boundary.
 
 Existing configs can switch without re-running setup:
 
@@ -110,11 +111,14 @@ terminal:
 ```sh
 brew services stop nvk/tap/agentnoise
 agentnoise up --ssh --phone npub1... --name agentnoise-linuxbox
+brew services start nvk/tap/agentnoise
+agentnoise worker start
 ```
 
 `--ssh` disables the desktop GUI pairing alert and prints the rotating PIN in
 the terminal session. The remote box generates its own desktop keypair locally;
-no `nsec` crosses SSH for normal setup.
+no `nsec` crosses SSH for normal setup. Stop the foreground `up` process after
+pairing succeeds, then start the service and worker.
 
 ## Run
 
@@ -123,9 +127,10 @@ no `nsec` crosses SSH for normal setup.
 ```
 
 If a service is already running, this attaches as the local UI and follows logs.
-If no service owns the engine, it runs the listener in the foreground. This
-makes the same command useful for both desktop bring-up and troubleshooting a
-stopped service.
+If no service owns the transport, it runs the listener and jobs in the
+foreground. For the reboot-safe path, keep the service running and keep a login
+shell worker alive with `agentnoise worker start` or, with tmux installed,
+`agentnoise worker start --tmux`.
 
 From the phone, send:
 

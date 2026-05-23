@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::events::{EventSummary, summarize_event_log};
 use crate::jobs::JobStore;
+use crate::queue::{JobQueue, QueueCounts};
 use crate::runtime;
 use crate::subscriptions::{self, SubscriptionSnapshot};
 use crate::whitenoise_cli;
@@ -13,9 +14,12 @@ use crate::whitenoise_cli;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
     pub engine_running: bool,
+    pub transport_running: bool,
+    pub worker_running: bool,
     pub runtime: Option<runtime::RuntimeStatus>,
     pub agent_launcher: String,
     pub groups: Vec<String>,
+    pub queue: QueueCounts,
     pub event_summary: EventSummary,
     pub recent_jobs: usize,
     pub active_jobs: usize,
@@ -49,9 +53,12 @@ pub fn status_report(config: &Config) -> Result<StatusReport> {
 
     Ok(StatusReport {
         engine_running: runtime::engine_is_running(config)?,
+        transport_running: runtime::role_is_running(config, runtime::RuntimeRole::Transport)?,
+        worker_running: runtime::role_is_running(config, runtime::RuntimeRole::Worker)?,
         runtime: runtime::read_status(config)?,
         agent_launcher: config.runner.launcher.to_string(),
         groups: config.whitenoise.control_group_ids(),
+        queue: JobQueue::open(config.resolved_queue_path())?.counts()?,
         event_summary: summarize_event_log(&config.resolved_event_log_path())?,
         recent_jobs: recent_jobs.len(),
         active_jobs,
@@ -75,8 +82,31 @@ pub fn render_status_report(config_path: &Path, config: &Config) -> String {
                         "stopped"
                     }
                 ),
+                format!(
+                    "transport: {}",
+                    if report.transport_running {
+                        "running"
+                    } else {
+                        "stopped"
+                    }
+                ),
+                format!(
+                    "worker: {}",
+                    if report.worker_running {
+                        "running"
+                    } else {
+                        "stopped"
+                    }
+                ),
                 format!("agent launcher: {}", report.agent_launcher),
                 format!("groups: {}", report.groups.len()),
+                format!(
+                    "queue: {} queued, {} claimed, {} running, {} failed",
+                    report.queue.queued,
+                    report.queue.claimed,
+                    report.queue.running,
+                    report.queue.failed
+                ),
                 format!(
                     "jobs: {} recent, {} active",
                     report.recent_jobs, report.active_jobs

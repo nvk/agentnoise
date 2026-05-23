@@ -37,6 +37,7 @@ Restart after edits:
 
 ```sh
 brew services restart nvk/tap/agentnoise
+agentnoise worker start
 ```
 
 For a named instance installed through `agentnoise service install`, restart
@@ -50,7 +51,7 @@ agentnoise --instance alice service install --target launchd --force --load
 
 ## Agent Launcher
 
-Simple setup for raw Codex/Claude:
+Simple setup for raw Codex/Claude, with no `agentbondage` required:
 
 ```toml
 [runner]
@@ -76,6 +77,8 @@ permission_mode = "auto"
 Set it from the CLI:
 
 ```sh
+agentnoise init --direct-agents
+# or during first setup
 agentnoise up --direct-agents
 # or
 agentnoise config launcher direct
@@ -141,8 +144,11 @@ while preserving the repo/cwd chosen in chat.
 Codex itself can still hang under launchd when the selected `-C` workspace is
 inside iCloud Drive/CloudDocs. `agentnoise doctor` warns about those repo paths.
 For Homebrew service use, keep configured repos in normal local directories
-such as `~/src` or `~/src-repo`. If you must work inside iCloud Drive, run
-`agentnoise up` from an interactive terminal instead of a background service.
+such as `~/src` or `~/src-repo`. The Homebrew service now owns only the White
+Noise transport; run `agentnoise worker start` from your login shell so the
+local agent process inherits the expected user context. If tmux is installed,
+add `--tmux` to detach it. If you must work inside iCloud Drive, use the
+foreground `agentnoise up` path while debugging.
 
 ## Agent Profile Variants
 

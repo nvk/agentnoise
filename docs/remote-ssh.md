@@ -14,6 +14,8 @@ From the SSH session:
 brew install nvk/tap/agentnoise
 brew services stop nvk/tap/agentnoise
 agentnoise up --ssh --phone npub1... --name agentnoise-mbp
+brew services start nvk/tap/agentnoise
+agentnoise worker start
 ```
 
 For disposable remote testing where keychain prompts get in the way:
@@ -32,11 +34,13 @@ What happens:
 6. The phone sends `/pair 123456` in that White Noise chat.
 7. agentnoise stores the allowed sender and starts accepting commands.
 
-Keep the SSH terminal open until pairing completes. After pairing works, leave
-the foreground process running or move it back to the service:
+Keep the SSH terminal open until pairing completes, then stop the foreground
+`agentnoise up` process. After that the service keeps transport alive and the
+login-shell worker runs jobs:
 
 ```sh
-brew services restart nvk/tap/agentnoise
+agentnoise transport status
+agentnoise worker status
 ```
 
 ## Naming Machines

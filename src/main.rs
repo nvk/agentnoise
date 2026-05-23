@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, ExitStatus};
+use std::process::{Child, ChildStdout, Command as ProcessCommand, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,8 +15,11 @@ use agentnoise::events::EventJournal;
 use agentnoise::identity;
 use agentnoise::launchd;
 use agentnoise::local_sessions::{self, LocalAgentSession};
+use agentnoise::queue::{JobQueue, QueuedJob};
 use agentnoise::runner::{AgentKind, AgentRequest};
-use agentnoise::runtime::{self, AcquireMode, EngineGuard, RuntimePairingInfo, RuntimePairingPin};
+use agentnoise::runtime::{
+    self, AcquireMode, EngineGuard, RuntimePairingInfo, RuntimePairingPin, RuntimeRole,
+};
 use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
@@ -28,6 +31,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use uuid::Uuid;
 use zeroize::Zeroize;
 
 const FIRST_PAIRING_SUBSCRIBE_LIMIT: u32 = 20;
@@ -40,6 +44,12 @@ enum ListenerMode {
     Try,
     Wait,
     AttachIfBusy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenerExecution {
+    Inline,
+    Queue,
 }
 
 #[derive(Clone)]
@@ -111,6 +121,10 @@ enum Command {
     },
     #[command(about = "Start the daemon/login repair and listen for White Noise commands")]
     Start(StartArgs),
+    #[command(about = "Run only the White Noise transport/queue listener")]
+    Transport(TransportArgs),
+    #[command(about = "Run local agent jobs claimed from the transport queue")]
+    Worker(WorkerArgs),
     Listen,
     Send {
         #[arg(required = true, trailing_var_arg = true)]
@@ -236,6 +250,57 @@ struct LocalSessionsArgs {
 struct FakePhoneArgs {
     #[command(subcommand)]
     command: FakePhoneCommand,
+}
+
+#[derive(Debug, Args)]
+struct TransportArgs {
+    #[command(subcommand)]
+    command: TransportCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TransportCommand {
+    #[command(about = "Listen to White Noise and enqueue agent jobs")]
+    Run(TransportRunArgs),
+    #[command(about = "Show transport role status")]
+    Status,
+}
+
+#[derive(Debug, Args)]
+struct TransportRunArgs {
+    #[arg(long, help = "Add a White Noise group id before starting")]
+    group: Option<String>,
+    #[arg(long, help = "Do not start wn daemon automatically")]
+    no_daemon: bool,
+    #[arg(
+        long,
+        help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
+    )]
+    ssh: bool,
+}
+
+#[derive(Debug, Args)]
+struct WorkerArgs {
+    #[command(subcommand)]
+    command: WorkerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkerCommand {
+    #[command(about = "Claim queued jobs and run local coding agents")]
+    Start(WorkerStartArgs),
+    #[command(about = "Show worker role status and queue counts")]
+    Status,
+}
+
+#[derive(Debug, Args)]
+struct WorkerStartArgs {
+    #[arg(long, help = "Run exactly one queued job if present, then exit")]
+    once: bool,
+    #[arg(long, default_value_t = 2, help = "Idle poll interval in seconds")]
+    poll_seconds: u64,
+    #[arg(long, help = "Start an idempotent tmux worker session and exit")]
+    tmux: bool,
 }
 
 #[derive(Debug, Args)]
@@ -373,6 +438,11 @@ enum FakePhoneCommand {
         min_replies: usize,
         #[arg(long, help = "Require a final job reply, not only the initial ack")]
         require_job_final: bool,
+        #[arg(
+            long,
+            help = "Use the configured/default White Noise daemon instead of starting an isolated fake-phone daemon"
+        )]
+        shared_daemon: bool,
         #[arg(required = true, trailing_var_arg = true)]
         message: Vec<String>,
     },
@@ -644,12 +714,29 @@ fn main() -> Result<()> {
             println!("{}", app.run_request(request)?);
         }
         Command::Start(args) => {
-            start_listener(&config_path, args, ListenerMode::Try)?;
+            start_listener(
+                &config_path,
+                args,
+                ListenerMode::Try,
+                ListenerExecution::Inline,
+            )?;
+        }
+        Command::Transport(args) => {
+            transport_command(&config_path, args)?;
+        }
+        Command::Worker(args) => {
+            worker_command(&config_path, args)?;
         }
         Command::Listen => {
             let config = Config::load(&config_path)?;
             let pairing = pairing_for_listener(&config_path, &config, PairingDisplay::Desktop)?;
-            run_listener_with_mode(&config_path, config, pairing, ListenerMode::Try)?;
+            run_listener_with_mode(
+                &config_path,
+                config,
+                pairing,
+                ListenerMode::Try,
+                ListenerExecution::Inline,
+            )?;
         }
         Command::Send { text } => {
             let config = Config::load(&config_path)?;
@@ -1216,6 +1303,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
         } else {
             up_listener_mode()
         },
+        ListenerExecution::Inline,
     )
 }
 
@@ -1235,7 +1323,8 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
     }
 
     let config = Config::load(config_path)?;
-    runtime::engine_is_running(&config)
+    Ok(runtime::engine_is_running(&config)?
+        || runtime::role_is_running(&config, RuntimeRole::Transport)?)
 }
 
 fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
@@ -1262,6 +1351,7 @@ fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
             expect,
             min_replies,
             require_job_final,
+            shared_daemon,
             message,
         } => {
             let message = message.join(" ");
@@ -1280,6 +1370,7 @@ fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
                     expect,
                     min_replies,
                     require_job_final,
+                    shared_daemon,
                 },
             )?;
             println!("fake phone npub: {}", result.phone_npub);
@@ -1307,6 +1398,298 @@ fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
     Ok(())
 }
 
+fn transport_command(config_path: &Path, args: TransportArgs) -> Result<()> {
+    match args.command {
+        TransportCommand::Run(args) => transport_run(config_path, args),
+        TransportCommand::Status => {
+            let config = Config::load_or_template(config_path)?;
+            print_role_status(&config, RuntimeRole::Transport)?;
+            Ok(())
+        }
+    }
+}
+
+fn transport_run(config_path: &Path, args: TransportRunArgs) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    if let Some(group) = args
+        .group
+        .as_deref()
+        .map(str::trim)
+        .filter(|group| !group.is_empty())
+    {
+        config.whitenoise.add_control_group_id(group);
+        config.save(config_path)?;
+    }
+    wait_for_inline_listener_before_transport(config_path, &config)?;
+
+    let mode = if runtime::stdio_is_interactive() {
+        ListenerMode::AttachIfBusy
+    } else {
+        ListenerMode::Wait
+    };
+    let guard = acquire_role_guard(config_path, &config, RuntimeRole::Transport, mode)?;
+    if guard.is_none() {
+        print_role_status(&config, RuntimeRole::Transport)?;
+        return Ok(());
+    }
+    let _guard = guard;
+    let engine_guard = runtime::acquire_engine(config_path, &config, AcquireMode::Try)?
+        .ok_or_else(|| anyhow::anyhow!("inline listener started while transport was starting"))?;
+
+    let _daemon = if args.no_daemon {
+        None
+    } else {
+        let daemon = whitenoise_cli::ensure_daemon(&config.whitenoise)?;
+        if daemon.is_some() {
+            eprintln!("agentnoise: started White Noise daemon");
+        }
+        daemon
+    };
+
+    let pairing_display = if args.ssh {
+        PairingDisplay::TerminalOnly
+    } else {
+        PairingDisplay::Desktop
+    };
+    let pairing = pairing_for_listener(config_path, &config, pairing_display)?;
+    if let Some(pairing) = pairing_runtime_info(&config, pairing.as_ref()) {
+        engine_guard.update_status(config_path, &config, Some(pairing))?;
+    }
+    let _engine_guard = engine_guard;
+    run_listener(config_path, config, pairing, ListenerExecution::Queue)
+}
+
+fn wait_for_inline_listener_before_transport(config_path: &Path, config: &Config) -> Result<()> {
+    if !runtime::engine_is_running(config)? {
+        return Ok(());
+    }
+    if runtime::stdio_is_interactive() {
+        runtime::attach_ui(config_path, config)?;
+        return Ok(());
+    }
+
+    let mut last_notice = Instant::now() - Duration::from_secs(30);
+    while runtime::engine_is_running(config)? {
+        if last_notice.elapsed() >= Duration::from_secs(30) {
+            match runtime::engine_lock_owner(config)? {
+                Some(pid) => eprintln!(
+                    "agentnoise: inline listener is running as pid {pid}; transport startup is waiting for it to exit"
+                ),
+                None => eprintln!(
+                    "agentnoise: inline listener is running; transport startup is waiting for it to exit"
+                ),
+            }
+            last_notice = Instant::now();
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
+fn worker_command(config_path: &Path, args: WorkerArgs) -> Result<()> {
+    match args.command {
+        WorkerCommand::Start(args) => worker_start(config_path, args),
+        WorkerCommand::Status => {
+            let config = Config::load_or_template(config_path)?;
+            print_role_status(&config, RuntimeRole::Worker)?;
+            print_queue_status(&config)?;
+            Ok(())
+        }
+    }
+}
+
+fn worker_start(config_path: &Path, args: WorkerStartArgs) -> Result<()> {
+    let config = Config::load(config_path)?;
+    if args.tmux {
+        return start_worker_tmux(config_path, &config);
+    }
+
+    let guard = runtime::acquire_role(config_path, &config, RuntimeRole::Worker, AcquireMode::Try)?;
+    let Some(_guard) = guard else {
+        match runtime::role_lock_owner(&config, RuntimeRole::Worker)? {
+            Some(pid) => println!("agentnoise worker already running as pid {pid}"),
+            None => println!("agentnoise worker already running"),
+        }
+        return Ok(());
+    };
+
+    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
+        eprintln!("agentnoise: restored White Noise login from configured nsec");
+    }
+    let queue = JobQueue::open(config.resolved_queue_path())?;
+    let app = Arc::new(AgentApp::from_config_path(config_path)?);
+    let wn = Arc::new(WnClient::new(app.config().whitenoise.clone()));
+    let event_journal = Arc::new(Mutex::new(EventJournal::open(
+        &app.config().resolved_event_log_path(),
+    )?));
+    let worker_id = format!("worker:{}", std::process::id());
+    let idle_delay = Duration::from_secs(args.poll_seconds.max(1));
+
+    println!("agentnoise worker running");
+    loop {
+        match queue.claim_next(&worker_id)? {
+            Some(job) => run_queued_job(
+                &queue,
+                Arc::clone(&app),
+                Arc::clone(&wn),
+                Arc::clone(&event_journal),
+                job,
+            )?,
+            None if args.once => {
+                println!("agentnoise worker: no queued jobs");
+                return Ok(());
+            }
+            None => thread::sleep(idle_delay),
+        }
+        if args.once {
+            return Ok(());
+        }
+    }
+}
+
+fn start_worker_tmux(config_path: &Path, config: &Config) -> Result<()> {
+    if runtime::role_is_running(config, RuntimeRole::Worker)? {
+        match runtime::role_lock_owner(config, RuntimeRole::Worker)? {
+            Some(pid) => println!("agentnoise worker already running as pid {pid}"),
+            None => println!("agentnoise worker already running"),
+        }
+        return Ok(());
+    }
+    ensure_tmux_available()?;
+
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let session = config
+        .instance
+        .as_deref()
+        .map(|instance| format!("agentnoise-worker-{instance}"))
+        .unwrap_or_else(|| "agentnoise-worker".to_string());
+    let status = ProcessCommand::new("tmux")
+        .arg("new-session")
+        .arg("-d")
+        .arg("-s")
+        .arg(&session)
+        .arg(exe)
+        .arg("--config")
+        .arg(config_path)
+        .arg("worker")
+        .arg("start")
+        .status()
+        .context("starting tmux worker session")?;
+    if !status.success() {
+        bail!("tmux new-session exited with {status}");
+    }
+    println!("agentnoise worker tmux session: {session}");
+    Ok(())
+}
+
+fn ensure_tmux_available() -> Result<()> {
+    match ProcessCommand::new("tmux")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!("tmux -V exited with {status}"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("tmux not found; install tmux or run `agentnoise worker start` in a terminal")
+        }
+        Err(error) => Err(error).context("checking tmux"),
+    }
+}
+
+fn run_queued_job(
+    queue: &JobQueue,
+    app: Arc<AgentApp>,
+    wn: Arc<WnClient>,
+    event_journal: Arc<Mutex<EventJournal>>,
+    job: QueuedJob,
+) -> Result<()> {
+    queue.mark_running(&job.id)?;
+    let group_id = job.reply_group_id.clone();
+    let progress_wn = Arc::clone(&wn);
+    let progress_journal = Arc::clone(&event_journal);
+    let progress_group = group_id.clone();
+    let result = app.run_request_record_with_progress(job.request, move |text| {
+        if let Err(error) =
+            send_reply_recorded(&progress_wn, &progress_journal, &progress_group, &text)
+        {
+            eprintln!("agentnoise: failed to send progress reply: {error:#}");
+        }
+    });
+
+    match result {
+        Ok(record) => {
+            let reply = app.render_job_record(&record);
+            match record.status {
+                agentnoise::jobs::JobStatus::Succeeded => {
+                    queue.mark_succeeded(
+                        &job.id,
+                        record.summary.as_deref().unwrap_or(""),
+                        Some(&record.log_path),
+                    )?;
+                }
+                _ => {
+                    let summary = record.summary.as_deref().unwrap_or("job did not succeed");
+                    queue.mark_failed(&job.id, summary, Some(&record.log_path))?;
+                }
+            }
+            send_reply_recorded(&wn, &event_journal, &group_id, &reply)
+                .context("sending queued job reply")?;
+        }
+        Err(error) => {
+            let text = format!("Error: job failed to start: {error:#}");
+            queue.mark_failed(&job.id, &text, None)?;
+            send_reply_recorded(&wn, &event_journal, &group_id, &text)
+                .context("sending queued job failure")?;
+        }
+    }
+    Ok(())
+}
+
+fn acquire_role_guard(
+    config_path: &Path,
+    config: &Config,
+    role: RuntimeRole,
+    mode: ListenerMode,
+) -> Result<Option<agentnoise::runtime::RoleGuard>> {
+    match mode {
+        ListenerMode::Try => runtime::acquire_role(config_path, config, role, AcquireMode::Try)?
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("agentnoise {role:?} is already running")),
+        ListenerMode::Wait => runtime::acquire_role(config_path, config, role, AcquireMode::Wait),
+        ListenerMode::AttachIfBusy => {
+            runtime::acquire_role(config_path, config, role, AcquireMode::Try)
+        }
+    }
+}
+
+fn print_role_status(config: &Config, role: RuntimeRole) -> Result<()> {
+    let running = runtime::role_is_running(config, role)?;
+    println!(
+        "{}: {}",
+        role.as_str(),
+        if running { "running" } else { "stopped" }
+    );
+    if let Some(status) = runtime::read_role_status(config, role)? {
+        println!("pid: {}", status.pid);
+        println!("started: {}", status.started_at);
+    }
+    Ok(())
+}
+
+fn print_queue_status(config: &Config) -> Result<()> {
+    let queue = JobQueue::open(config.resolved_queue_path())?;
+    let counts = queue.counts()?;
+    println!("queue: {}", queue.path().display());
+    println!("queued: {}", counts.queued);
+    println!("claimed: {}", counts.claimed);
+    println!("running: {}", counts.running);
+    println!("succeeded: {}", counts.succeeded);
+    println!("failed: {}", counts.failed);
+    Ok(())
+}
+
 fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> {
     if runtime::stdio_is_interactive()
         || args.no_listen
@@ -1323,15 +1706,22 @@ fn wait_before_setup_if_needed(config_path: &Path, args: &UpArgs) -> Result<()> 
 
     let config = Config::load(config_path)?;
     let mut last_notice = Instant::now() - Duration::from_secs(30);
-    while runtime::engine_is_running(&config)? {
+    while runtime::engine_is_running(&config)?
+        || runtime::role_is_running(&config, RuntimeRole::Transport)?
+    {
         if last_notice.elapsed() >= Duration::from_secs(30) {
-            match runtime::engine_lock_owner(&config)? {
-                Some(pid) => eprintln!(
-                    "agentnoise: another listener is running as pid {pid}; service startup is waiting for it to exit"
-                ),
-                None => eprintln!(
+            if let Some(pid) = runtime::engine_lock_owner(&config)? {
+                eprintln!(
+                    "agentnoise: another inline listener is running as pid {pid}; service startup is waiting for it to exit"
+                );
+            } else if let Some(pid) = runtime::role_lock_owner(&config, RuntimeRole::Transport)? {
+                eprintln!(
+                    "agentnoise: transport is running as pid {pid}; service startup is waiting for it to exit"
+                );
+            } else {
+                eprintln!(
                     "agentnoise: another listener is running; service startup is waiting for it to exit"
-                ),
+                );
             }
             last_notice = Instant::now();
         }
@@ -1367,7 +1757,12 @@ fn discover_group(config: &mut Config, config_path: &Path) -> Result<GroupDiscov
     Ok(GroupDiscovery::Ready)
 }
 
-fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Result<()> {
+fn start_listener(
+    config_path: &Path,
+    args: StartArgs,
+    mode: ListenerMode,
+    execution: ListenerExecution,
+) -> Result<()> {
     let mut config = Config::load(config_path)?;
     if let Some(group) = args
         .group
@@ -1404,7 +1799,7 @@ fn start_listener(config_path: &Path, args: StartArgs, mode: ListenerMode) -> Re
     if let Some(pairing) = pairing_runtime_info(&config, pairing.as_ref()) {
         guard.update_status(config_path, &config, Some(pairing))?;
     }
-    run_listener(config_path, config, pairing, guard)
+    run_listener(config_path, config, pairing, execution)
 }
 
 fn pairing_for_listener(
@@ -1437,6 +1832,7 @@ fn run_listener_with_mode(
     config: Config,
     pairing: Option<PairingRuntime>,
     mode: ListenerMode,
+    execution: ListenerExecution,
 ) -> Result<()> {
     let guard = acquire_listener_guard(config_path, &config, mode)?;
     let Some(guard) = guard else {
@@ -1446,7 +1842,7 @@ fn run_listener_with_mode(
     if let Some(pairing) = pairing_runtime_info(&config, pairing.as_ref()) {
         guard.update_status(config_path, &config, Some(pairing))?;
     }
-    run_listener(config_path, config, pairing, guard)
+    run_listener(config_path, config, pairing, execution)
 }
 
 fn acquire_listener_guard(
@@ -1484,7 +1880,7 @@ fn run_listener(
     config_path: &Path,
     mut config: Config,
     pairing: Option<PairingRuntime>,
-    _guard: EngineGuard,
+    execution: ListenerExecution,
 ) -> Result<()> {
     if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
         eprintln!("agentnoise: restored White Noise login from configured nsec");
@@ -1515,7 +1911,7 @@ fn run_listener(
         eprintln!("agentnoise: marked {recovered} unfinished job(s) interrupted after restart");
     }
     let wn = Arc::new(WnClient::new(app.config().whitenoise.clone()));
-    listen(config_path, app, wn)
+    listen(config_path, app, wn, execution)
 }
 
 fn reconcile_discovered_groups(config_path: &Path, config: &mut Config) {
@@ -1700,12 +2096,22 @@ impl SubscriptionStateHandle {
     }
 }
 
-fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<()> {
+fn listen(
+    config_path: &Path,
+    app: Arc<AgentApp>,
+    wn: Arc<WnClient>,
+    execution: ListenerExecution,
+) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let subscriptions = SubscriptionStateHandle::new(app.config().resolved_subscriptions_path());
     let event_journal = Arc::new(Mutex::new(EventJournal::open(
         &app.config().resolved_event_log_path(),
     )?));
+    let job_queue = if execution == ListenerExecution::Queue {
+        Some(JobQueue::open(app.config().resolved_queue_path())?)
+    } else {
+        None
+    };
 
     let initial_groups = initial_group_ids(&wn);
     let subscribe_limit = listener_subscribe_limit(app.config());
@@ -2170,36 +2576,16 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
                                 );
                             }
                         }
-                        let app = Arc::clone(&app);
-                        let wn = Arc::clone(&wn);
-                        let event_journal = Arc::clone(&event_journal);
-                        let group_id = run_group_id;
-                        std::thread::spawn(move || {
-                            let progress_wn = Arc::clone(&wn);
-                            let progress_journal = Arc::clone(&event_journal);
-                            let progress_group = group_id.clone();
-                            let reply = match app.run_request_with_progress(request, move |text| {
-                                if let Err(error) = send_reply_recorded(
-                                    &progress_wn,
-                                    &progress_journal,
-                                    &progress_group,
-                                    &text,
-                                ) {
-                                    eprintln!(
-                                        "agentnoise: failed to send progress reply: {error:#}"
-                                    );
-                                }
-                            }) {
-                                Ok(reply) => reply,
-                                Err(error) => {
-                                    format!("Error: job failed to start: {error:#}")
-                                }
-                            };
-                            if let Err(error) =
-                                send_reply_recorded(&wn, &event_journal, &group_id, &reply)
-                            {
-                                eprintln!("agentnoise: failed to send job reply: {error:#}");
-                            }
+                        dispatch_agent_request(AgentDispatch {
+                            execution,
+                            job_queue: job_queue.as_ref(),
+                            app: Arc::clone(&app),
+                            wn: Arc::clone(&wn),
+                            event_journal: Arc::clone(&event_journal),
+                            event: &event,
+                            source_group_id: group_id,
+                            reply_group_id: run_group_id,
+                            request,
                         });
                     }
                 }
@@ -2208,6 +2594,121 @@ fn listen(config_path: &Path, app: Arc<AgentApp>, wn: Arc<WnClient>) -> Result<(
     }
 
     Ok(())
+}
+
+struct AgentDispatch<'a> {
+    execution: ListenerExecution,
+    job_queue: Option<&'a JobQueue>,
+    app: Arc<AgentApp>,
+    wn: Arc<WnClient>,
+    event_journal: Arc<Mutex<EventJournal>>,
+    event: &'a MessageEvent,
+    source_group_id: &'a str,
+    reply_group_id: String,
+    request: AgentRequest,
+}
+
+fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
+    match dispatch.execution {
+        ListenerExecution::Inline => {
+            run_inline_job(
+                dispatch.app,
+                dispatch.wn,
+                dispatch.event_journal,
+                dispatch.reply_group_id,
+                dispatch.request,
+            );
+        }
+        ListenerExecution::Queue => {
+            let Some(queue) = dispatch.job_queue else {
+                try_send_reply_recorded(
+                    &dispatch.wn,
+                    &dispatch.event_journal,
+                    &dispatch.reply_group_id,
+                    "Error: transport queue is not open.",
+                );
+                return;
+            };
+            let source_event_id = queue_source_event_id(dispatch.event, dispatch.source_group_id);
+            match queue.enqueue(
+                &dispatch.request,
+                dispatch.source_group_id,
+                &dispatch.reply_group_id,
+                &source_event_id,
+            ) {
+                Ok(outcome) => {
+                    if !outcome.inserted {
+                        try_send_reply_recorded(
+                            &dispatch.wn,
+                            &dispatch.event_journal,
+                            &dispatch.reply_group_id,
+                            &format!("already queued {}", outcome.id),
+                        );
+                        return;
+                    }
+                    let worker_running =
+                        runtime::role_is_running(dispatch.app.config(), RuntimeRole::Worker)
+                            .unwrap_or(false);
+                    if !worker_running {
+                        try_send_reply_recorded(
+                            &dispatch.wn,
+                            &dispatch.event_journal,
+                            &dispatch.reply_group_id,
+                            "queued\nworker: offline\nstart: agentnoise worker start --tmux",
+                        );
+                    }
+                }
+                Err(error) => {
+                    try_send_reply_recorded(
+                        &dispatch.wn,
+                        &dispatch.event_journal,
+                        &dispatch.reply_group_id,
+                        &format!("Error: failed to queue job: {error:#}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn run_inline_job(
+    app: Arc<AgentApp>,
+    wn: Arc<WnClient>,
+    event_journal: Arc<Mutex<EventJournal>>,
+    group_id: String,
+    request: AgentRequest,
+) {
+    std::thread::spawn(move || {
+        let progress_wn = Arc::clone(&wn);
+        let progress_journal = Arc::clone(&event_journal);
+        let progress_group = group_id.clone();
+        let reply = match app.run_request_with_progress(request, move |text| {
+            if let Err(error) =
+                send_reply_recorded(&progress_wn, &progress_journal, &progress_group, &text)
+            {
+                eprintln!("agentnoise: failed to send progress reply: {error:#}");
+            }
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                format!("Error: job failed to start: {error:#}")
+            }
+        };
+        if let Err(error) = send_reply_recorded(&wn, &event_journal, &group_id, &reply) {
+            eprintln!("agentnoise: failed to send job reply: {error:#}");
+        }
+    });
+}
+
+fn queue_source_event_id(event: &MessageEvent, group_id: &str) -> String {
+    let event_id = event
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("local-{}", Uuid::new_v4().simple()));
+    format!("{group_id}:{event_id}")
 }
 
 fn send_startup_hello_if_needed(

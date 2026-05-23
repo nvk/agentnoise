@@ -40,6 +40,15 @@ running LaunchAgent instead of starting a second listener. If the LaunchAgent is
 not running, the same command takes the foreground engine lock for
 troubleshooting.
 
+The LaunchAgent runs `agentnoise transport run`. Start a login-shell worker for
+agent jobs:
+
+```sh
+agentnoise worker start
+# or, if tmux is installed:
+agentnoise worker start --tmux
+```
+
 ## Inspect
 
 ```sh
@@ -60,6 +69,7 @@ agentnoise service uninstall --target launchd --unload
   `agentnoise up` enters PIN pairing mode. On macOS it shows the desktop
   identity QR, current PIN, and live countdown, and also prints the PIN to the
   launchd log.
-- `launchd install` runs `agentnoise up`, which starts `wnd`, repairs login from the configured bootstrap nsec when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens.
+- `launchd install` runs `agentnoise transport run`, which starts `wnd`, repairs login from the configured bootstrap nsec when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens and queues jobs.
+- `agentnoise worker start` claims queued jobs and runs local agent CLIs outside launchd; add `--tmux` when tmux is installed and you want it detached.
 - Restart the service after changing config.
 - If the process restarts, active jobs are marked `interrupted` in the local job store.

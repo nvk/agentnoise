@@ -191,7 +191,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exe} --config {config_path} up
+ExecStart={exe} --config {config_path} transport run
 Restart=on-failure
 RestartSec=5s
 Environment={path_env}
@@ -237,7 +237,7 @@ load_rc_config "$name"
 pidfile="/var/run/${{name}}.pid"
 procname="${{{rcvar}_command}}"
 command="/usr/sbin/daemon"
-command_args="-f -p ${{pidfile}} -u ${{{rcvar}_user}} /usr/bin/env PATH=${{{rcvar}_path}} \"${{{rcvar}_command}}\" --config \"${{{rcvar}_config}}\" up"
+command_args="-f -p ${{pidfile}} -u ${{{rcvar}_user}} /usr/bin/env PATH=${{{rcvar}_path}} \"${{{rcvar}_command}}\" --config \"${{{rcvar}_config}}\" transport run"
 
 run_rc_command "$1"
 "#,
@@ -257,7 +257,7 @@ fn render_openbsd_rc(exe: &Path, config_path: &Path, config: &Config) -> String 
 # {service}
 
 daemon={exe}
-daemon_flags="--config {config_path} up"
+daemon_flags="--config {config_path} transport run"
 daemon_user="_agentnoise"
 
 export PATH="{path_env}"
@@ -366,7 +366,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn systemd_unit_runs_agentnoise_up() {
+    fn systemd_unit_runs_agentnoise_transport() {
         let mut config = Config::template();
         config.runner.data_dir = "/tmp/agentnoise data".to_string();
         let unit = render_systemd_user(
@@ -375,7 +375,7 @@ mod tests {
             &config,
         );
         assert!(unit.contains("ExecStart=\"/usr/local/bin/agentnoise\" --config"));
-        assert!(unit.contains(" up\n"));
+        assert!(unit.contains(" transport run\n"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("Environment=\"PATH="));
     }
@@ -425,7 +425,7 @@ mod tests {
         );
         assert!(rc.contains("PROVIDE: agentnoise"));
         assert!(rc.contains("/usr/sbin/daemon"));
-        assert!(rc.contains(" up"));
+        assert!(rc.contains(" transport run"));
     }
 
     #[test]

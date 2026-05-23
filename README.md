@@ -22,6 +22,13 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.28** - **Transport/worker split.** Homebrew, launchd, systemd, and
+rc services now run `agentnoise transport run`, which keeps White Noise
+subscriptions and pairing alive and writes jobs to a local SQLite queue. Local
+agent execution moves to `agentnoise worker start` from a login shell, with
+optional `--tmux` when tmux is installed. `agentnoise up` remains the all-in-one
+foreground path.
+
 **v0.1.27** - **Pending proposal recovery and clearer diagnostics.** Reply
 sends now refresh pending White Noise group proposals immediately when White
 Noise reports `pending proposal exists`, giving the normal retry loop a real
@@ -152,7 +159,7 @@ starting a second listener, and disposable development identities can use
 
 ## What It Does
 
-agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher, [`bondage`](https://agentbondage.org/) by default or direct raw CLIs by explicit opt-in, stores job state and logs locally, and posts results back through White Noise. The primary paired chat acts like an inbox: starting a new job there creates a new White Noise work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
+agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher: direct raw Codex/Claude CLIs for the simplest setup, or [`bondage`](https://agentbondage.org/) profiles when you want a hardened local policy boundary. It stores job state and logs locally, and posts results back through White Noise. The primary paired chat acts like an inbox: starting a new job there creates a new White Noise work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The most tested target is macOS. Linux and FreeBSD service templates are
 included and should be treated as newer paths.
@@ -160,22 +167,15 @@ included and should be treated as newer paths.
 ## Requirements
 
 - Rust toolchain for building from source
-- recommended/default: `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
-- Codex CLI and Claude Code CLI
+- Codex CLI and/or Claude Code CLI installed and logged in locally
+- no `agentbondage` required for the simple path: use `agentnoise init --direct-agents`
+- recommended hardened path: `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
 - optional: Hermes Agent CLI plus a dedicated `bondage` profile, or direct Hermes mode
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
 - OS keychain access if using automatic White Noise login repair with a real identity
 - a dedicated White Noise group for agent control
 
-agentnoise launches coding agents through dedicated `bondage` profiles by
-default: `codex-agentnoise`, `claude-agentnoise`, and optional
-`hermes-agentnoise`. If an older config still says `profile = "codex"` or
-`profile = "claude"`, agentnoise uses the matching `*-agentnoise` profile for
-remote chat runs unless `runner.allow_generic_agent_profiles = true` is set.
-This keeps phone-triggered jobs separate from human terminal profiles and gives
-the launcher a place to pin sandbox, secrets, and non-interactive behavior.
-
-For a minimal install that only has raw Codex or Claude, opt into direct mode:
+For a normal public install without `agentbondage`, use direct mode:
 
 ```sh
 agentnoise init --direct-agents
@@ -198,6 +198,14 @@ Direct mode does not require `bondage` at runtime. It still uses structured argv
 and the same White Noise pairing/allowlist, but local filesystem, network,
 secret, and approval behavior is whatever the raw agent CLI enforces. Use
 `agentnoise doctor` or `agentnoise agents` to confirm the active launcher.
+
+For the hardened local-agent-stack setup, use dedicated `bondage` profiles:
+`codex-agentnoise`, `claude-agentnoise`, and optional `hermes-agentnoise`. If an
+older config still says `profile = "codex"` or `profile = "claude"`,
+agentnoise uses the matching `*-agentnoise` profile for remote chat runs unless
+`runner.allow_generic_agent_profiles = true` is set. This keeps phone-triggered
+jobs separate from human terminal profiles and gives the launcher a place to
+pin sandbox, secrets, and non-interactive behavior.
 
 Existing installs can switch explicitly:
 
@@ -239,56 +247,66 @@ Install from Homebrew:
 brew install nvk/tap/agentnoise
 ```
 
-The Homebrew formula installs the same binary either way. Choose the local
-agent launcher in agentnoise config:
+The simplest setup does not need `agentbondage`:
 
 ```sh
-# recommended policy boundary
-agentnoise init
-
-# minimal raw Codex/Claude mode
+# raw Codex/Claude mode
 agentnoise init --direct-agents
+```
+
+Use the hardened policy-boundary setup only if you already have `bondage`
+profiles such as `codex-agentnoise` and `claude-agentnoise`:
+
+```sh
+agentnoise init
 ```
 
 For an existing config:
 
 ```sh
 agentnoise config launcher direct
+# or, for bondage profiles
+agentnoise config launcher bondage
 ```
 
 Then start it. Homebrew services are the simple setup and boot path:
 
 ```sh
+agentnoise up --direct-agents --no-listen
 brew services start nvk/tap/agentnoise
+agentnoise worker start
+# or, if tmux is installed:
+agentnoise worker start --tmux
 ```
 
-The service starts White Noise, repairs login when needed, discovers chats,
-handles pairing, and keeps non-Codex commands available after reboot.
+The first command creates the desktop identity, writes config, stores the
+desktop `nsec` in the OS keychain, and prints the desktop QR/setup hints. The
+Homebrew service then shows the pairing PIN when needed and keeps the White
+Noise transport alive after reboot. The worker
+runs Codex/Claude/Hermes jobs from your login shell so those CLIs see the same
+profile, TTY/session, and local permissions you use manually.
 
-For `/codex` jobs on macOS, run the engine from a login shell instead of the
-Homebrew/launchd service. Current Codex CLI builds can hang before producing
-output when launched directly by launchd:
+For a single foreground process while developing or debugging, skip the service
+and worker split:
 
 ```sh
 brew services stop nvk/tap/agentnoise
-agentnoise up --no-daemon
+agentnoise up --direct-agents
 ```
 
-Over SSH, keep that foreground engine alive with tmux:
+Over SSH, keep the worker alive with tmux:
 
 ```sh
-tmux new -s agentnoise 'agentnoise up --no-daemon'
+brew install tmux
+agentnoise worker start --tmux
 ```
 
 `agentnoise up` is still safe to run while the Homebrew service is enabled. If
-the service already owns the listener, `up` attaches as the terminal UI and
-follows the service logs. It cannot move `/codex` jobs out of the launchd-owned
-service process, so stop the service first when you want phone-launched Codex
-jobs on macOS.
+the service already owns the transport, `up` attaches as the terminal UI and
+follows logs instead of starting a second listener.
 
-On first run, agentnoise creates the desktop identity, stores its `nsec` in the
-OS keychain, starts White Noise, publishes the profile/key package, and opens
-the pairing window.
+On first run, agentnoise starts White Noise, publishes the profile/key package,
+and opens the pairing window.
 
 After the desktop `npub` is written to config, service restarts use that public
 identity for QR/profile setup and avoid reading the `nsec` unless White Noise
@@ -320,6 +338,8 @@ Useful local diagnostics:
 
 ```sh
 agentnoise status
+agentnoise transport status
+agentnoise worker status
 agentnoise doctor
 agentnoise agents
 agentnoise config path
@@ -515,13 +535,15 @@ Run the first pairing in the foreground. On Linux the QR and rotating PIN are
 printed to the terminal/logs:
 
 ```sh
-agentnoise up
+agentnoise up --no-listen
 ```
 
-After the phone is paired, install a user systemd service:
+After the phone is paired, install a user systemd transport service and start
+a login-shell worker:
 
 ```sh
 agentnoise service install --target systemd-user --force --load
+agentnoise worker start
 systemctl --user status agentnoise.service
 journalctl --user -u agentnoise.service -f
 ```
@@ -554,10 +576,11 @@ Create the config and do first pairing as the user that should own the helper:
 
 ```sh
 agentnoise whitenoise install
-agentnoise up
+agentnoise up --no-listen
 ```
 
-Then install the rc.d service using that user's config path:
+Then install the rc.d transport service using that user's config path and keep
+a worker alive in tmux or another user supervisor:
 
 ```sh
 CONFIG="$(agentnoise config path)"
@@ -566,6 +589,7 @@ sudo sysrc agentnoise_enable=YES
 sudo sysrc agentnoise_user="$USER"
 sudo sysrc agentnoise_config="$CONFIG"
 sudo service agentnoise start
+agentnoise worker start
 sudo service agentnoise status
 ```
 
@@ -833,7 +857,10 @@ defaults to 30 seconds.
 - Put only trusted devices/users in agentnoise control chats.
 - Keep first pairing local: the sender must prove they can see the desktop PIN.
 - Keep repos as configured aliases.
-- Keep agent execution behind [`bondage`](https://agentbondage.org/).
+- For the simple setup, use direct raw Codex/Claude mode and rely on those
+  CLIs' own permission model.
+- For the hardened setup, keep agent execution behind
+  [`bondage`](https://agentbondage.org/).
 - Store the bot `nsec` in the OS keychain for normal use, not in `config.toml`.
 - Keep automatic local-session notifications off unless that machine is meant
   to expose same-account Codex/Claude metadata to the paired chat.
@@ -846,6 +873,7 @@ defaults to 30 seconds.
 - [Remote SSH pairing](docs/remote-ssh.md)
 - [Fake phone testing](docs/fake-phone-testing.md)
 - [Testing](docs/testing.md)
+- [Terminal client plan](docs/terminal-client-plan.md)
 - [Screenshots](docs/screenshots.md)
 - [Supervisor services](docs/services.md)
 - [Launchd service](docs/launchd.md)

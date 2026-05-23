@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.28 - 2026-05-23
+
+- Split the managed service path into `agentnoise transport run` plus
+  `agentnoise worker start`. The transport owns White Noise subscriptions,
+  pairing, discovery, and a local SQLite queue; the worker claims queued jobs
+  and runs Codex/Claude/Hermes from a login shell.
+- Updated Homebrew, launchd, systemd, FreeBSD rc.d, and OpenBSD rc.d rendering
+  to start transport mode instead of the all-in-one `up` path.
+- Added role-specific runtime locks/status and queue counts to `agentnoise
+  status`, while keeping `agentnoise up` as the foreground all-in-one path.
+- Made transport mode publish the normal listener runtime status, so
+  `agentnoise pair` and fake-phone tests can see the current SSH pairing PIN.
+- Hardened fake-phone E2E testing for macOS SSH: `--shared-daemon` can reuse
+  the GUI-authorized White Noise daemon, retry with the live pairing PIN, and
+  reuse the same fake-phone chat across multiple prompts.
+- Treat `wn keys publish` timeouts as recoverable when a follow-up key-package
+  check shows visible packages, matching White Noise behavior observed on
+  frontier where publish completed but the CLI response timed out.
+
 ## 0.1.27 - 2026-05-21
 
 - Refresh pending White Noise group proposals immediately when a reply send

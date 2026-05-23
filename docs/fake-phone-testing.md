@@ -43,11 +43,29 @@ agentnoise fake-phone roundtrip \
   /codex "Reply with exactly: agentnoise-e2e-ok"
 ```
 
+On macOS over SSH, starting an isolated `wnd` can fail if the session cannot
+access the GUI user's Keychain for White Noise's database key. For that
+specific test setup, reuse an already-running GUI-authorized daemon:
+
+```sh
+agentnoise fake-phone roundtrip --shared-daemon /status
+```
+
+`--shared-daemon` still uses the fake phone burner `nsec`, but it logs that
+burner account into the configured/default White Noise daemon instead of
+starting a separate daemon.
+
 The harness creates a White Noise chat with the configured desktop agentnoise
 `npub`, then resends the requested message until the first useful reply. That
 makes it usable with the normal listener discovery loop, which may need one
 cycle before subscribing to the new fake-phone chat. After the first reply, it
 does not resend the command, so long-running agent jobs are not duplicated.
+
+If the first command reaches agentnoise after the displayed PIN has rotated,
+the harness reads the live runtime PIN, sends it, and retries the original
+command. It also stores the fake-phone chat id under the fake-phone root, scoped
+to the desktop `npub`, so a follow-up `/codex` test continues in the same chat
+instead of creating a new White Noise group.
 
 Useful flags:
 

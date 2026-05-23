@@ -38,7 +38,8 @@ pub fn render_plist(exe: &Path, config_path: &Path, config: &Config) -> String {
     <string>{exe}</string>
     <string>--config</string>
     <string>{config}</string>
-    <string>up</string>
+    <string>transport</string>
+    <string>run</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -164,7 +165,8 @@ mod tests {
             &config,
         );
         assert!(plist.contains("<string>com.agentnoise.agentnoise</string>"));
-        assert!(plist.contains("<string>up</string>"));
+        assert!(plist.contains("<string>transport</string>"));
+        assert!(plist.contains("<string>run</string>"));
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("/opt/homebrew/bin/agentnoise"));
     }

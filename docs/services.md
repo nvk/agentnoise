@@ -1,17 +1,26 @@
 # Supervisor Services
 
-agentnoise does not daemonize itself. The engine is a foreground process owned
-by either a supervisor or the terminal. The host supervisor owns boot, restart,
-stop, and logs.
+agentnoise does not daemonize itself. The reboot-safe service is the transport:
+it owns White Noise subscriptions, pairing, discovery, and the durable job
+queue. Local agent execution runs from a login-shell worker.
 
 `agentnoise up` is the human-facing entry point:
 
 - If a supervisor already owns the engine, interactive `agentnoise up` attaches
   as a local UI and follows logs.
 - If no engine is running, interactive `agentnoise up` takes the engine lock and
-  runs in the foreground.
+  runs transport plus jobs in the foreground.
 - Non-interactive `agentnoise up` waits for the engine lock, which lets a
   service take over after a foreground troubleshooting run exits.
+
+The service-facing entry point is `agentnoise transport run`. Start at least
+one worker for `/codex`, `/claude`, `/wiki`, or `/hermes` jobs:
+
+```sh
+agentnoise worker start
+# or, if tmux is installed:
+agentnoise worker start --tmux
+```
 
 ## macOS
 
@@ -48,20 +57,11 @@ Those write separate LaunchAgents:
 
 Current Codex CLI releases do not run reliably when `codex exec` is launched
 directly by launchd. They can start and then produce no output forever. The
-macOS service is still useful for White Noise daemon/login startup, pairing,
-status, and non-Codex commands, but Codex jobs should be run from a login-shell
-engine until agentnoise grows a dedicated worker mode. Stop the service first
-so the login-shell process owns the listener:
+macOS service therefore runs only `agentnoise transport run`; Codex jobs should
+be claimed by a login-shell worker:
 
 ```sh
-brew services stop nvk/tap/agentnoise
-agentnoise up --no-daemon
-```
-
-For SSH sessions, keep that foreground engine alive with tmux:
-
-```sh
-tmux new -s agentnoise 'agentnoise up --no-daemon'
+agentnoise worker start
 ```
 
 If you intentionally want to test launchd-launched Codex anyway, set
@@ -73,6 +73,7 @@ Use a user systemd service:
 
 ```sh
 agentnoise service install --target systemd-user --force --load
+agentnoise worker start
 systemctl --user status agentnoise.service
 ```
 
@@ -150,7 +151,9 @@ Named instances render separate rc.d script names such as
 For Homebrew installs, first pairing can run directly from the service:
 
 ```sh
+agentnoise up --no-listen
 brew services start nvk/tap/agentnoise
+agentnoise worker start
 tail -f "$(brew --prefix)/var/log/agentnoise.log"
 ```
 
