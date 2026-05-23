@@ -9,8 +9,6 @@ use crate::config::Config;
 use crate::launchd;
 use crate::paths::{default_service_path, expand_tilde};
 
-pub const SYSTEMD_UNIT: &str = "agentnoise.service";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum ServiceTarget {
@@ -184,7 +182,7 @@ pub fn systemd_user_path(config: &Config) -> PathBuf {
 fn render_systemd_user(exe: &Path, config_path: &Path, config: &Config) -> String {
     format!(
         r#"[Unit]
-Description=agentnoise White Noise coding-agent bridge
+Description=agentnoise Marmot v2 coding-agent bridge
 Documentation=https://agentnoise.com
 Wants=network-online.target
 After=network-online.target

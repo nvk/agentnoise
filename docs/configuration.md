@@ -1,5 +1,7 @@
 # Configuration
 
+> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
+
 Find the live config:
 
 ```sh
@@ -15,8 +17,10 @@ On macOS/Homebrew the normal config is under:
 ~/Library/Application Support/agentnoise/config.toml
 ```
 
+### Named instances
+
 Named instances use isolated config roots. This is the recommended setup when
-multiple people share one machine:
+multiple people (or multiple identities) share one machine:
 
 ```sh
 agentnoise --instance alice config path
@@ -29,9 +33,25 @@ agentnoise --instance bob config path
 ```
 
 The generated Alice/Bob configs also get separate data dirs, log dirs, keychain
-services, worktree dirs, service names, White Noise profile names, and default
-`sandbox` repo paths. That is stronger than pairing two phone npubs to one
-global config, because the global config shares repos and launcher policy.
+services (`agentnoise-alice` / `agentnoise-bob` — see [darkmatter.md](darkmatter.md)),
+worktree dirs, service names, Marmot v2 profile names, and default `sandbox`
+repo paths. That is stronger than pairing two phone npubs to one global config,
+because the global config shares repos and launcher policy. `--instance` cannot
+be combined with `--config`.
+
+This is also how to run the packaged release and a checkout build at the same
+time. Let the Homebrew/default service keep the default instance, then run the
+checkout as a named development instance:
+
+```sh
+brew services start nvk/tap/agentnoise
+just up              # uses --instance dev and debug logs
+just up-quiet dev    # same dev instance without debug logs
+```
+
+The phone sees these as separate Agent Noise identities/groups. Pair the dev
+instance once, then use that dev chat for checkout testing while the release
+service keeps running normally.
 
 Restart after edits:
 
@@ -40,14 +60,26 @@ brew services restart nvk/tap/agentnoise
 agentnoise worker start
 ```
 
-For a named instance installed through `agentnoise service install`, restart
-the native service name instead. On Linux that is `agentnoise-alice.service`.
-On macOS, unload/load the generated LaunchAgent label such as
+For a named instance installed through `agentnoise service install`, restart the
+native service name instead. On Linux that is `agentnoise-alice.service`. On
+macOS, unload/load the generated LaunchAgent label such as
 `com.agentnoise.agentnoise.alice`, or rerun:
 
 ```sh
 agentnoise --instance alice service install --target launchd --force --load
 ```
+
+## Marmot Streams
+
+Live agent output previews use the broker configured in `[darkmatter]`:
+
+```toml
+[darkmatter]
+agent_text_stream_broker = "https://quic-broker.ipf.dev:4450"
+```
+
+agentnoise normalizes that public service URL to the `quic://` candidate format
+used in Marmot agent-text-stream start payloads.
 
 ## Agent Launcher
 
@@ -71,6 +103,7 @@ bin = "codex"
 enabled = true
 profile = "claude"
 bin = "claude"
+model = "sonnet"
 permission_mode = "auto"
 ```
 
@@ -106,6 +139,7 @@ bin = "codex"
 enabled = true
 profile = "claude-agentnoise"
 bin = "claude"
+model = "sonnet"
 permission_mode = "auto"
 ```
 
@@ -121,6 +155,10 @@ Your `bondage.conf` must contain matching profile sections:
 
 If a profile is missing, either add it to `bondage.conf` or switch to direct
 mode.
+
+`agents.claude.model` is optional. Set it when your local Claude default points
+at a model alias that is not available for non-interactive `--print` runs, such
+as a 1M-context alias that requires usage credits.
 
 `job_timeout_seconds` keeps phone-triggered jobs from staying `running`
 forever if a launcher or agent process wedges before returning output. Set it
@@ -200,18 +238,6 @@ Use from White Noise:
 /use site
 /cd src
 /codex fix the failing test
-```
-
-For multi-tenant hosts, keep each person's default `sandbox` repo under that
-person's instance root, or configure only the repos that person should reach.
-Example:
-
-```toml
-instance = "alice"
-
-[[repos]]
-alias = "sandbox"
-path = "~/Library/Application Support/agentnoise/instances/alice/sandbox"
 ```
 
 ## Local Session Visibility
