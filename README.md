@@ -467,11 +467,12 @@ previews while a job runs. The default interval is conservative
 (`runner.progress_interval_seconds = 15`) so the phone preview does not become
 noisy; if the QUIC broker is unavailable, agentnoise falls back to chat progress.
 If a running job goes quiet, agentnoise sends a "still running" ping after
-`runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel <job>` hints.
+`runner.silence_ping_seconds = 60`.
 If a new launch emits no output at all for
 `runner.startup_silence_timeout_seconds = 90`, agentnoise terminates that
 attempt and retries once by default. Final job output still arrives as one
-normal reply, with `/tail <job>` for logs.
+normal reply. Use `/jobs` to find recent job ids when you need `/tail <job>` or
+`/cancel <job>`.
 
 If a configured agent profile looks intentionally elevated, for example a
 profile or permission mode containing `unsafe`, agentnoise creates an approval

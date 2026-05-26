@@ -1049,7 +1049,7 @@ fn agentnoise_prompt(request: &AgentRequest) -> String {
         "Agentnoise context:".to_string(),
         "- You are running under agentnoise, a Marmot v2 phone-to-desktop control bridge.".to_string(),
         "- The user is chatting from a phone; reply concise, outcome-first, with no Markdown tables or raw logs unless asked.".to_string(),
-        "- Full logs stay local; mention /tail <job> when extra detail is useful.".to_string(),
+        "- Full logs stay local; keep the final reply focused on the answer.".to_string(),
         "- The selected repo, cwd, and session come from agentnoise. Do not ask the user to SSH into this machine.".to_string(),
         "- If this task touches agentnoise, consider pairing, service startup, relay/message reliability, and phone UX.".to_string(),
     ];

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::runner::AgentKind;
-use crate::text::short_ref;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -96,11 +95,9 @@ pub fn still_running(
         job_id: Some(job_id.to_string()),
         label: "still running".to_string(),
         detail: Some(format!(
-            "{} elapsed, quiet {}\n/tail {}  /cancel {}",
+            "{} elapsed, quiet {}",
             format_duration(elapsed_seconds),
-            format_duration(idle_seconds),
-            short_ref(job_id),
-            short_ref(job_id)
+            format_duration(idle_seconds)
         )),
         final_event: false,
     }
@@ -142,12 +139,6 @@ pub fn parse_progress_line(agent: AgentKind, line: &str) -> Option<ProgressEvent
 }
 
 pub fn render_progress(event: &ProgressEvent) -> String {
-    let job = event
-        .job_id
-        .as_deref()
-        .map(short_ref)
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| "job".to_string());
     let detail = event
         .detail
         .as_deref()
@@ -156,21 +147,21 @@ pub fn render_progress(event: &ProgressEvent) -> String {
         .unwrap_or_default();
     match event.kind {
         ProgressKind::Message => event.detail.clone().unwrap_or_default(),
-        ProgressKind::Started => format!("{job} started\n{}", event.agent),
-        ProgressKind::Approval => format!("{job} approval needed{detail}"),
-        ProgressKind::Error => format!("{job} error{detail}"),
+        ProgressKind::Started => format!("started\n{}", event.agent),
+        ProgressKind::Approval => format!("approval needed{detail}"),
+        ProgressKind::Error => format!("error{detail}"),
         ProgressKind::Tool => {
             let label = event.label.replace('_', " ");
-            format!("{job} working\n{label}{detail}")
+            format!("working\n{label}{detail}")
         }
         ProgressKind::Step if event.label == "still running" => {
-            format!("{job} still running{detail}")
+            format!("still running{detail}")
         }
         ProgressKind::Step => {
             let label = event.label.replace('_', " ");
-            format!("{job} {label}{detail}")
+            format!("{label}{detail}")
         }
-        ProgressKind::Finished => format!("{job} {}", event.label),
+        ProgressKind::Finished => event.label.clone(),
     }
 }
 
@@ -306,7 +297,7 @@ mod tests {
 
         assert_eq!(
             render_progress(&event),
-            "an-ba257 still running\n1m 15s elapsed, quiet 1m\n/tail an-ba257  /cancel an-ba257"
+            "still running\n1m 15s elapsed, quiet 1m"
         );
     }
 }

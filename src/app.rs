@@ -14,7 +14,7 @@ use crate::capabilities;
 use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
 use crate::config::{Config, RepoConfig};
 use crate::dm::MessageEvent;
-use crate::jobs::{JobRecord, JobStatus, JobStore};
+use crate::jobs::{JobRecord, JobStore};
 use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
@@ -1443,28 +1443,13 @@ fn apply_prompt_prefix(session: &SessionState, prompt: &str) -> String {
 }
 
 fn render_job_reply(record: &JobRecord) -> String {
-    let id = short_ref(&record.id);
-    let status = job_status_label(record.status);
-    let summary = record
+    record
         .summary
         .as_deref()
         .map(str::trim)
         .filter(|summary| !summary.is_empty())
-        .unwrap_or("no output captured");
-
-    format!("{id} {status}\n{summary}\n\n/tail {id}")
-}
-
-fn job_status_label(status: JobStatus) -> &'static str {
-    match status {
-        JobStatus::Succeeded => "done",
-        JobStatus::Failed => "failed",
-        JobStatus::Cancelled => "cancelled",
-        JobStatus::Interrupted => "interrupted",
-        JobStatus::Pending => "pending",
-        JobStatus::Running => "running",
-        JobStatus::CancelRequested => "cancelling",
-    }
+        .unwrap_or("no output captured")
+        .to_string()
 }
 
 fn request_workspace_text(request: &AgentRequest) -> String {
@@ -2082,10 +2067,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             )
             .unwrap();
 
-        assert!(reply.starts_with("an-"));
-        assert!(reply.contains("done"));
-        assert!(reply.contains("done once"));
-        assert!(reply.contains("/tail an-"));
+        assert_eq!(reply, "done once");
+        assert!(!reply.contains("an-"));
+        assert!(!reply.contains("/tail"));
         let progress = progress.lock().unwrap();
         assert!(progress.iter().any(|text| text.contains("started")));
         assert!(!progress.iter().any(|text| text.contains("succeeded")));
