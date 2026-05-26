@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Dark Matter dev burner mode is now wired into setup, `up`, probe, status,
+  and identity reporting. Configs with `darkmatter.dev_burner_nsec = true` use
+  a file-backed test identity instead of macOS Keychain, which keeps headless
+  frontier-style test boxes from blocking on Keychain prompts.
 - Dark Matter first-run setup now creates the desktop id locally before
   attempting relay-list/profile/key-package discovery publishing. Relay
   timeouts are reported as warnings and retried on listener startup instead of

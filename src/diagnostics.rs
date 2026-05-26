@@ -35,7 +35,11 @@ pub fn status_report(config: &Config) -> Result<StatusReport> {
         .iter()
         .filter(|job| job.status.is_active())
         .count();
-    let key_store = "keychain (via marmot-account KeychainSecretStore)".to_string();
+    let key_store = if config.darkmatter.dev_burner_nsec {
+        "file-backed dev burner identity".to_string()
+    } else {
+        "keychain (via marmot-account KeychainSecretStore)".to_string()
+    };
     let darkmatter_engine = "embedded (use `agentnoise darkmatter probe` for liveness)".to_string();
 
     Ok(StatusReport {

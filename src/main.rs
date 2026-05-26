@@ -160,6 +160,11 @@ struct SetupArgs {
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
     )]
     direct_agents: bool,
+    #[arg(
+        long,
+        help = "Development only: use Dark Matter's file-backed burner identity instead of the OS keychain"
+    )]
+    dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Args)]
@@ -186,7 +191,10 @@ struct UpArgs {
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
     )]
     direct_agents: bool,
-    #[arg(long, help = "Use a development-only file-backed burner nsec")]
+    #[arg(
+        long,
+        help = "Development only: use Dark Matter's file-backed burner identity instead of the OS keychain"
+    )]
     dev_burner_nsec: bool,
     #[arg(
         long,
@@ -882,12 +890,61 @@ fn rename_identity_profile(
         return Ok(());
     }
 
-    // The embedded engine publishes the user profile (Nostr kind 0) on
-    // listener startup via `runtime.publish_user_profile`. We don't have
-    // a long-lived engine here, so we just note that the publish happens
-    // on next listen.
-    println!("profile: saved; restart `agentnoise listen` to publish the new label to relays");
+    publish_identity_profile(config)?;
+    println!("profile: saved and published");
     Ok(())
+}
+
+fn publish_identity_profile(config: &Config) -> Result<()> {
+    let Some(account_ref) = config
+        .darkmatter
+        .account
+        .as_deref()
+        .or(config.darkmatter.bot_npub.as_deref())
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+    else {
+        bail!(
+            "profile saved, but no desktop identity is configured yet; run `agentnoise setup` or `agentnoise listen` once"
+        );
+    };
+
+    let bootstrap_relays = config.darkmatter.message_relays.clone();
+    if bootstrap_relays.is_empty() {
+        bail!("profile saved, but darkmatter.message_relays is empty; cannot publish profile");
+    }
+
+    let dm_home = config.resolved_data_dir().join("darkmatter");
+    let keychain_service =
+        agentnoise::darkmatter_app::keychain_service_for_instance(config.instance.as_deref());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for profile publish")?;
+
+    runtime.block_on(async {
+        let engine = DarkmatterEngine::open(
+            dm_home,
+            bootstrap_relays,
+            &keychain_service,
+            config.darkmatter.dev_burner_nsec,
+        )?;
+        engine.start().await?;
+        let result = async {
+            let Some(account) = engine.find_account(account_ref)? else {
+                bail!(
+                    "profile saved, but configured darkmatter account was not found in the local keychain/home"
+                );
+            };
+            engine
+                .publish_configured_profile(&account.account_id_hex, &config.darkmatter)
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        engine.shutdown().await;
+        result
+    })
 }
 
 fn service_command(config_path: &Path, args: ServiceArgs) -> Result<()> {
