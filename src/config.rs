@@ -36,6 +36,8 @@ pub struct DarkmatterConfig {
     pub group_ids: Vec<String>,
     #[serde(default)]
     pub account: Option<String>,
+    #[serde(default)]
+    pub dev_burner_nsec: bool,
     #[serde(default = "default_agent_text_stream_broker")]
     pub agent_text_stream_broker: String,
     #[serde(default = "default_pairing_relays")]
@@ -248,6 +250,7 @@ impl Config {
                 group_id: String::new(),
                 group_ids: Vec::new(),
                 account: None,
+                dev_burner_nsec: false,
                 agent_text_stream_broker: default_agent_text_stream_broker(),
                 pairing_relays: default_pairing_relays(),
                 message_relays: default_message_relays(),

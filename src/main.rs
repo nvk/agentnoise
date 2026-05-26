@@ -144,6 +144,11 @@ struct SetupArgs {
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
     )]
     direct_agents: bool,
+    #[arg(
+        long,
+        help = "Development only: use Dark Matter's file-backed burner identity instead of the OS keychain"
+    )]
+    dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Args)]
@@ -170,6 +175,11 @@ struct UpArgs {
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
     )]
     direct_agents: bool,
+    #[arg(
+        long,
+        help = "Development only: use Dark Matter's file-backed burner identity instead of the OS keychain"
+    )]
+    dev_burner_nsec: bool,
     #[arg(
         long,
         help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
@@ -450,6 +460,7 @@ fn main() -> Result<()> {
                     force_identity: args.force_identity,
                     relays: args.relays,
                     direct_agents: args.direct_agents,
+                    dev_burner_nsec: args.dev_burner_nsec,
                 },
             )?;
             print_setup_result(&result);
@@ -708,6 +719,12 @@ fn print_setup_result(result: &SetupResult) {
     println!("npub: {}", result.npub);
     println!("nprofile: {}", result.nprofile);
     println!("profile: {}", result.profile_display_name);
+    if result.dev_burner_nsec {
+        println!("secret store: file-backed dev burner identity");
+        println!(
+            "warning: development-only plaintext secret store; do not use for a real identity"
+        );
+    }
     if result.created_config {
         println!("config file: created");
     }
@@ -733,7 +750,11 @@ fn print_identity_status(config: &Config) {
         config.darkmatter.profile_display_name
     );
     println!("profile about: {}", config.darkmatter.profile_about);
-    println!("secret store: OS keychain (service: \"agentnoise\", item: <account_id_hex>)");
+    if config.darkmatter.dev_burner_nsec {
+        println!("secret store: file-backed dev burner identity");
+    } else {
+        println!("secret store: OS keychain (service: \"agentnoise\", item: <account_id_hex>)");
+    }
     if let Some(npub) = config
         .darkmatter
         .account
@@ -818,7 +839,12 @@ fn publish_identity_profile(config: &Config) -> Result<()> {
         .context("building tokio runtime for profile publish")?;
 
     runtime.block_on(async {
-        let engine = DarkmatterEngine::open(dm_home, bootstrap_relays, &keychain_service)?;
+        let engine = DarkmatterEngine::open(
+            dm_home,
+            bootstrap_relays,
+            &keychain_service,
+            config.darkmatter.dev_burner_nsec,
+        )?;
         engine.start().await?;
         let result = async {
             let Some(account) = engine.find_account(account_ref)? else {
@@ -945,6 +971,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             force_identity: false,
             relays: args.relays.clone(),
             direct_agents: args.direct_agents,
+            dev_burner_nsec: args.dev_burner_nsec,
         },
     )?;
 
@@ -1034,6 +1061,7 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
         || args.name.is_some()
         || !args.relays.is_empty()
         || args.direct_agents
+        || args.dev_burner_nsec
         || args.ssh
         || !config_path.exists()
     {
@@ -1085,6 +1113,7 @@ fn darkmatter_command(config_path: &Path, args: DarkmatterArgs) -> Result<()> {
                     resolved_home,
                     bootstrap_relays.clone(),
                     &keychain_service,
+                    config.darkmatter.dev_burner_nsec,
                 )?;
                 engine.start().await?;
                 let account_id_hex = engine
@@ -1381,7 +1410,12 @@ fn run_listener(
         .context("building tokio runtime for the darkmatter listener")?;
     let tokio_handle = tokio_runtime.handle().clone();
 
-    let engine = DarkmatterEngine::open(dm_home, bootstrap_relays.clone(), &keychain_service)?;
+    let engine = DarkmatterEngine::open(
+        dm_home,
+        bootstrap_relays.clone(),
+        &keychain_service,
+        config.darkmatter.dev_burner_nsec,
+    )?;
     tokio_handle.block_on(engine.start())?;
     let account_id_hex = tokio_handle
         .block_on(engine.ensure_account(config.darkmatter.account.as_deref(), &bootstrap_relays))?;

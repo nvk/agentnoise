@@ -6,6 +6,7 @@
 //! On startup the engine reuses that account if present, otherwise creates a
 //! fresh identity, then starts the runtime workers.
 
+use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,19 +64,33 @@ pub struct DarkmatterEngine {
 }
 
 impl DarkmatterEngine {
-    /// Construct the engine from an on-disk home, a non-empty relay list, and
-    /// the OS-keychain service name to store secrets under (see
-    /// [`keychain_service_for_instance`]). The marmot-app `AccountHome` is
-    /// opened with an OS-keychain-backed secret store — agentnoise never
-    /// persists nsec material to plaintext disk in production. (The fake-phone
-    /// harness uses the file-backed default directly via `MarmotApp::with_relays`
-    /// for fast tempdir-local test loops.)
-    pub fn open(home: PathBuf, relays: Vec<String>, keychain_service: &str) -> Result<Self> {
+    /// Construct the engine from an on-disk home and a non-empty relay list.
+    ///
+    /// Production opens marmot-app with an OS-keychain-backed `AccountHome`.
+    /// Development-only burner mode uses marmot-app's file-backed default so
+    /// headless test boxes can run without macOS keychain prompts.
+    pub fn open(
+        home: PathBuf,
+        relays: Vec<String>,
+        keychain_service: &str,
+        dev_burner_nsec: bool,
+    ) -> Result<Self> {
         if relays.is_empty() {
             bail!("darkmatter engine requires at least one relay url");
         }
-        let account_home = AccountHome::open_with_keychain(&home, keychain_service)
-            .map_err(|err| anyhow::anyhow!("opening keychain-backed AccountHome: {err}"))?;
+        let home = if dev_burner_nsec {
+            home.join("dev-burner")
+        } else {
+            home
+        };
+        fs::create_dir_all(&home)
+            .with_context(|| format!("creating darkmatter home {}", home.display()))?;
+        let account_home = if dev_burner_nsec {
+            AccountHome::open(&home)
+        } else {
+            AccountHome::open_with_keychain(&home, keychain_service)
+                .map_err(|err| anyhow::anyhow!("opening keychain-backed AccountHome: {err}"))?
+        };
         let app = MarmotApp::with_relays_and_account_home(&home, relays, account_home.clone());
         let runtime = MarmotAppRuntime::new(app.clone());
         Ok(Self {
