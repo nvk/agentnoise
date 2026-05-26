@@ -142,15 +142,16 @@ impl DarkmatterEngine {
         if let Some(reference) = configured.map(str::trim).filter(|r| !r.is_empty())
             && let Some(account) = self.find_account(reference)?
         {
+            if !relays.is_empty() {
+                self.sync_configured_relay_lists(&account.account_id_hex, relays)
+                    .await?;
+            }
             return Ok(account.account_id_hex);
         }
         if relays.is_empty() {
             bail!("ensure_account requires at least one relay url");
         }
-        let setup_relays: Vec<TransportEndpoint> = relays
-            .iter()
-            .map(|url| TransportEndpoint(url.clone()))
-            .collect();
+        let setup_relays = relay_endpoints(relays);
         let request = AccountSetupRequest {
             identity: None,
             default_relays: setup_relays.clone(),
@@ -163,7 +164,60 @@ impl DarkmatterEngine {
             .create_identity(request)
             .await
             .map_err(|err| anyhow::anyhow!("darkmatter create_identity: {err}"))?;
+        self.sync_configured_relay_lists(&result.account.account_id_hex, relays)
+            .await?;
         Ok(result.account.account_id_hex)
+    }
+
+    /// Keep the account's public relay-list records aligned with
+    /// `darkmatter.message_relays`. Darkmatter uses these lists for outbox,
+    /// inbox, and key-package routing; stale lists can cause publishes to keep
+    /// targeting relays the local config no longer names.
+    pub async fn sync_configured_relay_lists(
+        &self,
+        account_id_hex: &str,
+        relays: &[String],
+    ) -> Result<()> {
+        if relays.is_empty() {
+            bail!("sync_configured_relay_lists requires at least one relay url");
+        }
+
+        let desired = relays.to_vec();
+        let desired_endpoints = relay_endpoints(relays);
+        let bootstrap_endpoints = desired_endpoints.clone();
+
+        if self.runtime.account_nip65_relays(account_id_hex)? != desired {
+            self.runtime
+                .set_account_nip65_relays(
+                    account_id_hex,
+                    desired_endpoints.clone(),
+                    bootstrap_endpoints.clone(),
+                )
+                .await
+                .map_err(|err| anyhow::anyhow!("darkmatter set NIP-65 relays: {err}"))?;
+        }
+        if self.runtime.account_inbox_relays(account_id_hex)? != desired {
+            self.runtime
+                .set_account_inbox_relays(
+                    account_id_hex,
+                    desired_endpoints.clone(),
+                    bootstrap_endpoints.clone(),
+                )
+                .await
+                .map_err(|err| anyhow::anyhow!("darkmatter set inbox relays: {err}"))?;
+        }
+        if self.runtime.account_key_package_relays(account_id_hex)? != desired {
+            self.runtime
+                .set_account_key_package_relays(
+                    account_id_hex,
+                    desired_endpoints,
+                    bootstrap_endpoints,
+                )
+                .await
+                .map_err(|err| anyhow::anyhow!("darkmatter set key-package relays: {err}"))?;
+        }
+
+        Ok(())
     }
 
     /// Publish the configured Nostr kind:0 profile for the managed desktop
@@ -178,11 +232,9 @@ impl DarkmatterEngine {
         if config.message_relays.is_empty() {
             bail!("publish_configured_profile requires at least one relay url");
         }
-        let relays: Vec<TransportEndpoint> = config
-            .message_relays
-            .iter()
-            .map(|url| TransportEndpoint(url.clone()))
-            .collect();
+        self.sync_configured_relay_lists(account_id_hex, &config.message_relays)
+            .await?;
+        let relays = relay_endpoints(&config.message_relays);
         let bootstrap = AccountRelayListBootstrap::new(relays.clone(), relays);
         let profile = configured_profile_metadata(config, current_unix_seconds());
         self.runtime
@@ -190,6 +242,13 @@ impl DarkmatterEngine {
             .await
             .map_err(|err| anyhow::anyhow!("darkmatter publish_user_profile: {err}"))
     }
+}
+
+fn relay_endpoints(relays: &[String]) -> Vec<TransportEndpoint> {
+    relays
+        .iter()
+        .map(|url| TransportEndpoint(url.clone()))
+        .collect()
 }
 
 fn configured_profile_metadata(config: &DarkmatterConfig, created_at: u64) -> UserProfileMetadata {

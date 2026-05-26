@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use cgka_traits::TransportEndpoint;
+use cgka_traits::agent_text_stream::{
+    AGENT_TEXT_STREAM_RECORD_TEXT_DELTA, AgentTextStreamTranscriptV1,
+};
 use cgka_traits::app_event::STREAM_TAG;
 use marmot_app::{
     AccountSetupRequest, AgentTextStreamFinishRequest, AppMessageQuery, MarmotApp, MarmotAppEvent,
@@ -29,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
+use crate::dm_streams::start_event_id_from_summary;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FakePhonePlan {
@@ -295,7 +299,7 @@ async fn handle_desktop_message(
     // harness never opens a real QUIC channel — the start/finish envelopes
     // alone exercise the protocol-layer wiring.
     let quic_candidates = vec!["quic://127.0.0.1:0".to_string()];
-    let (_envelope, _summary) = runtime
+    let (_envelope, summary) = runtime
         .start_agent_text_stream(
             account_id_hex,
             group_id,
@@ -305,6 +309,7 @@ async fn handle_desktop_message(
         )
         .await
         .map_err(|err| anyhow::anyhow!("start_agent_text_stream: {err}"))?;
+    let (start_event_id, start_event_id_hex) = start_event_id_from_summary(&summary)?;
 
     let reply = render_fake_desktop_reply(text, pin);
     runtime
@@ -312,15 +317,16 @@ async fn handle_desktop_message(
         .await
         .map_err(|err| anyhow::anyhow!("desktop reply send_message: {err}"))?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(reply.as_bytes());
-    let transcript_hash: [u8; 32] = hasher.finalize().into();
+    let mut transcript =
+        AgentTextStreamTranscriptV1::new(stream_id.to_vec(), start_event_id.clone());
+    transcript.append(1, AGENT_TEXT_STREAM_RECORD_TEXT_DELTA, reply.as_bytes());
 
     let finish_request = AgentTextStreamFinishRequest {
         stream_id: stream_id.to_vec(),
+        start_event_id: start_event_id_hex,
         final_text_or_reference: reply,
-        transcript_hash,
-        chunk_count: 1,
+        transcript_hash: transcript.hash(),
+        chunk_count: transcript.chunk_count(),
         finished_at: current_unix_seconds(),
     };
     runtime

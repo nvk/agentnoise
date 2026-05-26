@@ -16,12 +16,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use cgka_traits::agent_text_stream::{
-    AGENT_TEXT_STREAM_RECORD_TEXT_DELTA, AgentTextStreamTranscriptV1,
+    AGENT_TEXT_STREAM_RECORD_TEXT_DELTA, AgentTextStreamKeyContextV1, AgentTextStreamTranscriptV1,
 };
-use cgka_traits::{GroupId, MessageId};
+use cgka_traits::{EpochId, GroupId, MemberId, MessageId};
 use marmot_app::{AgentTextStreamFinishRequest, SendSummary};
 use sha2::{Digest, Sha256};
 use transport_quic_broker::{BrokerServerTrust, BrokerTextPublisher, OpenBrokerTextPublisher};
+use transport_quic_stream::AgentTextStreamCrypto;
 
 use crate::darkmatter_app::DarkmatterEngine;
 
@@ -111,8 +112,16 @@ impl AgentTextStream {
             start_message_ids = %summary.message_ids.join(","),
             "agentnoise stream start"
         );
+        let crypto = stream_crypto(
+            &engine,
+            &account_id_hex,
+            &group_id,
+            &stream_id,
+            &start_event_id,
+        )
+        .await?;
         let (publisher, broker_addr) = broker
-            .connect_publisher(stream_id.to_vec(), start_event_id.clone())
+            .connect_publisher(stream_id.to_vec(), start_event_id.clone(), Some(crypto))
             .await
             .map_err(|err| anyhow::anyhow!("connect agent text stream broker: {err}"))?;
         tracing::debug!(
@@ -288,6 +297,7 @@ impl AgentTextStream {
         let transcript_chunks = self.transcript.chunk_count();
         let request = AgentTextStreamFinishRequest {
             stream_id: self.stream_id.to_vec(),
+            start_event_id: self.start_event_id_hex.clone(),
             final_text_or_reference,
             transcript_hash,
             chunk_count: transcript_chunks,
@@ -381,7 +391,7 @@ fn stream_id_for_job(job_id: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn start_event_id_from_summary(summary: &SendSummary) -> Result<(MessageId, String)> {
+pub(crate) fn start_event_id_from_summary(summary: &SendSummary) -> Result<(MessageId, String)> {
     let message_id = summary
         .message_ids
         .first()
@@ -394,6 +404,38 @@ fn start_event_id_from_summary(summary: &SendSummary) -> Result<(MessageId, Stri
         );
     }
     Ok((MessageId::new(bytes), message_id.to_string()))
+}
+
+async fn stream_crypto(
+    engine: &DarkmatterEngine,
+    account_id_hex: &str,
+    group_id: &GroupId,
+    stream_id: &[u8; 32],
+    start_event_id: &MessageId,
+) -> Result<AgentTextStreamCrypto> {
+    let group_state = engine
+        .runtime()
+        .group_mls_state(account_id_hex, group_id)
+        .await
+        .map_err(|err| anyhow::anyhow!("darkmatter group_mls_state: {err}"))?;
+    let stream_secret = engine
+        .runtime()
+        .agent_text_stream_exporter_secret(account_id_hex, group_id)
+        .await
+        .map_err(|err| anyhow::anyhow!("darkmatter agent_text_stream_exporter_secret: {err}"))?;
+    let sender_id = MemberId::new(
+        hex::decode(account_id_hex).context("decoding darkmatter account id for stream sender")?,
+    );
+    Ok(AgentTextStreamCrypto::new(
+        stream_secret,
+        AgentTextStreamKeyContextV1::new(
+            group_id.clone(),
+            stream_id.to_vec(),
+            EpochId(group_state.epoch),
+            sender_id,
+            start_event_id.clone(),
+        ),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,6 +479,7 @@ impl StreamBrokerEndpoint {
         &self,
         stream_id: Vec<u8>,
         start_event_id: MessageId,
+        crypto: Option<AgentTextStreamCrypto>,
     ) -> Result<(BrokerTextPublisher, SocketAddr)> {
         let mut errors = Vec::new();
         for addr in &self.addrs {
@@ -446,6 +489,7 @@ impl StreamBrokerEndpoint {
                 trust: broker_trust_for_addr(*addr),
                 stream_id: stream_id.clone(),
                 start_event_id: start_event_id.clone(),
+                crypto: crypto.clone(),
             })
             .await
             {
