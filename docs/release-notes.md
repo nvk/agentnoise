@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Dark Matter first-run setup now creates the desktop id locally before
+  attempting relay-list/profile/key-package discovery publishing. Relay
+  timeouts are reported as warnings and retried on listener startup instead of
+  rolling back the local identity.
+
 ## 0.1.28 - 2026-05-23
 
 - Split the managed service path into `agentnoise transport run` plus
