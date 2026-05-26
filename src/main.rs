@@ -1791,6 +1791,40 @@ fn pairing_runtime_info(
     })
 }
 
+fn maybe_publish_startup_discovery(
+    tokio_handle: &tokio::runtime::Handle,
+    engine: &DarkmatterEngine,
+    account_id_hex: &str,
+    config: &Config,
+) {
+    if !should_publish_startup_discovery(config) {
+        eprintln!("agentnoise: skipping darkmatter discovery broadcast for paired account");
+        return;
+    }
+
+    match tokio_handle.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.publish_discovery(account_id_hex, &config.darkmatter),
+        )
+        .await
+    }) {
+        Ok(Ok(())) => {
+            eprintln!("agentnoise: darkmatter discovery broadcast complete");
+        }
+        Ok(Err(error)) => {
+            eprintln!("agentnoise: darkmatter discovery broadcast failed: {error:#}");
+        }
+        Err(_) => {
+            eprintln!("agentnoise: darkmatter discovery broadcast timed out; continuing");
+        }
+    }
+}
+
+fn should_publish_startup_discovery(config: &Config) -> bool {
+    !config.darkmatter.has_control_group() || config.darkmatter.allowed_senders.is_empty()
+}
+
 fn run_listener(
     config_path: &Path,
     config: Config,
@@ -1826,23 +1860,7 @@ fn run_listener(
     let account_id_hex = tokio_handle
         .block_on(engine.ensure_account(config.darkmatter.account.as_deref(), &bootstrap_relays))?;
     eprintln!("agentnoise: darkmatter account ready: {account_id_hex}");
-    match tokio_handle.block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            engine.publish_discovery(&account_id_hex, &config.darkmatter),
-        )
-        .await
-    }) {
-        Ok(Ok(())) => {
-            eprintln!("agentnoise: darkmatter discovery broadcast complete");
-        }
-        Ok(Err(error)) => {
-            eprintln!("agentnoise: darkmatter discovery broadcast failed: {error:#}");
-        }
-        Err(_) => {
-            eprintln!("agentnoise: darkmatter discovery broadcast timed out; continuing");
-        }
-    }
+    maybe_publish_startup_discovery(&tokio_handle, &engine, &account_id_hex, &config);
 
     if let Some(pairing_runtime) = pairing.clone() {
         spawn_pairing_pin_display(config.clone(), pairing_runtime);
@@ -2808,6 +2826,18 @@ mod tests {
             ..RelayPlaneHealth::default()
         };
         assert!(!dm_relay_health_is_degraded(&health, 1));
+    }
+
+    #[test]
+    fn startup_discovery_runs_only_until_paired() {
+        let mut config = Config::template();
+        assert!(should_publish_startup_discovery(&config));
+
+        config.darkmatter.add_control_group_id("group-a");
+        assert!(should_publish_startup_discovery(&config));
+
+        config.darkmatter.allowed_senders.push("phone".to_string());
+        assert!(!should_publish_startup_discovery(&config));
     }
 
     #[test]

@@ -11,6 +11,9 @@
   relay delivery was stale.
 - Existing Dark Matter configs using the old three-relay default are migrated
   to the current default relay set on transport startup.
+- Dark Matter listener startup no longer republishes discovery material for
+  already-paired accounts, avoiding a slow relay publish path that can leave
+  the embedded relay plane unhealthy before subscriptions are live.
 - Added a Dark Matter `fake-phone live-roundtrip` harness that starts the real
   isolated transport against a local mock relay, drives it from a separate fake
   phone identity, can run an isolated fake-Codex worker, and requires both
