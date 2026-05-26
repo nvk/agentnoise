@@ -1783,7 +1783,7 @@ fn run_listener(
         event_journal: Arc::clone(&event_journal),
     };
 
-    let group_ids = config.darkmatter.control_group_ids();
+    let group_ids = reconcile_existing_dm_groups(config_path, &config, &dm);
     if group_ids.is_empty() {
         println!(
             "agentnoise listening (no paired group yet — show the QR and let the phone create one)"
@@ -2181,6 +2181,45 @@ fn send_retry_delay(detail: &str, attempt: usize) -> Duration {
     Duration::from_millis(500 * attempt)
 }
 
+fn reconcile_existing_dm_groups(
+    config_path: &Path,
+    config: &Config,
+    dm: &Arc<DmClient>,
+) -> Vec<String> {
+    let mut group_ids = config.darkmatter.control_group_ids();
+    let discovered = match dm.visible_group_ids() {
+        Ok(discovered) => discovered,
+        Err(error) => {
+            eprintln!("agentnoise: failed to list darkmatter groups: {error:#}");
+            return group_ids;
+        }
+    };
+    let added = merge_discovered_group_ids(&mut group_ids, discovered);
+    for group_id in added {
+        eprintln!("agentnoise: discovered existing darkmatter group {group_id}");
+        if let Err(error) = persist_discovered_group(config_path, &group_id) {
+            eprintln!("agentnoise: failed to persist discovered group {group_id}: {error:#}");
+        }
+    }
+    group_ids
+}
+
+fn merge_discovered_group_ids(
+    group_ids: &mut Vec<String>,
+    discovered: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut added = Vec::new();
+    for group_id in discovered {
+        let group_id = group_id.trim();
+        if group_id.is_empty() || group_ids.iter().any(|existing| existing == group_id) {
+            continue;
+        }
+        group_ids.push(group_id.to_string());
+        added.push(group_id.to_string());
+    }
+    added
+}
+
 fn spawn_dm_group_subscription(
     tokio_handle: &tokio::runtime::Handle,
     dm: Arc<DmClient>,
@@ -2540,5 +2579,22 @@ mod tests {
     #[test]
     fn darkmatter_subscription_refreshes_before_mobile_waits_too_long() {
         assert!(dm_subscription_refresh_interval() <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn merge_discovered_group_ids_adds_only_new_nonempty_groups() {
+        let mut groups = vec!["abc".to_string()];
+        let added = merge_discovered_group_ids(
+            &mut groups,
+            vec![
+                "abc".to_string(),
+                " def ".to_string(),
+                String::new(),
+                "ghi".to_string(),
+            ],
+        );
+
+        assert_eq!(groups, vec!["abc", "def", "ghi"]);
+        assert_eq!(added, vec!["def", "ghi"]);
     }
 }

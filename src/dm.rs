@@ -83,6 +83,21 @@ impl DmClient {
         self.handle.clone()
     }
 
+    /// Return the currently projected visible group ids for this account.
+    pub fn visible_group_ids(&self) -> Result<Vec<String>> {
+        let _runtime = self.handle.enter();
+        let subscription = self
+            .engine
+            .runtime()
+            .subscribe_chats(&self.account_id_hex, false)
+            .map_err(|err| anyhow::anyhow!("darkmatter subscribe_chats: {err}"))?;
+        Ok(subscription
+            .snapshot
+            .into_iter()
+            .map(|group| group.group_id_hex)
+            .collect())
+    }
+
     /// Subscribe to live messages for `group_id_hex`. Returns a snapshot of
     /// recently-projected messages plus an async stream of new updates.
     pub async fn subscribe_group(&self, group_id_hex: &str) -> Result<DmSubscription> {
