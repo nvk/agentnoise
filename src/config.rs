@@ -622,6 +622,25 @@ impl DarkmatterConfig {
         self.group_id = normalized.first().cloned().unwrap_or_default();
         self.group_ids = normalized;
     }
+
+    pub fn migrate_legacy_default_relays(&mut self) -> bool {
+        let mut changed = false;
+        if relays_match_legacy_defaults(&self.message_relays) {
+            self.message_relays = crate::identity::DEFAULT_MESSAGE_RELAYS
+                .iter()
+                .map(|relay| (*relay).to_string())
+                .collect();
+            changed = true;
+        }
+        if relays_match_legacy_defaults(&self.pairing_relays) {
+            self.pairing_relays = crate::identity::DEFAULT_PAIRING_RELAYS
+                .iter()
+                .map(|relay| (*relay).to_string())
+                .collect();
+            changed = true;
+        }
+        changed
+    }
 }
 
 fn push_unique_group_id(group_ids: &mut Vec<String>, group_id: &str) {
@@ -630,6 +649,18 @@ fn push_unique_group_id(group_ids: &mut Vec<String>, group_id: &str) {
         return;
     }
     group_ids.push(group_id.to_string());
+}
+
+fn relays_match_legacy_defaults(relays: &[String]) -> bool {
+    const LEGACY_DEFAULT_RELAYS: &[&str] = &[
+        "wss://relay.damus.io",
+        "wss://relay.primal.net",
+        "wss://nos.lol",
+    ];
+    relays
+        .iter()
+        .map(String::as_str)
+        .eq(LEGACY_DEFAULT_RELAYS.iter().copied())
 }
 
 fn default_true() -> bool {
@@ -851,6 +882,44 @@ mod tests {
             config.darkmatter.agent_text_stream_broker,
             "https://quic-broker.ipf.dev:4450"
         );
+    }
+
+    #[test]
+    fn legacy_default_relays_migrate_to_current_defaults() {
+        let mut config = Config::template().darkmatter;
+        config.message_relays = vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://relay.primal.net".to_string(),
+            "wss://nos.lol".to_string(),
+        ];
+        config.pairing_relays = config.message_relays.clone();
+
+        assert!(config.migrate_legacy_default_relays());
+        assert_eq!(
+            config.message_relays,
+            crate::identity::DEFAULT_MESSAGE_RELAYS
+                .iter()
+                .map(|relay| (*relay).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            config.pairing_relays,
+            crate::identity::DEFAULT_PAIRING_RELAYS
+                .iter()
+                .map(|relay| (*relay).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn relay_migration_leaves_custom_relays_alone() {
+        let mut config = Config::template().darkmatter;
+        config.message_relays = vec!["wss://relay.example".to_string()];
+        config.pairing_relays = vec!["wss://relay.example".to_string()];
+
+        assert!(!config.migrate_legacy_default_relays());
+        assert_eq!(config.message_relays, vec!["wss://relay.example"]);
+        assert_eq!(config.pairing_relays, vec!["wss://relay.example"]);
     }
 
     #[test]

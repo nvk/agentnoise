@@ -25,6 +25,7 @@ use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use marmot_app::RelayPlaneHealth;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1225,12 +1226,15 @@ fn darkmatter_command(config_path: &Path, args: DarkmatterArgs) -> Result<()> {
                 let account_id_hex = engine
                     .ensure_account(configured_account.as_deref(), &bootstrap_relays)
                     .await?;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let relay_health = engine.relay_health().await;
 
                 let report = DarkmatterProbeReport {
                     home: engine.home().display().to_string(),
                     account_label: label,
                     account_id_hex,
                     relays: bootstrap_relays,
+                    relay_health,
                 };
 
                 if json {
@@ -1241,6 +1245,10 @@ fn darkmatter_command(config_path: &Path, args: DarkmatterArgs) -> Result<()> {
                     println!("label:   {}", report.account_label);
                     println!("account: {}", report.account_id_hex);
                     println!("relays:  {}", report.relays.join(", "));
+                    println!(
+                        "relay health: {}/{} connected",
+                        report.relay_health.connected, report.relay_health.total_relays
+                    );
                 }
 
                 engine.shutdown().await;
@@ -1256,6 +1264,7 @@ struct DarkmatterProbeReport {
     account_label: String,
     account_id_hex: String,
     relays: Vec<String>,
+    relay_health: RelayPlaneHealth,
 }
 
 fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
@@ -1413,6 +1422,10 @@ fn transport_run(config_path: &Path, args: TransportRunArgs) -> Result<()> {
     {
         config.darkmatter.add_control_group_id(group);
         config.save(config_path)?;
+    }
+    if config.darkmatter.migrate_legacy_default_relays() {
+        config.save(config_path)?;
+        eprintln!("agentnoise: updated legacy default darkmatter relays");
     }
 
     let mode = if runtime::stdio_is_interactive() {
@@ -1870,6 +1883,8 @@ fn run_listener(
         event_journal: Arc::clone(&event_journal),
     };
 
+    spawn_dm_relay_health_watchdog(&tokio_handle, engine.clone(), bootstrap_relays.len());
+
     let group_ids = reconcile_existing_dm_groups(config_path, &config, &dm);
     if group_ids.is_empty() {
         println!(
@@ -2322,6 +2337,59 @@ fn spawn_dm_group_subscription(
     ));
 }
 
+fn spawn_dm_relay_health_watchdog(
+    tokio_handle: &tokio::runtime::Handle,
+    engine: DarkmatterEngine,
+    configured_relays: usize,
+) {
+    tokio_handle.spawn(async move {
+        tokio::time::sleep(dm_relay_health_grace()).await;
+        let mut degraded_checks = 0usize;
+
+        loop {
+            match tokio::time::timeout(dm_relay_health_timeout(), engine.relay_health()).await {
+                Ok(health) if dm_relay_health_is_degraded(&health, configured_relays) => {
+                    degraded_checks = degraded_checks.saturating_add(1);
+                    eprintln!(
+                        "agentnoise: darkmatter relay health degraded ({}/{}) connected, check {}/{}",
+                        health.connected,
+                        dm_relay_min_connected(configured_relays),
+                        degraded_checks,
+                        dm_relay_health_failures_before_restart()
+                    );
+                }
+                Ok(health) => {
+                    if degraded_checks > 0 {
+                        eprintln!(
+                            "agentnoise: darkmatter relay health recovered ({}/{}) connected",
+                            health.connected,
+                            dm_relay_min_connected(configured_relays)
+                        );
+                    }
+                    degraded_checks = 0;
+                }
+                Err(_) => {
+                    degraded_checks = degraded_checks.saturating_add(1);
+                    eprintln!(
+                        "agentnoise: darkmatter relay health check timed out, check {}/{}",
+                        degraded_checks,
+                        dm_relay_health_failures_before_restart()
+                    );
+                }
+            }
+
+            if degraded_checks >= dm_relay_health_failures_before_restart() {
+                eprintln!(
+                    "agentnoise: darkmatter relay plane is unhealthy; exiting so the service supervisor restarts it"
+                );
+                std::process::exit(75);
+            }
+
+            tokio::time::sleep(dm_relay_health_interval()).await;
+        }
+    });
+}
+
 async fn run_dm_group_subscription(
     dm: Arc<DmClient>,
     group_id: String,
@@ -2385,9 +2453,25 @@ async fn run_dm_group_subscription(
                 Err(_) => {
                     // Refresh the subscription periodically so missed relay
                     // updates are recovered from the snapshot path.
+                    run_dm_subscription_catch_up(&dm, &group_id).await;
                     break;
                 }
             }
+        }
+    }
+}
+
+async fn run_dm_subscription_catch_up(dm: &DmClient, group_id: &str) {
+    match tokio::time::timeout(dm_catch_up_timeout(), dm.catch_up()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!("agentnoise: darkmatter catch-up for {group_id} failed: {error:#}");
+        }
+        Err(_) => {
+            eprintln!(
+                "agentnoise: darkmatter catch-up for {group_id} timed out after {}s",
+                dm_catch_up_timeout().as_secs()
+            );
         }
     }
 }
@@ -2396,9 +2480,39 @@ fn dm_subscription_refresh_interval() -> Duration {
     Duration::from_secs(30)
 }
 
+fn dm_catch_up_timeout() -> Duration {
+    Duration::from_secs(20)
+}
+
 fn dm_subscription_retry_delay(failures: usize) -> Duration {
     let seconds = (failures as u64).clamp(1, 30);
     Duration::from_secs(seconds)
+}
+
+fn dm_relay_health_grace() -> Duration {
+    Duration::from_secs(75)
+}
+
+fn dm_relay_health_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn dm_relay_health_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn dm_relay_health_failures_before_restart() -> usize {
+    2
+}
+
+fn dm_relay_min_connected(configured_relays: usize) -> usize {
+    configured_relays.clamp(1, 2)
+}
+
+fn dm_relay_health_is_degraded(health: &RelayPlaneHealth, configured_relays: usize) -> bool {
+    configured_relays > 0
+        && health.sdk_backed
+        && health.connected < dm_relay_min_connected(configured_relays)
 }
 
 #[cfg(test)]
@@ -2666,6 +2780,34 @@ mod tests {
     #[test]
     fn darkmatter_subscription_refreshes_before_mobile_waits_too_long() {
         assert!(dm_subscription_refresh_interval() <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn darkmatter_relay_health_requires_redundant_relays_when_configured() {
+        assert_eq!(dm_relay_min_connected(1), 1);
+        assert_eq!(dm_relay_min_connected(3), 2);
+
+        let mut health = RelayPlaneHealth {
+            sdk_backed: true,
+            total_relays: 3,
+            connected: 1,
+            ..RelayPlaneHealth::default()
+        };
+        assert!(dm_relay_health_is_degraded(&health, 3));
+
+        health.connected = 2;
+        assert!(!dm_relay_health_is_degraded(&health, 3));
+    }
+
+    #[test]
+    fn darkmatter_relay_health_ignores_non_sdk_test_planes() {
+        let health = RelayPlaneHealth {
+            sdk_backed: false,
+            total_relays: 1,
+            connected: 0,
+            ..RelayPlaneHealth::default()
+        };
+        assert!(!dm_relay_health_is_degraded(&health, 1));
     }
 
     #[test]

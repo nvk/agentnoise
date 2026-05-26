@@ -14,7 +14,8 @@ use anyhow::{Context, Result, bail};
 use cgka_traits::TransportEndpoint;
 use marmot_account::AccountHome;
 use marmot_app::{
-    AccountRelayListBootstrap, ManagedAccount, MarmotApp, MarmotAppRuntime, UserProfileMetadata,
+    AccountRelayListBootstrap, ManagedAccount, MarmotApp, MarmotAppRuntime, RelayPlaneHealth,
+    UserProfileMetadata,
 };
 use nostr::PublicKey;
 use nostr::nips::nip19::FromBech32;
@@ -123,6 +124,21 @@ impl DarkmatterEngine {
 
     pub async fn shutdown(&self) {
         self.runtime.shutdown().await;
+    }
+
+    pub async fn catch_up(&self) -> Result<()> {
+        self.runtime
+            .catch_up_accounts()
+            .await
+            .context("catching up darkmatter accounts")
+    }
+
+    pub async fn relay_health(&self) -> RelayPlaneHealth {
+        self.runtime
+            .shared_services()
+            .relay_plane()
+            .relay_health()
+            .await
     }
 
     /// Look up a managed account by label, account_id_hex, or npub. marmot-app

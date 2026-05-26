@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use cgka_traits::GroupId;
-use marmot_app::{AppMessageQuery, AppMessageRecord, RuntimeMessageUpdate, SendSummary};
+use marmot_app::{
+    AppMessageQuery, AppMessageRecord, RelayPlaneHealth, RuntimeMessageUpdate, SendSummary,
+};
 
 use crate::attachments::AttachmentInfo;
 use crate::darkmatter_app::DarkmatterEngine;
@@ -96,6 +98,14 @@ impl DmClient {
             .into_iter()
             .map(|group| group.group_id_hex)
             .collect())
+    }
+
+    pub async fn catch_up(&self) -> Result<()> {
+        self.engine.catch_up().await
+    }
+
+    pub async fn relay_health(&self) -> RelayPlaneHealth {
+        self.engine.relay_health().await
     }
 
     /// Subscribe to live messages for `group_id_hex`. Returns a snapshot of
