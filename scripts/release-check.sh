@@ -6,5 +6,9 @@ cd "$(dirname "$0")/.."
 ./scripts/test-fast.sh
 ./scripts/test-fixtures.sh
 ./scripts/test-chat-ux.sh
-cargo package --allow-dirty --offline
+if rg -q 'marmot-protocol/darkmatter.git' Cargo.toml; then
+  cargo build --release --locked
+else
+  cargo package --allow-dirty --offline
+fi
 ! rg -n "REPLACE_WITH_" packaging/homebrew/agentnoise.rb

@@ -136,8 +136,6 @@ struct InitArgs {
         help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
     )]
     direct_agents: bool,
-    #[arg(long, help = "Use a development-only file-backed burner nsec")]
-    dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Args)]

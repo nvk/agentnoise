@@ -32,7 +32,7 @@ pub struct MessageEvent {
 }
 
 impl MessageEvent {
-    fn from_record(record: &AppMessageRecord) -> Self {
+    fn from_record(record: &AppMessageRecord, is_initial: bool) -> Self {
         Self {
             group_id: Some(record.group_id_hex.clone()),
             sender: Some(record.sender.clone()),
@@ -40,7 +40,7 @@ impl MessageEvent {
             unsupported: None,
             id: Some(record.message_id_hex.clone()),
             trigger: None,
-            is_initial: false,
+            is_initial,
             attachments: Vec::new(),
         }
     }
@@ -165,7 +165,7 @@ impl DmSubscription {
         self.inner
             .snapshot
             .iter()
-            .map(MessageEvent::from_record)
+            .map(|record| MessageEvent::from_record(record, true))
             .collect()
     }
 
@@ -185,8 +185,10 @@ impl DmSubscription {
                         attachments: Vec::new(),
                     });
                 }
-                RuntimeMessageUpdate::AgentStreamStarted(_)
-                | RuntimeMessageUpdate::AgentStreamFinalized(_) => continue,
+                // A kind-1200 stream start opens the live-preview channel. The
+                // durable stream final arrives as a normal kind-9 message, so
+                // it flows through the arm above like any other chat reply.
+                RuntimeMessageUpdate::AgentStreamStarted(_) => continue,
             }
         }
     }
@@ -225,6 +227,26 @@ fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projected_snapshot_records_are_marked_initial() {
+        let record = AppMessageRecord {
+            message_id_hex: "message-1".to_string(),
+            direction: "inbound".to_string(),
+            group_id_hex: "group-1".to_string(),
+            sender: "phone".to_string(),
+            plaintext: "/codex old command".to_string(),
+            kind: 9,
+            tags: Vec::new(),
+            recorded_at: 1,
+            received_at: 1,
+        };
+
+        let event = MessageEvent::from_record(&record, true);
+
+        assert!(event.is_initial);
+        assert_eq!(event.text, "/codex old command");
+    }
 
     #[test]
     fn chunks_long_text() {
