@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Dark Matter listener startup now enters the Tokio runtime before creating
+  the relay discovery timeout, fixing a startup panic after first pairing setup.
 - Dark Matter dev burner mode is now wired into setup, `up`, probe, status,
   and identity reporting. Configs with `darkmatter.dev_burner_nsec = true` use
   a file-backed test identity instead of macOS Keychain, which keeps headless

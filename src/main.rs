@@ -1420,10 +1420,13 @@ fn run_listener(
     let account_id_hex = tokio_handle
         .block_on(engine.ensure_account(config.darkmatter.account.as_deref(), &bootstrap_relays))?;
     eprintln!("agentnoise: darkmatter account ready: {account_id_hex}");
-    match tokio_handle.block_on(tokio::time::timeout(
-        Duration::from_secs(30),
-        engine.publish_discovery(&account_id_hex, &config.darkmatter),
-    )) {
+    match tokio_handle.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.publish_discovery(&account_id_hex, &config.darkmatter),
+        )
+        .await
+    }) {
         Ok(Ok(())) => {
             eprintln!("agentnoise: darkmatter discovery broadcast complete");
         }
