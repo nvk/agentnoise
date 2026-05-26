@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Dark Matter alpha now uses the same transport/worker split as mainline:
+  services run `agentnoise transport run`, while `agentnoise worker start`
+  claims queued jobs from a login shell or tmux.
+- Updated Dark Matter agent-text-stream handling for the current Marmot APIs:
+  stream finals arrive as normal chat messages with stream tags, finish
+  requests carry the start event id, and broker publishers receive stream
+  crypto.
 - Dark Matter listener startup now enters the Tokio runtime before creating
   the relay discovery timeout, fixing a startup panic after first pairing setup.
 - Dark Matter dev burner mode is now wired into setup, `up`, probe, status,
