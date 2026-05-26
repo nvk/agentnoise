@@ -95,7 +95,10 @@ impl DmClient {
             .runtime()
             .subscribe_messages(&self.account_id_hex, query)
             .map_err(|err| anyhow::anyhow!("darkmatter subscribe_messages: {err}"))?;
-        Ok(DmSubscription { inner })
+        Ok(DmSubscription {
+            inner,
+            account_id_hex: self.account_id_hex.clone(),
+        })
     }
 
     /// Send raw plaintext bytes to `group_id_hex` (async).
@@ -158,6 +161,7 @@ impl DmClient {
 /// Live message subscription with snapshot + async stream.
 pub struct DmSubscription {
     inner: marmot_app::RuntimeMessagesSubscription,
+    account_id_hex: String,
 }
 
 impl DmSubscription {
@@ -165,6 +169,7 @@ impl DmSubscription {
         self.inner
             .snapshot
             .iter()
+            .filter(|record| !is_self_sender(&record.sender, &self.account_id_hex))
             .map(|record| MessageEvent::from_record(record, true))
             .collect()
     }
@@ -174,6 +179,9 @@ impl DmSubscription {
             let update = self.inner.recv().await?;
             match update {
                 RuntimeMessageUpdate::Message(received) => {
+                    if is_self_sender(&received.message.sender, &self.account_id_hex) {
+                        continue;
+                    }
                     return Some(MessageEvent {
                         group_id: Some(hex::encode(received.message.group_id.as_slice())),
                         sender: Some(received.message.sender),
@@ -192,6 +200,10 @@ impl DmSubscription {
             }
         }
     }
+}
+
+fn is_self_sender(sender: &str, account_id_hex: &str) -> bool {
+    sender.eq_ignore_ascii_case(account_id_hex)
 }
 
 fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
@@ -246,6 +258,12 @@ mod tests {
 
         assert!(event.is_initial);
         assert_eq!(event.text, "/codex old command");
+    }
+
+    #[test]
+    fn self_authored_darkmatter_messages_are_ignored() {
+        assert!(is_self_sender("ABCDEF", "abcdef"));
+        assert!(!is_self_sender("phone", "abcdef"));
     }
 
     #[test]

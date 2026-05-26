@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Dark Matter subscriptions now ignore self-authored chat messages, so old
+  bot replies from prior releases no longer replay through the listener as
+  fresh inbound phone commands after restart.
 - Dark Matter alpha now uses the same transport/worker split as mainline:
   services run `agentnoise transport run`, while `agentnoise worker start`
   claims queued jobs from a login shell or tmux.
