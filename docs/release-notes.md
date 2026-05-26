@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Dark Matter group subscriptions now refresh periodically and resubscribe
+  after stream closure, using snapshot catch-up plus the event journal to
+  recover phone messages that arrived while relay delivery was stale.
+- Fixed a Dark Matter worker shutdown panic caused by calling engine shutdown
+  outside the owned Tokio runtime.
 - Dark Matter subscriptions now ignore self-authored chat messages, so old
   bot replies from prior releases no longer replay through the listener as
   fresh inbound phone commands after restart.

@@ -1794,30 +1794,16 @@ fn run_listener(
         }
     }
 
+    let ignore_initial = config.darkmatter.ignore_initial_messages;
     let (tx, rx) = mpsc::channel::<agentnoise::dm::MessageEvent>();
     for group_id in &group_ids {
-        let dm_clone = Arc::clone(&dm);
-        let tx_clone = tx.clone();
-        let group_id = group_id.clone();
-        tokio_handle.spawn(async move {
-            let mut subscription = match dm_clone.subscribe_group(&group_id).await {
-                Ok(subscription) => subscription,
-                Err(error) => {
-                    eprintln!("agentnoise: failed to subscribe to {group_id}: {error:#}");
-                    return;
-                }
-            };
-            for event in subscription.snapshot() {
-                if tx_clone.send(event).is_err() {
-                    return;
-                }
-            }
-            while let Some(event) = subscription.next_message().await {
-                if tx_clone.send(event).is_err() {
-                    return;
-                }
-            }
-        });
+        spawn_dm_group_subscription(
+            &tokio_handle,
+            Arc::clone(&dm),
+            group_id.clone(),
+            tx.clone(),
+            ignore_initial,
+        );
     }
     spawn_local_session_watcher_simple(config_path, &config, &dm, &event_journal);
     spawn_group_join_discovery(
@@ -1830,8 +1816,6 @@ fn run_listener(
         tx.clone(),
     );
     drop(tx);
-
-    let ignore_initial = config.darkmatter.ignore_initial_messages;
 
     for event in rx {
         let Some(group_id) = event.group_id.clone() else {
@@ -1897,7 +1881,7 @@ fn run_listener(
         }
     }
 
-    tokio_handle.block_on(engine.shutdown());
+    tokio_runtime.block_on(engine.shutdown());
     drop(tokio_runtime);
     Ok(())
 }
@@ -1912,7 +1896,7 @@ struct OpenDmRuntime {
 
 impl OpenDmRuntime {
     fn shutdown(self) {
-        self.handle.block_on(self.engine.shutdown());
+        self.runtime.block_on(self.engine.shutdown());
         drop(self.runtime);
     }
 }
@@ -2197,6 +2181,100 @@ fn send_retry_delay(detail: &str, attempt: usize) -> Duration {
     Duration::from_millis(500 * attempt)
 }
 
+fn spawn_dm_group_subscription(
+    tokio_handle: &tokio::runtime::Handle,
+    dm: Arc<DmClient>,
+    group_id: String,
+    tx: mpsc::Sender<agentnoise::dm::MessageEvent>,
+    ignore_first_snapshot: bool,
+) {
+    tokio_handle.spawn(run_dm_group_subscription(
+        dm,
+        group_id,
+        tx,
+        ignore_first_snapshot,
+    ));
+}
+
+async fn run_dm_group_subscription(
+    dm: Arc<DmClient>,
+    group_id: String,
+    tx: mpsc::Sender<agentnoise::dm::MessageEvent>,
+    ignore_first_snapshot: bool,
+) {
+    let mut first_snapshot = ignore_first_snapshot;
+    let mut failures = 0usize;
+
+    loop {
+        let mut subscription = match dm.subscribe_group(&group_id).await {
+            Ok(subscription) => {
+                if failures > 0 {
+                    eprintln!("agentnoise: resubscribed to darkmatter group {group_id}");
+                }
+                failures = 0;
+                subscription
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                let delay = dm_subscription_retry_delay(failures);
+                eprintln!(
+                    "agentnoise: failed to subscribe to {group_id}: {error:#}; retrying in {}s",
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
+
+        for mut event in subscription.snapshot() {
+            event.is_initial = first_snapshot;
+            if tx.send(event).is_err() {
+                return;
+            }
+        }
+        first_snapshot = false;
+
+        loop {
+            match tokio::time::timeout(
+                dm_subscription_refresh_interval(),
+                subscription.next_message(),
+            )
+            .await
+            {
+                Ok(Some(event)) => {
+                    if tx.send(event).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    failures = failures.saturating_add(1);
+                    let delay = dm_subscription_retry_delay(failures);
+                    eprintln!(
+                        "agentnoise: darkmatter subscription closed for {group_id}; retrying in {}s",
+                        delay.as_secs()
+                    );
+                    tokio::time::sleep(delay).await;
+                    break;
+                }
+                Err(_) => {
+                    // Refresh the subscription periodically so missed relay
+                    // updates are recovered from the snapshot path.
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn dm_subscription_refresh_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn dm_subscription_retry_delay(failures: usize) -> Duration {
+    let seconds = (failures as u64).clamp(1, 30);
+    Duration::from_secs(seconds)
+}
+
 #[cfg(test)]
 fn should_send_plain_final_reply(
     stream_finalized: bool,
@@ -2245,30 +2323,12 @@ fn spawn_group_join_discovery(
                     "agentnoise: failed to persist discovered group {group_id_hex}: {error:#}"
                 );
             }
-            let dm_inner = Arc::clone(&dm);
-            let tx_inner = tx.clone();
-            let group_id_hex_inner = group_id_hex.clone();
-            tokio::spawn(async move {
-                let mut subscription = match dm_inner.subscribe_group(&group_id_hex_inner).await {
-                    Ok(subscription) => subscription,
-                    Err(error) => {
-                        eprintln!(
-                            "agentnoise: failed to subscribe to {group_id_hex_inner}: {error:#}"
-                        );
-                        return;
-                    }
-                };
-                for event in subscription.snapshot() {
-                    if tx_inner.send(event).is_err() {
-                        return;
-                    }
-                }
-                while let Some(event) = subscription.next_message().await {
-                    if tx_inner.send(event).is_err() {
-                        return;
-                    }
-                }
-            });
+            tokio::spawn(run_dm_group_subscription(
+                Arc::clone(&dm),
+                group_id_hex.clone(),
+                tx.clone(),
+                false,
+            ));
         }
     });
 }
@@ -2468,5 +2528,17 @@ mod tests {
         assert!(should_send_plain_final_reply(true, false, true));
         assert!(should_send_plain_final_reply(false, true, true));
         assert!(should_send_plain_final_reply(true, true, false));
+    }
+
+    #[test]
+    fn darkmatter_subscription_retry_delay_is_bounded() {
+        assert_eq!(dm_subscription_retry_delay(0), Duration::from_secs(1));
+        assert_eq!(dm_subscription_retry_delay(5), Duration::from_secs(5));
+        assert_eq!(dm_subscription_retry_delay(999), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn darkmatter_subscription_refreshes_before_mobile_waits_too_long() {
+        assert!(dm_subscription_refresh_interval() <= Duration::from_secs(30));
     }
 }
