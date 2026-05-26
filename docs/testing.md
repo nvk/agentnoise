@@ -1,7 +1,5 @@
 # Testing
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 agentnoise has three local test layers.
 
 Fast local checks:
@@ -22,14 +20,14 @@ Offline chat UX smoke:
 
 This uses temp state and a fake phone sender to exercise `/status`, `/rename`,
 `/cd`, `/list`, `/new`, `/resume`, and `/close` without touching your real
-White Noise identity or OS keychain. To also run one real direct Codex/frontier
+darkmatter identity or OS keychain. To also run one real direct Codex/frontier
 job through that same fake chat flow:
 
 ```sh
 AGENTNOISE_CHAT_UX_FRONTIER=1 ./scripts/test-chat-ux.sh
 ```
 
-White Noise adapter contract fixtures:
+Legacy White Noise adapter contract fixtures:
 
 ```sh
 just test-fixtures
@@ -42,7 +40,7 @@ discovery, relay type merging, and message subscription streams. These tests
 should catch upstream output-shape changes before a real phone or service is
 involved.
 
-Isolated fake-phone live roundtrip:
+Isolated darkmatter fake-phone live roundtrip:
 
 ```sh
 just test-e2e-fake
@@ -50,23 +48,16 @@ just test-e2e-fake
 ./scripts/test-e2e-fake.sh
 ```
 
-This starts agentnoise with a development burner identity, launches the
-fake-phone harness with its own `wnd` data directory and burner phone `nsec`,
-pairs through the printed SSH PIN, verifies `/status` and `/help`, then sends
-`/codex Reply with exactly: agentnoise-fake-phone-e2e-ok` and requires both the
-ack and the final job reply. It still depends on local White Noise binaries,
-relay reachability, and a working Codex profile, so it is intentionally separate
-from the offline release check.
+This starts an isolated real `agentnoise transport run` process against a local
+mock relay, creates a separate fake phone identity, has the phone create a
+darkmatter group with the desktop, verifies `/status` and `/help`, then sends a
+`/codex` prompt through an isolated worker backed by a fake local Codex binary,
+and requires the final job reply. It also checks that `runtime-events.jsonl`
+contains both inbound and successful outbound events.
 
-Run this live roundtrip once as a pre-release smoke on a workstation. Do not put
-it in a repeat loop on the primary machine. Repeated live relay runs belong on a
-spare machine, disposable macOS install, or other environment that can be
-rebooted without interrupting work.
-
-Current White Noise daemons may still use the platform keyring for account login
-after agentnoise passes a dev burner `nsec` directly. If this fails with a
-`Keyring error` or `Operation not permitted`, rerun it from an unsandboxed user
-session with access to the platform keyring/Secret Service.
+Run this live roundtrip once as a pre-release smoke on a workstation. It is
+self-contained and uses burner identities, but it still starts real local
+processes, so avoid putting it in a tight repeat loop on the primary machine.
 
 Release preflight:
 
@@ -80,8 +71,8 @@ This stays local and does not depend on hosted CI. It runs the fast checks,
 fixture contracts, the offline chat UX smoke, `cargo package --offline`, and
 formula placeholder checks.
 
-Use `release-check` as the offline gate. Add one live fake-phone job smoke after
-that before shipping changes that affect service startup, White Noise routing,
+Use `release-check` as the offline gate. Add one live fake-phone smoke after
+that before shipping changes that affect service startup, darkmatter routing,
 agent launching, job lifecycle, or reply formatting.
 
 Manual phone smoke:
@@ -89,6 +80,6 @@ Manual phone smoke:
 1. Start or attach with `agentnoise up`.
 2. Send `/status` from the real phone chat.
 3. Confirm the phone displays the reply.
-4. If the phone is silent, check `runtime-events.jsonl` and `wn messages list`
-   before restarting anything. A local `reply-sent` with no phone display is a
-   White Noise delivery/sync delay, not an agent command failure.
+4. If the phone is silent, check `runtime-events.jsonl` before restarting
+   anything. A local `reply-sent` with no phone display means the agent routed
+   and sent the reply locally; the remaining failure is delivery or app sync.

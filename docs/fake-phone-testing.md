@@ -1,87 +1,64 @@
 # Fake Phone Testing
 
-> <!-- stale-for-v2 --> **Note:** parts of this guide pre-date the v0.2.0 Marmot v2 migration. CLI flags and config sections (e.g. `[whitenoise]`, `agentnoise whitenoise *`, `wn` / `wnd`) referenced here may no longer exist. See [docs/darkmatter.md](darkmatter.md) for the current architecture, [docs/release-notes.md](release-notes.md) for what changed.
-
 `agentnoise fake-phone` is for local bring-up when you want to test the desktop
-helper without using the real phone identity.
+helper without using your real phone identity.
 
-It uses a separate `wnd` data directory, a separate socket, and a throwaway
-White Noise identity. The fake phone `nsec` lives at `fake-phone.nsec` under
-the fake-phone root. It does not read or write the normal agentnoise `nsec`,
-and it does not use the agentnoise OS keychain.
+There are two darkmatter test paths:
 
-The harness generates and reuses that burner `nsec` directly instead of asking
-White Noise to create/export a key. White Noise may still use its own platform
-secret store when the fake daemon logs that account in.
+- `fake-phone live-roundtrip` starts an isolated real `agentnoise transport run`
+  process, a local mock relay, and a separate fake phone identity. This is the
+  release smoke because it exercises group discovery, routing, replies, and the
+  runtime event journal.
+- `fake-phone roundtrip` is protocol-only. It uses one in-process `MarmotApp`
+  plus a synthetic desktop responder. It is useful for stream-envelope checks,
+  but it does not prove the real daemon can reply.
 
-Inspect the paths:
+The live harness does not touch your normal agentnoise config, identity, OS
+keychain item, or paired chats. It creates a temporary desktop config under the
+fake-phone root, uses a development burner desktop identity, creates a separate
+fake phone account, then has the phone create a darkmatter group with the
+desktop.
+
+Inspect paths:
 
 ```sh
 agentnoise fake-phone plan
 ```
 
-First-pairing test:
+Real daemon smoke:
 
 ```sh
-agentnoise up
-agentnoise fake-phone roundtrip --pin 123456 /status
-```
-
-After pairing:
-
-```sh
-agentnoise fake-phone roundtrip /help
-agentnoise fake-phone roundtrip /agents
-```
-
-Full job-path test:
-
-```sh
-agentnoise fake-phone roundtrip \
-  --timeout-seconds 180 \
+agentnoise fake-phone live-roundtrip --expect running /status
+agentnoise fake-phone live-roundtrip --expect /status /help
+agentnoise fake-phone live-roundtrip \
+  --start-worker \
   --min-replies 2 \
+  --expect "codex queued" \
+  --expect "agentnoise-darkmatter-live-ok" \
   --require-job-final \
-  --expect agentnoise-e2e-ok \
-  /codex "Reply with exactly: agentnoise-e2e-ok"
+  /codex "Reply with exactly: agentnoise-darkmatter-live-ok"
 ```
 
-On macOS over SSH, starting an isolated `wnd` can fail if the session cannot
-access the GUI user's Keychain for White Noise's database key. For that
-specific test setup, reuse an already-running GUI-authorized daemon:
+Full scripted smoke:
 
 ```sh
-agentnoise fake-phone roundtrip --shared-daemon /status
+./scripts/test-e2e-fake.sh
 ```
 
-`--shared-daemon` still uses the fake phone burner `nsec`, but it logs that
-burner account into the configured/default White Noise daemon instead of
-starting a separate daemon.
-
-The harness creates a White Noise chat with the configured desktop agentnoise
-`npub`, then resends the requested message until the first useful reply. That
-makes it usable with the normal listener discovery loop, which may need one
-cycle before subscribing to the new fake-phone chat. After the first reply, it
-does not resend the command, so long-running agent jobs are not duplicated.
-
-If the first command reaches agentnoise after the displayed PIN has rotated,
-the harness reads the live runtime PIN, sends it, and retries the original
-command. It also stores the fake-phone chat id under the fake-phone root, scoped
-to the desktop `npub`, so a follow-up `/codex` test continues in the same chat
-instead of creating a new White Noise group.
+The script runs `/status`, `/help`, and `/codex` through the live harness. For
+`/codex`, it starts an isolated worker with a fake local Codex binary, then
+requires the final job reply. It also requires the daemon to write both inbound
+and successful outbound entries to `runtime-events.jsonl`, so a phone-visible
+reply without daemon journaling is not considered a pass.
 
 Useful flags:
 
 ```sh
-agentnoise fake-phone roundtrip --timeout-seconds 120 /status
-agentnoise fake-phone roundtrip --root /tmp/agentnoise-fake-phone /help
-agentnoise fake-phone roundtrip --expect "Status: OK" /status
-agentnoise fake-phone roundtrip --require-job-final --expect done /codex "Reply exactly: done"
+agentnoise fake-phone live-roundtrip --timeout-seconds 120 /status
+agentnoise fake-phone live-roundtrip --root /tmp/agentnoise-dm-fake /help
+agentnoise fake-phone live-roundtrip --start-worker --expect "agentnoise-darkmatter-live-ok" /codex test
 ```
 
-If the command reports a timeout, check:
-
-```sh
-agentnoise status
-agentnoise doctor
-tail -f "$(brew --prefix)/var/log/agentnoise.log"
-```
+If a live roundtrip fails, the command prints the isolated transport stdout,
+stderr, and event-log paths plus excerpts. Start there before checking the real
+phone or real service.

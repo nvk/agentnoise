@@ -96,27 +96,31 @@ A symlink `../darkmatter` → `/Users/jeff/code/darkmatter` is created per workt
 | 3     | Listener swap                                            | ✅ done |
 | 4     | `send_message` + agent text streams wired through `runner.rs`'s progress callback | ✅ done — `AgentTextStream::start_blocking` publishes the stream start, opens the brokered-QUIC publisher, progress chunks go to the broker, and `finish_blocking` publishes the final Marmot payload with the darkmatter transcript hash + chunk count |
 | 5     | Delete v1 modules + CLI cleanup                          | ✅ done |
-| 6     | Fake-phone harness rewrite                               | ✅ done — in-process `MockRelay` + single `MarmotApp` with two managed accounts (`desktop` + `phone`); validated locally with `/help` and `/codex echo` both passing `--require-job-final` |
+| 6     | Fake-phone harness rewrite                               | ✅ done — `live-roundtrip` starts a real isolated `agentnoise transport run` against `MockRelay`, creates a separate phone identity, and verifies reply delivery plus inbound/outbound journaling |
 | 7     | Docs + 0.2.0 release wiring                              | ✅ done |
 | —     | **`MarmotAppEvent::GroupJoined` auto-discovery**         | ✅ done — phone-initiated groups auto-register and persist to config |
 
 ## How to validate locally
 
 ```bash
-# Simple reply roundtrip
-agentnoise fake-phone roundtrip --timeout-seconds 30 --require-job-final "/help"
+# Real daemon roundtrip
+agentnoise fake-phone live-roundtrip --timeout-seconds 90 --expect running /status
 
-# Stream lifecycle assertion (asserts both expectations matched + AgentStreamFinalized seen)
-agentnoise fake-phone roundtrip \
-  --timeout-seconds 30 --require-job-final \
-  --expect "codex queued" --expect "completed" \
-  "/codex echo hello"
+# Queue plus worker final reply with fake local Codex
+agentnoise fake-phone live-roundtrip \
+  --timeout-seconds 90 \
+  --start-worker \
+  --min-replies 2 \
+  --expect "codex queued" \
+  --expect "agentnoise-darkmatter-live-ok" \
+  --require-job-final \
+  /codex "Reply with exactly: agentnoise-darkmatter-live-ok"
 
 # Confirm the embedded engine bootstraps cleanly
 agentnoise darkmatter probe --relay wss://relay.primal.net
 ```
 
-The fake-phone harness spins up an in-process Nostr relay (`nostr_relay_builder::MockRelay`), builds a single `MarmotApp` with two managed accounts, has the phone create a group with the desktop, and asserts the round-trip flow including agent text stream start/finalize envelopes.
+The live fake-phone harness spins up an in-process Nostr relay (`nostr_relay_builder::MockRelay`), creates an isolated desktop config and a separate fake phone account, starts the real transport process, has the phone create a group with the desktop, and asserts that the phone receives a real daemon reply while the daemon records both inbound and outbound journal entries.
 
 ## Named instances and keychain isolation
 

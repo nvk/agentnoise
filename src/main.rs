@@ -396,7 +396,7 @@ enum FakePhoneCommand {
         #[arg(long)]
         json: bool,
     },
-    #[command(about = "Create a fake phone identity, chat, and send a test message")]
+    #[command(about = "Protocol-only fake phone roundtrip with an in-process responder")]
     Roundtrip {
         #[arg(long)]
         root: Option<PathBuf>,
@@ -415,6 +415,28 @@ enum FakePhoneCommand {
         min_replies: usize,
         #[arg(long, help = "Require a final job reply, not only the initial ack")]
         require_job_final: bool,
+        #[arg(required = true, trailing_var_arg = true)]
+        message: Vec<String>,
+    },
+    #[command(about = "Start a real isolated transport and test it from a fake phone")]
+    LiveRoundtrip {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "agentnoise live fake phone")]
+        group_name: String,
+        #[arg(long, default_value_t = 90)]
+        timeout_seconds: u64,
+        #[arg(
+            long,
+            help = "Text that must appear in at least one observed reply; repeatable"
+        )]
+        expect: Vec<String>,
+        #[arg(long, default_value_t = 1)]
+        min_replies: usize,
+        #[arg(long, help = "Require a final job reply, not only the initial ack")]
+        require_job_final: bool,
+        #[arg(long, help = "Start an isolated worker with a fake Codex binary")]
+        start_worker: bool,
         #[arg(required = true, trailing_var_arg = true)]
         message: Vec<String>,
     },
@@ -1286,6 +1308,71 @@ fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
                 "job final: {}",
                 if result.saw_job_final { "yes" } else { "no" }
             );
+            if !result.matched.is_empty() {
+                println!("matched:");
+                for matched in result.matched {
+                    println!("- {matched}");
+                }
+            }
+            if result.replies.is_empty() {
+                println!("replies: none before timeout");
+            } else {
+                println!("replies:");
+                for reply in result.replies {
+                    println!("- {reply}");
+                }
+            }
+        }
+        FakePhoneCommand::LiveRoundtrip {
+            root,
+            group_name,
+            timeout_seconds,
+            expect,
+            min_replies,
+            require_job_final,
+            start_worker,
+            message,
+        } => {
+            let message = message.join(" ");
+            if message.trim().is_empty() {
+                bail!("message cannot be empty");
+            }
+            let root = root.unwrap_or_else(|| config.resolved_data_dir().join("fake-phone-live"));
+            let result = agentnoise::fake_phone::live_roundtrip(
+                &config,
+                agentnoise::fake_phone::LiveFakePhoneRoundtrip {
+                    root,
+                    message,
+                    group_name,
+                    timeout: Duration::from_secs(timeout_seconds.max(1)),
+                    expect,
+                    min_replies,
+                    require_job_final,
+                    start_worker,
+                },
+            )?;
+            println!("desktop npub: {}", result.desktop_npub);
+            println!("fake phone npub: {}", result.phone_npub);
+            println!("relay: {}", result.relay_url);
+            println!("group: {}", result.group_id);
+            println!(
+                "journal: inbound={} outbound={}",
+                result.saw_inbound_journal, result.saw_outbound_journal
+            );
+            println!(
+                "job final: {}",
+                if result.saw_job_final { "yes" } else { "no" }
+            );
+            println!("logs:");
+            println!("- stdout: {}", result.transport_stdout.display());
+            println!("- stderr: {}", result.transport_stderr.display());
+            if let Some(stdout) = &result.worker_stdout {
+                println!("- worker stdout: {}", stdout.display());
+            }
+            if let Some(stderr) = &result.worker_stderr {
+                println!("- worker stderr: {}", stderr.display());
+            }
+            println!("- events: {}", result.event_log.display());
             if !result.matched.is_empty() {
                 println!("matched:");
                 for matched in result.matched {

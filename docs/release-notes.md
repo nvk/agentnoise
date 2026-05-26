@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added a Dark Matter `fake-phone live-roundtrip` harness that starts the real
+  isolated transport against a local mock relay, drives it from a separate fake
+  phone identity, can run an isolated fake-Codex worker, and requires both
+  phone-visible replies and inbound/outbound event-journal entries.
 - Dark Matter group subscriptions now refresh periodically and resubscribe
   after stream closure, using snapshot catch-up plus the event journal to
   recover phone messages that arrived while relay delivery was stale.

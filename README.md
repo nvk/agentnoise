@@ -615,30 +615,30 @@ workspaces. Removal requires the explicit `confirm` word.
 
 ## Fake Phone Testing
 
-`agentnoise fake-phone` starts from a separate White Noise daemon data
-directory, keeps a throwaway phone `nsec` in the fake-phone test root, creates
-a chat with the desktop agentnoise identity, and sends test messages without
+`agentnoise fake-phone live-roundtrip` starts an isolated real darkmatter
+transport against a local mock relay, creates a separate fake phone identity,
+has that phone create a group with the desktop, and sends test messages without
 touching the real phone identity or the normal agentnoise keychain.
 
 ```sh
 agentnoise fake-phone plan
-agentnoise fake-phone roundtrip --pin 123456 /status
-agentnoise fake-phone roundtrip /help
-agentnoise fake-phone roundtrip \
-  --timeout-seconds 180 \
+agentnoise fake-phone live-roundtrip --expect running /status
+agentnoise fake-phone live-roundtrip --expect /status /help
+agentnoise fake-phone live-roundtrip \
+  --start-worker \
   --min-replies 2 \
+  --expect "codex queued" \
+  --expect "agentnoise-darkmatter-live-ok" \
   --require-job-final \
-  --expect agentnoise-e2e-ok \
-  /codex "Reply with exactly: agentnoise-e2e-ok"
+  /codex "Reply with exactly: agentnoise-darkmatter-live-ok"
 ```
 
-For first-pairing tests, pass the current desktop PIN. After pairing, omit
-`--pin`. The harness resends the test message for the timeout window because a
-running agentnoise service may need one discovery cycle before subscribing to
-the newly-created chat. With `--expect`, unrelated replies such as startup
-hellos or auth errors do not stop resends. Use `--require-job-final` for
-`/codex`, `/claude`, or `/hermes` tests; otherwise the first ack would be
-enough to pass.
+The scripted smoke is `./scripts/test-e2e-fake.sh`. It runs `/status`, `/help`,
+and a `/codex` worker-final path through the real transport and worker, then
+requires both inbound and successful outbound entries in `runtime-events.jsonl`. The older
+`agentnoise fake-phone roundtrip` command is protocol-only and uses a synthetic
+in-process responder; keep it for stream-envelope checks, not daemon release
+confidence.
 
 ## Screenshots
 
@@ -651,17 +651,10 @@ before using a real phone or terminal capture.
 
 ## Transport Notes
 
-The default White Noise transport remains the tested `wn` CLI path. Setting
-`whitenoise.socket` points `wn` at a specific `wnd` daemon socket. The
-experimental direct socket adapter is exposed as a probe only:
-
-```sh
-agentnoise whitenoise socket-probe --method ping
-```
-
-This keeps production message send/subscribe behavior on the stable upstream
-CLI while giving us a tested JSON-line Unix socket client for future direct
-`wnd` work.
+The darkmatter branch embeds Marmot v2 directly. `agentnoise transport run`
+owns the message subscription and job queue; `agentnoise worker start` consumes
+queued agent jobs. Use `agentnoise fake-phone live-roundtrip` before release
+when routing, service startup, or reply delivery changes.
 
 ### Local Agent Session Visibility
 
