@@ -1386,10 +1386,19 @@ fn run_listener(
     let account_id_hex = tokio_handle
         .block_on(engine.ensure_account(config.darkmatter.account.as_deref(), &bootstrap_relays))?;
     eprintln!("agentnoise: darkmatter account ready: {account_id_hex}");
-    if let Err(error) = tokio_handle
-        .block_on(engine.publish_configured_profile(&account_id_hex, &config.darkmatter))
-    {
-        eprintln!("agentnoise: failed to publish darkmatter profile: {error:#}");
+    match tokio_handle.block_on(tokio::time::timeout(
+        Duration::from_secs(30),
+        engine.publish_discovery(&account_id_hex, &config.darkmatter),
+    )) {
+        Ok(Ok(())) => {
+            eprintln!("agentnoise: darkmatter discovery broadcast complete");
+        }
+        Ok(Err(error)) => {
+            eprintln!("agentnoise: darkmatter discovery broadcast failed: {error:#}");
+        }
+        Err(_) => {
+            eprintln!("agentnoise: darkmatter discovery broadcast timed out; continuing");
+        }
     }
 
     if let Some(pairing_runtime) = pairing.clone() {

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use nostr::PublicKey;
@@ -148,9 +149,22 @@ fn ensure_engine_identity(
             None => false,
         };
         let account_id_hex = engine.ensure_account(configured, &bootstrap_relays).await?;
-        engine
-            .publish_configured_profile(&account_id_hex, &profile_config)
-            .await?;
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.publish_discovery(&account_id_hex, &profile_config),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                eprintln!("agentnoise: darkmatter discovery broadcast complete");
+            }
+            Ok(Err(error)) => {
+                eprintln!("agentnoise: darkmatter discovery broadcast failed: {error:#}");
+            }
+            Err(_) => {
+                eprintln!("agentnoise: darkmatter discovery broadcast timed out; continuing");
+            }
+        }
         engine.shutdown().await;
         let pk = PublicKey::from_hex(&account_id_hex).context("decoding account_id_hex")?;
         let npub = pk.to_bech32().context("encoding npub bech32")?;

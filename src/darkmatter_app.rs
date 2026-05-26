@@ -13,8 +13,7 @@ use anyhow::{Context, Result, bail};
 use cgka_traits::TransportEndpoint;
 use marmot_account::AccountHome;
 use marmot_app::{
-    AccountRelayListBootstrap, AccountSetupRequest, AccountSetupResult, ManagedAccount, MarmotApp,
-    MarmotAppRuntime, UserProfileMetadata,
+    AccountRelayListBootstrap, ManagedAccount, MarmotApp, MarmotAppRuntime, UserProfileMetadata,
 };
 use nostr::PublicKey;
 use nostr::nips::nip19::FromBech32;
@@ -59,6 +58,7 @@ pub fn keychain_service_for_instance(instance: Option<&str>) -> String {
 pub struct DarkmatterEngine {
     app: MarmotApp,
     runtime: MarmotAppRuntime,
+    account_home: AccountHome,
     home: PathBuf,
 }
 
@@ -76,9 +76,14 @@ impl DarkmatterEngine {
         }
         let account_home = AccountHome::open_with_keychain(&home, keychain_service)
             .map_err(|err| anyhow::anyhow!("opening keychain-backed AccountHome: {err}"))?;
-        let app = MarmotApp::with_relays_and_account_home(&home, relays, account_home);
+        let app = MarmotApp::with_relays_and_account_home(&home, relays, account_home.clone());
         let runtime = MarmotAppRuntime::new(app.clone());
-        Ok(Self { app, runtime, home })
+        Ok(Self {
+            app,
+            runtime,
+            account_home,
+            home,
+        })
     }
 
     pub fn home(&self) -> &PathBuf {
@@ -127,11 +132,10 @@ impl DarkmatterEngine {
     /// `configured` is the previously-persisted account reference (npub or hex)
     /// from `config.darkmatter.account`, if any. When it resolves to an
     /// existing account the account is reused unchanged. Otherwise a fresh
-    /// keypair is generated via [`MarmotAppRuntime::create_identity`], persisted
-    /// to the OS keychain via [`marmot_account::KeychainSecretStore`], and its
-    /// key package + relay lists are published. Existing accounts also
-    /// republish their cached/fresh key package on startup so old local state
-    /// is repaired after Darkmatter KeyPackage format changes.
+    /// keypair is generated locally through [`marmot_account::AccountHome`] and
+    /// persisted to the configured secret store. Discovery material is
+    /// published separately by [`Self::publish_discovery`] so relay failures do
+    /// not roll back a usable local identity.
     ///
     /// (Looking up by the persisted reference — rather than a constant friendly
     /// label — is what makes the identity stable across `setup`→`listen` and
@@ -144,35 +148,46 @@ impl DarkmatterEngine {
         if let Some(reference) = configured.map(str::trim).filter(|r| !r.is_empty())
             && let Some(account) = self.find_account(reference)?
         {
-            if !relays.is_empty() {
-                self.sync_configured_relay_lists(&account.account_id_hex, relays)
-                    .await?;
-            }
-            self.runtime
-                .publish_key_package(&account.account_id_hex)
-                .await
-                .map_err(|err| anyhow::anyhow!("darkmatter publish_key_package: {err}"))?;
             return Ok(account.account_id_hex);
         }
         if relays.is_empty() {
             bail!("ensure_account requires at least one relay url");
         }
-        let setup_relays = relay_endpoints(relays);
-        let request = AccountSetupRequest {
-            identity: None,
-            default_relays: setup_relays.clone(),
-            bootstrap_relays: setup_relays,
-            publish_missing_relay_lists: true,
-            publish_initial_key_package: true,
-        };
-        let result: AccountSetupResult = self
-            .runtime
-            .create_identity(request)
+        if let Some(account) = self
+            .account_home
+            .accounts()
+            .context("listing local darkmatter accounts")?
+            .into_iter()
+            .find(|account| account.local_signing)
+        {
+            return Ok(account.account_id_hex);
+        }
+        let account = self
+            .account_home
+            .create_nostr_account()
+            .context("creating local darkmatter account")?;
+        self.runtime
+            .restart_account(&account.account_id_hex)
             .await
-            .map_err(|err| anyhow::anyhow!("darkmatter create_identity: {err}"))?;
-        self.sync_configured_relay_lists(&result.account.account_id_hex, relays)
+            .with_context(|| format!("starting darkmatter account {}", account.account_id_hex))?;
+        Ok(account.account_id_hex)
+    }
+
+    /// Publish the discovery records clients need to find and invite this
+    /// desktop. This is retryable network work, intentionally kept separate
+    /// from local account creation.
+    pub async fn publish_discovery(
+        &self,
+        account_id_hex: &str,
+        config: &DarkmatterConfig,
+    ) -> Result<()> {
+        self.publish_configured_profile(account_id_hex, config)
             .await?;
-        Ok(result.account.account_id_hex)
+        self.runtime
+            .publish_key_package(account_id_hex)
+            .await
+            .map_err(|err| anyhow::anyhow!("darkmatter publish_key_package: {err}"))?;
+        Ok(())
     }
 
     /// Keep the account's public relay-list records aligned with
@@ -330,33 +345,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_account_repairs_existing_account_without_key_package() {
+    async fn publish_discovery_repairs_existing_account_without_key_package() {
         let relay = MockRelay::run().await.expect("mock relay");
         let relay_url = relay.url().await.to_string();
         let relays = vec![relay_url.clone()];
         let endpoints = vec![TransportEndpoint(relay_url)];
         let home = tempfile::tempdir().expect("temp darkmatter home");
-        let app = MarmotApp::with_relays(home.path(), relays.clone());
+        let account_home = AccountHome::open(home.path());
+        let app = MarmotApp::with_relays_and_account_home(
+            home.path(),
+            relays.clone(),
+            account_home.clone(),
+        );
         let runtime = MarmotAppRuntime::new(app.clone());
         runtime.start().await.expect("runtime starts");
         let engine = DarkmatterEngine {
             app,
             runtime,
+            account_home,
             home: home.path().to_path_buf(),
         };
 
-        let created = engine
+        let account = engine
+            .account_home
+            .create_nostr_account()
+            .expect("create local signing account");
+        let account_id_hex = account.account_id_hex;
+        engine
             .runtime
-            .create_identity(AccountSetupRequest {
-                identity: None,
-                default_relays: endpoints.clone(),
-                bootstrap_relays: endpoints.clone(),
-                publish_missing_relay_lists: true,
-                publish_initial_key_package: false,
-            })
+            .restart_account(&account_id_hex)
             .await
-            .expect("create identity without key package");
-        let account_id_hex = created.account.account_id_hex;
+            .expect("start local account");
 
         let before = engine
             .runtime
@@ -370,6 +389,13 @@ mod tests {
             .await
             .expect("ensure existing account");
         assert_eq!(ensured, account_id_hex);
+
+        let mut config = crate::config::Config::template().darkmatter;
+        config.message_relays = relays.clone();
+        engine
+            .publish_discovery(&account_id_hex, &config)
+            .await
+            .expect("publish missing discovery");
 
         let after = engine
             .runtime
