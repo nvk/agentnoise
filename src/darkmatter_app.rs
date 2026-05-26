@@ -129,7 +129,9 @@ impl DarkmatterEngine {
     /// existing account the account is reused unchanged. Otherwise a fresh
     /// keypair is generated via [`MarmotAppRuntime::create_identity`], persisted
     /// to the OS keychain via [`marmot_account::KeychainSecretStore`], and its
-    /// key package + relay lists are published once.
+    /// key package + relay lists are published. Existing accounts also
+    /// republish their cached/fresh key package on startup so old local state
+    /// is repaired after Darkmatter KeyPackage format changes.
     ///
     /// (Looking up by the persisted reference — rather than a constant friendly
     /// label — is what makes the identity stable across `setup`→`listen` and
@@ -146,6 +148,10 @@ impl DarkmatterEngine {
                 self.sync_configured_relay_lists(&account.account_id_hex, relays)
                     .await?;
             }
+            self.runtime
+                .publish_key_package(&account.account_id_hex)
+                .await
+                .map_err(|err| anyhow::anyhow!("darkmatter publish_key_package: {err}"))?;
             return Ok(account.account_id_hex);
         }
         if relays.is_empty() {
@@ -279,8 +285,11 @@ fn current_unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cgka_traits::TransportEndpoint;
+    use marmot_app::MarmotAppRuntime;
     use nostr::Keys;
     use nostr::nips::nip19::ToBech32;
+    use nostr_relay_builder::MockRelay;
 
     #[test]
     fn account_lookup_ref_normalizes_npub_to_hex() {
@@ -318,5 +327,59 @@ mod tests {
         assert_eq!(profile.about.as_deref(), Some("Local helper"));
         assert_eq!(profile.created_at, 123);
         assert!(profile.source_relays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_account_repairs_existing_account_without_key_package() {
+        let relay = MockRelay::run().await.expect("mock relay");
+        let relay_url = relay.url().await.to_string();
+        let relays = vec![relay_url.clone()];
+        let endpoints = vec![TransportEndpoint(relay_url)];
+        let home = tempfile::tempdir().expect("temp darkmatter home");
+        let app = MarmotApp::with_relays(home.path(), relays.clone());
+        let runtime = MarmotAppRuntime::new(app.clone());
+        runtime.start().await.expect("runtime starts");
+        let engine = DarkmatterEngine {
+            app,
+            runtime,
+            home: home.path().to_path_buf(),
+        };
+
+        let created = engine
+            .runtime
+            .create_identity(AccountSetupRequest {
+                identity: None,
+                default_relays: endpoints.clone(),
+                bootstrap_relays: endpoints.clone(),
+                publish_missing_relay_lists: true,
+                publish_initial_key_package: false,
+            })
+            .await
+            .expect("create identity without key package");
+        let account_id_hex = created.account.account_id_hex;
+
+        let before = engine
+            .runtime
+            .account_key_packages(&account_id_hex, endpoints.clone())
+            .await
+            .expect("list key packages before repair");
+        assert!(before.is_empty());
+
+        let ensured = engine
+            .ensure_account(Some(&account_id_hex), &relays)
+            .await
+            .expect("ensure existing account");
+        assert_eq!(ensured, account_id_hex);
+
+        let after = engine
+            .runtime
+            .account_key_packages(&account_id_hex, endpoints)
+            .await
+            .expect("list key packages after repair");
+        assert_eq!(after.len(), 1);
+        assert!(!after[0].key_package_event_id.is_empty());
+        assert!(!after[0].key_package_ref_hex.is_empty());
+
+        engine.shutdown().await;
     }
 }

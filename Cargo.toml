@@ -32,11 +32,11 @@ zeroize = "1.8.2"
 
 # Darkmatter (v2 Marmot) protocol stack. Pinned by git rev so agentnoise builds
 # from a clean checkout without a sibling darkmatter repo.
-marmot-app = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "53928f9f3d0b1ab375e72f8e6c6dbc72fed41013" }
-marmot-account = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "53928f9f3d0b1ab375e72f8e6c6dbc72fed41013" }
-cgka-traits = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "53928f9f3d0b1ab375e72f8e6c6dbc72fed41013" }
-transport-quic-broker = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "53928f9f3d0b1ab375e72f8e6c6dbc72fed41013" }
-transport-quic-stream = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "53928f9f3d0b1ab375e72f8e6c6dbc72fed41013" }
+marmot-app = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "1528f6dd5868a65fe7fa4d4af7cb213f63186803" }
+marmot-account = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "1528f6dd5868a65fe7fa4d4af7cb213f63186803" }
+cgka-traits = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "1528f6dd5868a65fe7fa4d4af7cb213f63186803" }
+transport-quic-broker = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "1528f6dd5868a65fe7fa4d4af7cb213f63186803" }
+transport-quic-stream = { version = "0.1.0", git = "https://github.com/marmot-protocol/darkmatter.git", rev = "1528f6dd5868a65fe7fa4d4af7cb213f63186803" }
 # In-process Nostr relay used by `agentnoise fake-phone roundtrip` to drive a
 # fully-local dual-runtime smoke test without external infrastructure.
 nostr-relay-builder = "0.44"
