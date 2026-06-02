@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.30 - 2026-06-02
+
+- Extended White Noise media ingest beyond images to the full current chat-media
+  allowlist: JPEG/PNG/GIF/WebP, MP4/WebM/MOV, MP3/OGG/M4A/WAV, and PDF.
+  Supported media is copied into `.agentnoise/attachments/` inside the active
+  workspace, included in captioned agent prompts and `/wiki` file-ingestion
+  context, and referenced workspace media can be uploaded back to chat.
+
 ## 0.1.29 - 2026-06-02
 
 - Made first-run White Noise discovery publishing local-first: setup now keeps

@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.30** - **Full White Noise media ingest.** agentnoise now auto-ingests
+the White Noise chat-media allowlist into the active workspace: JPEG/PNG/GIF/WebP,
+MP4/WebM/MOV, MP3/OGG/M4A/WAV, and PDF. Captioned prompts and `/wiki` runs get
+local file paths for all supported media, and agent replies can upload referenced
+supported media files from the workspace back to chat.
+
 **v0.1.29** - **Media ingest and fake-phone TUI.** Phone-sent picture
 attachments are saved into the active workspace, captioned prompts include the
 image paths automatically, `/wiki` image prompts use the LLM Wiki ingest
@@ -708,20 +714,22 @@ GUI-backed sync folders. `agentnoise doctor` warns about this; run
 `agentnoise up` from an interactive terminal if you must use an iCloud
 workspace.
 
-Images sent by the phone are accepted automatically. agentnoise saves the
-attachment metadata, calls `wn media download` when White Noise exposes a media
-file hash, copies downloaded pictures into
+White Noise media sent by the phone is accepted automatically. agentnoise saves
+the attachment metadata, calls `wn media download` when White Noise exposes a
+media file hash, copies downloaded supported media into
 `.agentnoise/attachments/<attachment-id>/` under the chat's selected
 repo/worktree, and adds those local file paths to the agent prompt when the
-image arrives with a caption or work-chat follow-up. That workspace-local
-default is readable by the default `bondage`/nono agent profiles because it sits
-inside the same workdir passed to the agent. `/wiki` image prompts are framed
-for the LLM Wiki file-ingestion workflow so the wiki can create raw metadata
-stubs before continuing the requested wiki task. `/attachments` and `/attach
-<id>` show saved metadata and local paths; `/download <id>` remains available
-for manual retrieval. When a completed agent job references an image file it
-created in the selected repo/worktree, agentnoise sends that picture back
-through White Noise media upload automatically.
+media arrives with a caption or work-chat follow-up. The supported chat-media
+set mirrors White Noise: JPEG/PNG/GIF/WebP images, MP4/WebM/MOV video,
+MP3/OGG/M4A/WAV audio, and PDF. That workspace-local default is readable by the
+default `bondage`/nono agent profiles because it sits inside the same workdir
+passed to the agent. `/wiki` media prompts are framed for the LLM Wiki
+file-ingestion workflow so the wiki can create raw metadata stubs before
+continuing the requested wiki task. `/attachments` and `/attach <id>` show saved
+metadata and local paths; `/download <id>` remains available for manual
+retrieval. When a completed agent job references a supported media file it
+created in the selected repo/worktree, agentnoise sends that file back through
+White Noise media upload automatically.
 
 Git worktrees are opt-in per chat. `/worktree new fix-ui` creates a git
 worktree under the configured `runner.worktree_dir`, switches only that chat to
@@ -753,7 +761,7 @@ Homebrew installs. It opens a human-driven terminal fake phone with the same
 burner identity/root as `roundtrip`: type `/status`, `/help`, `/wiki ...`, or
 plain text to send to the active chat. Local TUI commands start with `:` so
 they do not collide with agentnoise slash commands: `:attach <path> [caption]`
-sends a picture/file through White Noise media, `:chats` lists followed chats,
+sends a supported media file through White Noise media, `:chats` lists followed chats,
 `:use <number|group-prefix>` switches chats, and `:quit` exits. The TUI
 auto-follows `whitenoise://chat/<group>` job handoff links unless
 `--no-follow-handoffs` is set.

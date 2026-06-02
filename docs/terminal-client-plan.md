@@ -73,7 +73,7 @@ Reuse existing code before adding new transport logic:
 - `src/fake_phone.rs`: burner identity root, separate data directory, isolated
   fake-phone account flow, handoff link following.
 - `src/text.rs`: phone-readable message cleanup rules.
-- `src/attachments.rs`: media metadata and future upload/download display.
+- `src/attachments.rs`: supported White Noise media metadata, ingest, upload, and download display.
 - `src/wnd_socket.rs`: direct daemon health checks.
 - `src/config.rs`: paths, relays, identity, and workspace conventions.
 - `tests/fixtures/wn/*`: upstream JSON contract fixtures.

@@ -1693,7 +1693,7 @@ fn run_queued_job(
             }
             send_reply_recorded(&wn, &event_journal, &group_id, &reply)
                 .context("sending queued job reply")?;
-            upload_referenced_job_images(&app, &wn, &event_journal, &group_id, &request, &record);
+            upload_referenced_job_media(&app, &wn, &event_journal, &group_id, &request, &record);
         }
         Err(error) => {
             let text = format!("Error: job failed to start: {error:#}");
@@ -2817,7 +2817,7 @@ fn run_inline_job(
             eprintln!("agentnoise: failed to send job reply: {error:#}");
         }
         if let Ok(record) = result {
-            upload_referenced_job_images(
+            upload_referenced_job_media(
                 &app,
                 &wn,
                 &event_journal,
@@ -2873,7 +2873,7 @@ impl AttachmentIngestResult {
             return None;
         }
         Some(format!(
-            "Attached images ingested by agentnoise:\n{}\nUse these local file paths when inspecting the images.",
+            "Attached White Noise media ingested by agentnoise:\n{}\nUse these local file paths when inspecting the attached media.",
             self.prompt_lines.join("\n")
         ))
     }
@@ -2883,7 +2883,7 @@ impl AttachmentIngestResult {
             return None;
         }
         Some(format!(
-            "Attached images for the LLM Wiki ingest pipeline:\n{}\nUse the wiki File Ingestion workflow for images: create immutable raw metadata stubs for these local file sources, include the file paths and any visible-content description/provenance, then continue with the user's wiki request.",
+            "Attached White Noise media for the LLM Wiki ingest pipeline:\n{}\nUse the wiki File Ingestion workflow for media/files: create immutable raw metadata stubs for these local file sources, include file paths plus visible-content or file-metadata descriptions/provenance, then continue with the user's wiki request.",
             self.prompt_lines.join("\n")
         ))
     }
@@ -2903,15 +2903,16 @@ fn ingest_wn_attachments(
     );
 
     for (index, attachment) in record.attachments.iter().enumerate() {
-        if !attachments::is_picture_attachment(attachment) {
+        let Some(media_kind) = attachments::supported_media_kind(attachment) else {
             continue;
-        }
+        };
+        let media_label = media_kind.label();
 
         let display_name = attachment
             .name
             .as_deref()
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("image");
+            .unwrap_or(media_label);
 
         if let Some(local_path) = attachment
             .local_path
@@ -2931,16 +2932,17 @@ fn ingest_wn_attachments(
                         attachment,
                         source_path,
                         display_name,
+                        media_label,
                     },
                     &mut result,
                 );
                 continue;
             }
             result.reply_lines.push(format!(
-                "image saved but local copy failed for {display_name}: source path is not a file: {local_path}"
+                "{media_label} saved but local copy failed for {display_name}: source path is not a file: {local_path}"
             ));
             result.prompt_lines.push(format!(
-                "- {display_name}: metadata saved as {}, but source path was not readable: {local_path}",
+                "- {media_label} {display_name}: metadata saved as {}, but source path was not readable: {local_path}",
                 record.id
             ));
             if !attachments::is_downloadable_media(attachment) {
@@ -2955,10 +2957,10 @@ fn ingest_wn_attachments(
             .filter(|hash| !hash.is_empty())
         else {
             result.reply_lines.push(format!(
-                "image saved but not downloaded: {display_name} has no White Noise media hash"
+                "{media_label} saved but not downloaded: {display_name} has no White Noise media hash"
             ));
             result.prompt_lines.push(format!(
-                "- {display_name}: metadata saved as {}, but no downloadable media hash was present",
+                "- {media_label} {display_name}: metadata saved as {}, but no downloadable media hash was present",
                 record.id
             ));
             continue;
@@ -2968,10 +2970,10 @@ fn ingest_wn_attachments(
             Ok(media) => {
                 let Some(source_path) = media.file_path.as_deref() else {
                     result.reply_lines.push(format!(
-                        "image saved but not downloaded: White Noise did not return a local path for {display_name}"
+                        "{media_label} saved but not downloaded: White Noise did not return a local path for {display_name}"
                     ));
                     result.prompt_lines.push(format!(
-                        "- {display_name}: metadata saved as {}, but White Noise did not return a local path",
+                        "- {media_label} {display_name}: metadata saved as {}, but White Noise did not return a local path",
                         record.id
                     ));
                     continue;
@@ -2986,16 +2988,17 @@ fn ingest_wn_attachments(
                         attachment,
                         source_path,
                         display_name,
+                        media_label,
                     },
                     &mut result,
                 );
             }
             Err(error) => {
                 result.reply_lines.push(format!(
-                    "image saved but download failed for {display_name}: {error:#}"
+                    "{media_label} saved but download failed for {display_name}: {error:#}"
                 ));
                 result.prompt_lines.push(format!(
-                    "- {display_name}: metadata saved as {}, but download failed: {error:#}",
+                    "- {media_label} {display_name}: metadata saved as {}, but download failed: {error:#}",
                     record.id
                 ));
             }
@@ -3013,6 +3016,7 @@ struct IngestCopyTarget<'a> {
     attachment: &'a attachments::AttachmentInfo,
     source_path: &'a Path,
     display_name: &'a str,
+    media_label: &'a str,
 }
 
 fn copy_ingested_attachment(
@@ -3038,26 +3042,36 @@ fn copy_ingested_attachment(
                 eprintln!("agentnoise: failed to update attachment store: {error:#}");
             }
             result.reply_lines.push(format!(
-                "image ingested: {} -> {} ({size} bytes)",
+                "media ingested: {} {} -> {} ({size} bytes)",
+                target.media_label,
                 target.display_name,
                 output_path.display()
             ));
             result.prompt_lines.push(format!(
                 "- {}: {} ({size} bytes)",
-                target.display_name,
+                prompt_media_name(target.media_label, target.display_name),
                 output_path.display()
             ));
         }
         Err(error) => {
             result.reply_lines.push(format!(
-                "image saved but local copy failed for {}: {error:#}",
-                target.display_name
+                "{} saved but local copy failed for {}: {error:#}",
+                target.media_label, target.display_name
             ));
             result.prompt_lines.push(format!(
                 "- {}: metadata saved as {}, but local copy failed: {error:#}",
-                target.display_name, target.record_id
+                prompt_media_name(target.media_label, target.display_name),
+                target.record_id
             ));
         }
+    }
+}
+
+fn prompt_media_name(media_label: &str, display_name: &str) -> String {
+    if display_name.eq_ignore_ascii_case(media_label) {
+        display_name.to_string()
+    } else {
+        format!("{media_label} {display_name}")
     }
 }
 
@@ -3092,7 +3106,7 @@ fn looks_like_wiki_agent_prompt(prompt: &str) -> bool {
         || prompt.starts_with("wiki ")
 }
 
-fn upload_referenced_job_images(
+fn upload_referenced_job_media(
     app: &AgentApp,
     wn: &WnClient,
     event_journal: &Arc<Mutex<EventJournal>>,
@@ -3111,7 +3125,7 @@ fn upload_referenced_job_images(
     else {
         return;
     };
-    for path in referenced_image_paths(summary, app.config(), request)
+    for path in referenced_media_paths(summary, app.config(), request)
         .into_iter()
         .take(4)
     {
@@ -3122,7 +3136,7 @@ fn upload_referenced_job_images(
         let caption = format!("agent output: {file_name}");
         if let Err(error) = wn.upload_media_to(group_id, &path, Some(&caption)) {
             eprintln!(
-                "agentnoise: failed to upload referenced image {}: {error:#}",
+                "agentnoise: failed to upload referenced media {}: {error:#}",
                 path.display()
             );
             try_send_reply_recorded(
@@ -3130,7 +3144,7 @@ fn upload_referenced_job_images(
                 event_journal,
                 group_id,
                 &format!(
-                    "Warning: failed to send image {}: {error:#}",
+                    "Warning: failed to send media {}: {error:#}",
                     path.display()
                 ),
             );
@@ -3138,7 +3152,7 @@ fn upload_referenced_job_images(
     }
 }
 
-fn referenced_image_paths(text: &str, config: &Config, request: &AgentRequest) -> Vec<PathBuf> {
+fn referenced_media_paths(text: &str, config: &Config, request: &AgentRequest) -> Vec<PathBuf> {
     let Some((root, workdir)) = request_workspace_paths(config, request) else {
         return Vec::new();
     };
@@ -3146,7 +3160,7 @@ fn referenced_image_paths(text: &str, config: &Config, request: &AgentRequest) -
     let workdir = workdir.canonicalize().unwrap_or(workdir);
     let mut output = Vec::new();
     let mut seen = HashSet::new();
-    for candidate in image_path_candidates(text) {
+    for candidate in media_path_candidates(text) {
         let candidate_path = Path::new(&candidate);
         let path = if candidate_path.is_absolute() {
             candidate_path.to_path_buf()
@@ -3162,7 +3176,7 @@ fn referenced_image_paths(text: &str, config: &Config, request: &AgentRequest) -
         if is_agentnoise_attachment_path(&path) {
             continue;
         }
-        if !attachments::has_image_extension(&path.display().to_string()) {
+        if !attachments::has_supported_media_extension(&path.display().to_string()) {
             continue;
         }
         let key = path.display().to_string();
@@ -3197,7 +3211,7 @@ fn request_workspace_paths(config: &Config, request: &AgentRequest) -> Option<(P
     Some((root, workdir))
 }
 
-fn image_path_candidates(text: &str) -> Vec<String> {
+fn media_path_candidates(text: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     for chunk in text.split(['(', ')', '<', '>', '"', '\'', '`']) {
         for token in chunk.split_whitespace() {
@@ -3210,7 +3224,7 @@ fn image_path_candidates(text: &str) -> Vec<String> {
             if token.is_empty() || token.contains("://") {
                 continue;
             }
-            if attachments::has_image_extension(token) {
+            if attachments::has_supported_media_extension(token) {
                 candidates.push(token.to_string());
             }
         }
@@ -3975,7 +3989,7 @@ mod tests {
             action,
             RouteAction::Run(request)
                 if request.prompt.contains("inspect this")
-                    && request.prompt.contains("Attached images ingested")
+                    && request.prompt.contains("Attached White Noise media ingested")
                     && request.prompt.contains("/tmp/agentnoise/shot.png")
         ));
     }
@@ -4004,13 +4018,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ingest_wn_attachments_downloads_pictures_and_records_local_path() {
+    fn ingest_wn_attachments_downloads_supported_media_and_records_local_path() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source.png");
-        std::fs::write(&source, "png bytes").unwrap();
+        let source = temp.path().join("source.pdf");
+        std::fs::write(&source, "%PDF bytes").unwrap();
         let wn_bin = temp.path().join("wn");
         std::fs::write(
             &wn_bin,
@@ -4046,9 +4060,9 @@ printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
             trigger: None,
             is_initial: false,
             attachments: vec![attachments::AttachmentInfo {
-                kind: "image".to_string(),
-                name: Some("shot.png".to_string()),
-                mime_type: Some("image/png".to_string()),
+                kind: "media_attachments".to_string(),
+                name: Some("report.pdf".to_string()),
+                mime_type: Some("application/pdf".to_string()),
                 url: None,
                 size: None,
                 hash: Some("11".repeat(32)),
@@ -4062,7 +4076,11 @@ printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
 
         let ingest = ingest_wn_attachments(&app, &wn, "group-a", Some("phone"), action);
 
-        assert!(ingest.reply_text().contains("image ingested"));
+        assert!(
+            ingest
+                .reply_text()
+                .contains("media ingested: PDF report.pdf")
+        );
         let details = match app
             .route_message(Some("group-a"), Some("phone"), "/attach 1")
             .unwrap()
@@ -4071,7 +4089,7 @@ printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
             other => panic!("expected reply, got {other:?}"),
         };
         assert!(details.contains("local:"));
-        assert!(details.contains("01-shot.png"));
+        assert!(details.contains("01-report.pdf"));
         assert!(repo.path().join(".agentnoise/attachments").exists());
     }
 
@@ -4119,7 +4137,17 @@ printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
 
         let ingest = ingest_wn_attachments(&app, &wn, "group-a", Some("phone"), action);
 
-        assert!(ingest.reply_text().contains("image ingested"));
+        assert!(
+            ingest
+                .reply_text()
+                .contains("media ingested: image shot.png")
+        );
+        assert!(
+            ingest
+                .prompt_context()
+                .unwrap()
+                .contains("Attached White Noise media")
+        );
         assert!(
             ingest
                 .prompt_context()
@@ -4154,16 +4182,20 @@ printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
     }
 
     #[test]
-    fn referenced_image_paths_are_workspace_scoped() {
+    fn referenced_media_paths_are_workspace_scoped() {
         let repo = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let image = repo.path().join("chart.png");
-        let outside_image = outside.path().join("secret.png");
+        let pdf = repo.path().join("report.pdf");
+        let outside_video = outside.path().join("secret.mp4");
+        let unsupported = repo.path().join("notes.txt");
         let input_image = repo
             .path()
             .join(".agentnoise/attachments/att-123/01-shot.png");
         std::fs::write(&image, "png").unwrap();
-        std::fs::write(&outside_image, "png").unwrap();
+        std::fs::write(&pdf, "pdf").unwrap();
+        std::fs::write(&outside_video, "mp4").unwrap();
+        std::fs::write(&unsupported, "txt").unwrap();
         std::fs::create_dir_all(input_image.parent().unwrap()).unwrap();
         std::fs::write(&input_image, "png").unwrap();
 
@@ -4172,14 +4204,17 @@ printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
         config.repos[0].path = repo.path().display().to_string();
         let request = AgentRequest::new(AgentKind::Codex, "work", "make chart");
         let text = format!(
-            "Wrote ![chart](chart.png), read {}, also see {}.",
+            "Wrote ![chart](chart.png), report.pdf, notes.txt, read {}, also see {}.",
             input_image.display(),
-            outside_image.display(),
+            outside_video.display(),
         );
 
-        let paths = referenced_image_paths(&text, &config, &request);
+        let paths = referenced_media_paths(&text, &config, &request);
 
-        assert_eq!(paths, vec![image.canonicalize().unwrap()]);
+        assert_eq!(
+            paths,
+            vec![image.canonicalize().unwrap(), pdf.canonicalize().unwrap()]
+        );
     }
 
     #[test]

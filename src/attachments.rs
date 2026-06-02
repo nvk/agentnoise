@@ -26,6 +26,25 @@ pub struct AttachmentInfo {
     pub local_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportedMediaKind {
+    Image,
+    Video,
+    Audio,
+    Pdf,
+}
+
+impl SupportedMediaKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Pdf => "PDF",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentRecord {
     pub id: String,
@@ -446,7 +465,24 @@ fn merge_attachment(existing: &mut AttachmentInfo, incoming: AttachmentInfo) {
 fn is_attachment_key(key: &str) -> bool {
     matches!(
         key,
-        "attachment" | "attachments" | "media" | "image" | "images" | "file" | "files"
+        "attachment"
+            | "attachments"
+            | "media"
+            | "image"
+            | "images"
+            | "picture"
+            | "pictures"
+            | "photo"
+            | "photos"
+            | "video"
+            | "videos"
+            | "audio"
+            | "file"
+            | "files"
+            | "document"
+            | "documents"
+            | "pdf"
+            | "pdfs"
     )
 }
 
@@ -476,20 +512,18 @@ fn is_attachment_metadata_key(key: &str) -> bool {
 }
 
 fn looks_like_media_url(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
+    let value = value.trim();
     (value.starts_with("http://") || value.starts_with("https://"))
-        && [
-            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".pdf",
-        ]
-        .iter()
-        .any(|suffix| value.contains(suffix))
+        && has_supported_media_extension(value)
 }
 
 fn media_mime_hint(value: &str) -> Option<String> {
-    if value.starts_with("image/") || value.starts_with("video/") || value.starts_with("audio/") {
-        return Some(value.to_string());
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    if media_kind_for_mime(&lower).is_some() {
+        return Some(lower);
     }
-    None
+    mime_hint_for_extension(value).map(str::to_string)
 }
 
 pub fn render_record_summary(record: &AttachmentRecord) -> String {
@@ -544,28 +578,47 @@ pub fn is_downloadable_media(attachment: &AttachmentInfo) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
+pub fn is_supported_whitenoise_media(attachment: &AttachmentInfo) -> bool {
+    supported_media_kind(attachment).is_some()
+}
+
 pub fn is_picture_attachment(attachment: &AttachmentInfo) -> bool {
-    if attachment
+    supported_media_kind(attachment) == Some(SupportedMediaKind::Image)
+}
+
+pub fn supported_media_kind(attachment: &AttachmentInfo) -> Option<SupportedMediaKind> {
+    if let Some(kind) = attachment
         .mime_type
         .as_deref()
         .map(str::trim)
-        .is_some_and(|mime_type| mime_type.to_ascii_lowercase().starts_with("image/"))
+        .and_then(media_kind_for_mime)
     {
-        return true;
+        return Some(kind);
     }
-    if attachment
+
+    if let Some(kind) = attachment
         .kind
         .to_ascii_lowercase()
         .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|part| matches!(part, "image" | "images" | "picture" | "photo"))
+        .find_map(media_kind_for_kind_word)
     {
-        return true;
+        return Some(kind);
     }
-    attachment
-        .name
-        .as_deref()
-        .or(attachment.url.as_deref())
-        .is_some_and(has_image_extension)
+
+    for value in [
+        attachment.name.as_deref(),
+        attachment.url.as_deref(),
+        attachment.local_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(kind) = media_kind_for_extension(value) {
+            return Some(kind);
+        }
+    }
+
+    None
 }
 
 pub fn safe_file_name(name: &str) -> String {
@@ -586,16 +639,84 @@ pub fn safe_file_name(name: &str) -> String {
 }
 
 pub fn has_image_extension(value: &str) -> bool {
+    media_kind_for_extension(value) == Some(SupportedMediaKind::Image)
+}
+
+pub fn has_supported_media_extension(value: &str) -> bool {
+    media_kind_for_extension(value).is_some()
+}
+
+pub fn media_kind_for_extension(value: &str) -> Option<SupportedMediaKind> {
     let path = value.split(['?', '#']).next().unwrap_or(value);
     let extension = Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif" | "avif"
-    )
+    match extension.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(SupportedMediaKind::Image),
+        "mp4" | "webm" | "mov" => Some(SupportedMediaKind::Video),
+        "mp3" | "ogg" | "m4a" | "wav" => Some(SupportedMediaKind::Audio),
+        "pdf" => Some(SupportedMediaKind::Pdf),
+        _ => None,
+    }
+}
+
+pub fn media_kind_for_mime(mime_type: &str) -> Option<SupportedMediaKind> {
+    let mime_type = mime_type
+        .trim()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match mime_type.as_str() {
+        "image/jpeg" | "image/jpg" | "image/png" | "image/gif" | "image/webp" => {
+            Some(SupportedMediaKind::Image)
+        }
+        "video/mp4" | "video/webm" | "video/quicktime" => Some(SupportedMediaKind::Video),
+        "audio/mpeg" | "audio/ogg" | "audio/mp4" | "audio/m4a" | "audio/wav" | "audio/x-wav" => {
+            Some(SupportedMediaKind::Audio)
+        }
+        "application/pdf" => Some(SupportedMediaKind::Pdf),
+        _ => None,
+    }
+}
+
+fn media_kind_for_kind_word(word: &str) -> Option<SupportedMediaKind> {
+    match word {
+        "image" | "images" | "picture" | "pictures" | "photo" | "photos" => {
+            Some(SupportedMediaKind::Image)
+        }
+        "video" | "videos" | "movie" | "movies" => Some(SupportedMediaKind::Video),
+        "audio" | "sound" | "sounds" | "music" => Some(SupportedMediaKind::Audio),
+        "pdf" => Some(SupportedMediaKind::Pdf),
+        _ => None,
+    }
+}
+
+fn mime_hint_for_extension(value: &str) -> Option<&'static str> {
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "mp4" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        "mp3" => Some("audio/mpeg"),
+        "ogg" => Some("audio/ogg"),
+        "m4a" => Some("audio/m4a"),
+        "wav" => Some("audio/wav"),
+        "pdf" => Some("application/pdf"),
+        _ => None,
+    }
 }
 
 fn short_id() -> String {
@@ -715,5 +836,61 @@ mod tests {
             local_path: None,
         };
         assert!(!is_picture_attachment(&attachment));
+    }
+
+    #[test]
+    fn detects_supported_whitenoise_media() {
+        let video = AttachmentInfo {
+            kind: "media_attachments".to_string(),
+            name: Some("clip.mov".to_string()),
+            mime_type: Some("video/quicktime".to_string()),
+            url: None,
+            size: None,
+            hash: Some("ab".repeat(32)),
+            local_path: None,
+        };
+        assert_eq!(
+            supported_media_kind(&video),
+            Some(SupportedMediaKind::Video)
+        );
+        assert!(is_supported_whitenoise_media(&video));
+
+        let pdf = AttachmentInfo {
+            kind: "file".to_string(),
+            name: Some("report.pdf".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            url: None,
+            size: None,
+            hash: None,
+            local_path: None,
+        };
+        assert_eq!(supported_media_kind(&pdf), Some(SupportedMediaKind::Pdf));
+
+        let unsupported = AttachmentInfo {
+            kind: "file".to_string(),
+            name: Some("notes.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            url: None,
+            size: None,
+            hash: None,
+            local_path: None,
+        };
+        assert_eq!(supported_media_kind(&unsupported), None);
+    }
+
+    #[test]
+    fn hints_supported_media_urls_by_extension() {
+        let value: Value =
+            serde_json::from_str(r#"{"attachments":["https://example.com/video.webm?x=1"]}"#)
+                .unwrap();
+
+        let attachments = extract_attachments(&value);
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].mime_type.as_deref(), Some("video/webm"));
+        assert_eq!(
+            supported_media_kind(&attachments[0]),
+            Some(SupportedMediaKind::Video)
+        );
     }
 }

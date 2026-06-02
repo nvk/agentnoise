@@ -35,6 +35,7 @@ commands use a colon prefix:
 
 ```text
 :attach ./photo.png /wiki ingest this image
+:attach ./report.pdf /wiki ingest this PDF
 :chats
 :use 2
 :quit
