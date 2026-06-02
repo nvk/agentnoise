@@ -22,7 +22,31 @@ First-pairing test:
 
 ```sh
 agentnoise up
+agentnoise fake-phone tui --pin 123456
 agentnoise fake-phone roundtrip --pin 123456 /status
+```
+
+`fake-phone tui` is the interactive fake phone. It is compiled into the normal
+`agentnoise` binary, so Homebrew installs include it by default. It creates or
+reuses the same burner phone identity and fake-phone chat as `roundtrip`, then
+subscribes live while you type messages. Send normal agentnoise commands such
+as `/status`, `/help`, `/wiki ...`, or plain follow-up text directly. Local TUI
+commands use a colon prefix:
+
+```text
+:attach ./photo.png /wiki ingest this image
+:chats
+:use 2
+:quit
+```
+
+The TUI follows `whitenoise://chat/<group>` handoff links automatically so job
+session chats stay usable from the terminal. Pass `--no-follow-handoffs` to
+leave handoff links manual. On macOS over SSH, use `--shared-daemon` for the
+same keychain workaround as roundtrip:
+
+```sh
+agentnoise fake-phone tui --shared-daemon
 ```
 
 After pairing:
@@ -72,7 +96,7 @@ Useful flags:
 ```sh
 agentnoise fake-phone roundtrip --timeout-seconds 120 /status
 agentnoise fake-phone roundtrip --root /tmp/agentnoise-fake-phone /help
-agentnoise fake-phone roundtrip --expect "Status: OK" /status
+agentnoise fake-phone roundtrip --expect "running |" /status
 agentnoise fake-phone roundtrip --require-job-final --expect done /codex "Reply exactly: done"
 ```
 

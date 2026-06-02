@@ -1,6 +1,8 @@
 # Terminal Client Plan
 
-Status: design plan, not shipped.
+Status: milestone 1 started. The default `agentnoise` binary now includes
+`agentnoise fake-phone tui` for a human-driven burner fake phone; the broader
+standalone terminal client plan below is still open.
 
 ## Goal
 
@@ -35,10 +37,12 @@ test fixtures we already maintain.
 
 ## Packaging Decision
 
-Keep the normal `agentnoise` install small and fast.
+Ship the fake-phone testing TUI in the normal `agentnoise` install so Homebrew
+users can test immediately.
 
-Add the terminal client as an optional Rust binary, tentatively named
-`agentnoise-client`, behind a Cargo feature such as `tui`.
+If this grows into a full standalone terminal White Noise client, add an
+optional Rust binary, tentatively named `agentnoise-client`, behind a Cargo
+feature such as `tui`.
 
 Example shape:
 
@@ -52,12 +56,12 @@ path = "src/bin/agentnoise-client.rs"
 required-features = ["tui"]
 ```
 
-The default Homebrew formula should keep installing the daemon and bundled
-White Noise CLI pieces only. A separate formula, for example
-`agentnoise-client`, can build the optional TUI feature later. If we want the
-main CLI to discover it, `agentnoise client` can eventually exec
-`agentnoise-client` when installed and print clear install guidance when it is
-not.
+The default Homebrew formula should keep installing the daemon, bundled White
+Noise CLI pieces, and the built-in `agentnoise fake-phone tui`. A separate
+formula, for example `agentnoise-client`, can build the optional full terminal
+client later. If we want the main CLI to discover that future binary,
+`agentnoise client` can eventually exec `agentnoise-client` when installed and
+print clear install guidance when it is not.
 
 ## Reuse
 

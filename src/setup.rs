@@ -38,6 +38,7 @@ pub struct SetupResult {
     pub profile_published: bool,
     pub key_package_published: bool,
     pub message_relay_entries_added: usize,
+    pub warnings: Vec<String>,
     pub group_id: Option<String>,
     pub group_output: Option<String>,
     pub dev_burner_nsec_file: Option<PathBuf>,
@@ -107,16 +108,37 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         false
     };
     let login_repaired = whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)?;
-    let message_relays = whitenoise_cli::ensure_message_relays(&config.whitenoise)?;
-    whitenoise_cli::update_profile(
+    let mut warnings = Vec::new();
+    let message_relays = match whitenoise_cli::ensure_message_relays(&config.whitenoise) {
+        Ok(summary) => summary,
+        Err(error) => {
+            warnings.push(format!("White Noise relay broadcast failed: {error:#}"));
+            whitenoise_cli::RelayEnsureSummary {
+                configured_relays: config.whitenoise.message_relays.len(),
+                added_entries: 0,
+                already_present_entries: 0,
+            }
+        }
+    };
+    let profile_published = match whitenoise_cli::update_profile(
         &config.whitenoise,
         &config.whitenoise.profile_name,
         &config.whitenoise.profile_display_name,
         &config.whitenoise.profile_about,
-    )?;
-    let profile_published = true;
-    whitenoise_cli::publish_key_package(&config.whitenoise)?;
-    let key_package_published = true;
+    ) {
+        Ok(_) => true,
+        Err(error) => {
+            warnings.push(format!("White Noise profile publish failed: {error:#}"));
+            false
+        }
+    };
+    let key_package_published = match whitenoise_cli::publish_key_package(&config.whitenoise) {
+        Ok(_) => true,
+        Err(error) => {
+            warnings.push(format!("White Noise key package publish failed: {error:#}"));
+            false
+        }
+    };
 
     if let Some(phone_npub) = options
         .phone_npub
@@ -152,6 +174,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         profile_published,
         key_package_published,
         message_relay_entries_added: message_relays.added_entries,
+        warnings,
         group_id,
         group_output,
         dev_burner_nsec_file: config

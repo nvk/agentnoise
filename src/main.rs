@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command as ProcessCommand, ExitStatus, Stdio};
@@ -7,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentnoise::app::{AgentApp, NewSessionRequest, RouteAction};
+use agentnoise::attachments;
 use agentnoise::auth::PairingGate;
 use agentnoise::config::{Config, RunnerLauncher};
 use agentnoise::desktop_alert;
@@ -27,6 +29,7 @@ use agentnoise::subscriptions::{self, SubscriptionRegistry};
 use agentnoise::text::compact_timestamp;
 use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
 use agentnoise::wn::{MessageEvent, WnClient};
+use agentnoise::workspace;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use time::OffsetDateTime;
@@ -446,6 +449,25 @@ enum FakePhoneCommand {
         #[arg(required = true, trailing_var_arg = true)]
         message: Vec<String>,
     },
+    #[command(about = "Open an interactive fake-phone terminal UI")]
+    Tui {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        pin: Option<String>,
+        #[arg(long, default_value = "agentnoise fake phone")]
+        group_name: String,
+        #[arg(
+            long,
+            help = "Use the configured/default White Noise daemon instead of starting an isolated fake-phone daemon"
+        )]
+        shared_daemon: bool,
+        #[arg(
+            long,
+            help = "Do not auto-follow agentnoise whitenoise://chat handoff links"
+        )]
+        no_follow_handoffs: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -684,6 +706,12 @@ fn main() -> Result<()> {
             match app.route_message(group.as_deref(), sender.as_deref(), &message)? {
                 RouteAction::Ignore => {}
                 RouteAction::Reply(reply) => println!("{reply}"),
+                RouteAction::IngestAttachments(request) => {
+                    println!(
+                        "Attachment saved: {}\nRun this from the live listener for automatic image ingest.",
+                        attachments::render_record_summary(&request.record)
+                    );
+                }
                 RouteAction::NewSession(request) => {
                     println!("{}", request.created_text());
                     println!("New chat: {}", request.group_name());
@@ -696,6 +724,12 @@ fn main() -> Result<()> {
                     println!("{}", request.reply_text);
                     println!("Target chat: {}", request.group_id);
                     println!("{}", request.target_text);
+                }
+                RouteAction::DownloadMedia(request) => {
+                    println!(
+                        "Download requested for {}. Run this from the live listener for real delivery.",
+                        request.output_path.display()
+                    );
                 }
                 RouteAction::Run(request) => println!("{}", app.run_request(request)?),
             }
@@ -966,6 +1000,9 @@ fn print_setup_result(result: &SetupResult) {
             "message relay entries added: {}",
             result.message_relay_entries_added
         );
+    }
+    for warning in &result.warnings {
+        println!("warning: {warning}");
     }
     if let Some(path) = &result.dev_burner_nsec_file {
         println!("dev burner nsec: {}", path.display());
@@ -1394,6 +1431,25 @@ fn fake_phone_command(config_path: &Path, args: FakePhoneArgs) -> Result<()> {
                 }
             }
         }
+        FakePhoneCommand::Tui {
+            root,
+            pin,
+            group_name,
+            shared_daemon,
+            no_follow_handoffs,
+        } => {
+            let root = root.unwrap_or_else(|| config.resolved_data_dir().join("fake-phone"));
+            agentnoise::fake_phone::terminal(
+                &config,
+                agentnoise::fake_phone::FakePhoneTerminal {
+                    root,
+                    pin,
+                    group_name,
+                    shared_daemon,
+                    follow_handoffs: !no_follow_handoffs,
+                },
+            )?;
+        }
     }
     Ok(())
 }
@@ -1607,10 +1663,11 @@ fn run_queued_job(
 ) -> Result<()> {
     queue.mark_running(&job.id)?;
     let group_id = job.reply_group_id.clone();
+    let request = job.request.clone();
     let progress_wn = Arc::clone(&wn);
     let progress_journal = Arc::clone(&event_journal);
     let progress_group = group_id.clone();
-    let result = app.run_request_record_with_progress(job.request, move |text| {
+    let result = app.run_request_record_with_progress(request.clone(), move |text| {
         if let Err(error) =
             send_reply_recorded(&progress_wn, &progress_journal, &progress_group, &text)
         {
@@ -1636,6 +1693,7 @@ fn run_queued_job(
             }
             send_reply_recorded(&wn, &event_journal, &group_id, &reply)
                 .context("sending queued job reply")?;
+            upload_referenced_job_images(&app, &wn, &event_journal, &group_id, &request, &record);
         }
         Err(error) => {
             let text = format!("Error: job failed to start: {error:#}");
@@ -2348,39 +2406,95 @@ fn listen(
                         RouteAction::Reply(reply) => {
                             try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
                         }
-                        RouteAction::NewSession(_)
+                        RouteAction::IngestAttachments(_)
+                        | RouteAction::NewSession(_)
                         | RouteAction::ResumeSession(_)
+                        | RouteAction::DownloadMedia(_)
                         | RouteAction::Run(_) => {}
                     }
                     continue;
                 }
 
-                if let Some(message) = event.unsupported.as_deref() {
-                    let action = if event.attachments.is_empty() {
-                        app.route_unsupported_message(event.sender.as_deref(), message)?
-                    } else {
-                        app.route_unsupported_event(&event)?
-                    };
+                if event.attachments.is_empty()
+                    && let Some(message) = event.unsupported.as_deref()
+                {
+                    let action = app.route_unsupported_message(event.sender.as_deref(), message)?;
                     match action {
                         RouteAction::Ignore => {}
                         RouteAction::Reply(reply) => {
                             try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
                         }
-                        RouteAction::NewSession(_)
+                        RouteAction::IngestAttachments(_)
+                        | RouteAction::NewSession(_)
                         | RouteAction::ResumeSession(_)
+                        | RouteAction::DownloadMedia(_)
                         | RouteAction::Run(_) => {}
                     }
                     continue;
                 }
 
-                match app.route_message(
+                let mut attachment_ingest = None;
+                if !event.attachments.is_empty() {
+                    match app.route_unsupported_event(&event)? {
+                        RouteAction::Ignore => continue,
+                        RouteAction::Reply(reply) => {
+                            try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
+                            continue;
+                        }
+                        RouteAction::IngestAttachments(request) => {
+                            let ingest = ingest_wn_attachments(
+                                &app,
+                                &wn,
+                                group_id,
+                                event.sender.as_deref(),
+                                request,
+                            );
+                            if event.text.trim().is_empty() {
+                                try_send_reply_recorded(
+                                    &wn,
+                                    &event_journal,
+                                    group_id,
+                                    &ingest.reply_text(),
+                                );
+                                continue;
+                            }
+                            attachment_ingest = Some(ingest);
+                        }
+                        RouteAction::NewSession(_)
+                        | RouteAction::ResumeSession(_)
+                        | RouteAction::DownloadMedia(_)
+                        | RouteAction::Run(_) => {}
+                    }
+                }
+
+                let mut action = app.route_message(
                     event.group_id.as_deref(),
                     event.sender.as_deref(),
                     &event.text,
-                )? {
+                )?;
+                if let Some(ingest) = &attachment_ingest {
+                    action = action_with_attachment_context(action, ingest);
+                }
+
+                match action {
                     RouteAction::Ignore => {}
                     RouteAction::Reply(reply) => {
                         try_send_reply_recorded(&wn, &event_journal, group_id, &reply);
+                    }
+                    RouteAction::IngestAttachments(request) => {
+                        let ingest = ingest_wn_attachments(
+                            &app,
+                            &wn,
+                            group_id,
+                            event.sender.as_deref(),
+                            request,
+                        );
+                        try_send_reply_recorded(
+                            &wn,
+                            &event_journal,
+                            group_id,
+                            &ingest.reply_text(),
+                        );
                     }
                     RouteAction::NewSession(request) => {
                         match create_parallel_session(
@@ -2480,6 +2594,9 @@ fn listen(
                                 );
                             }
                         }
+                    }
+                    RouteAction::DownloadMedia(request) => {
+                        try_download_wn_media(&app, &wn, &event_journal, group_id, request);
                     }
                     RouteAction::Run(request) => {
                         let mut run_group_id = group_id.to_string();
@@ -2679,23 +2796,35 @@ fn run_inline_job(
     request: AgentRequest,
 ) {
     std::thread::spawn(move || {
+        let request_for_media = request.clone();
         let progress_wn = Arc::clone(&wn);
         let progress_journal = Arc::clone(&event_journal);
         let progress_group = group_id.clone();
-        let reply = match app.run_request_with_progress(request, move |text| {
+        let result = app.run_request_record_with_progress(request, move |text| {
             if let Err(error) =
                 send_reply_recorded(&progress_wn, &progress_journal, &progress_group, &text)
             {
                 eprintln!("agentnoise: failed to send progress reply: {error:#}");
             }
-        }) {
-            Ok(reply) => reply,
+        });
+        let reply = match &result {
+            Ok(record) => app.render_job_record(record),
             Err(error) => {
                 format!("Error: job failed to start: {error:#}")
             }
         };
         if let Err(error) = send_reply_recorded(&wn, &event_journal, &group_id, &reply) {
             eprintln!("agentnoise: failed to send job reply: {error:#}");
+        }
+        if let Ok(record) = result {
+            upload_referenced_job_images(
+                &app,
+                &wn,
+                &event_journal,
+                &group_id,
+                &request_for_media,
+                &record,
+            );
         }
     });
 }
@@ -2709,6 +2838,452 @@ fn queue_source_event_id(event: &MessageEvent, group_id: &str) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| format!("local-{}", Uuid::new_v4().simple()));
     format!("{group_id}:{event_id}")
+}
+
+#[derive(Debug, Clone)]
+struct AttachmentIngestResult {
+    record_id: String,
+    summary: String,
+    reply_lines: Vec<String>,
+    prompt_lines: Vec<String>,
+}
+
+impl AttachmentIngestResult {
+    fn new(record_id: String, summary: String) -> Self {
+        Self {
+            record_id,
+            summary,
+            reply_lines: Vec::new(),
+            prompt_lines: Vec::new(),
+        }
+    }
+
+    fn reply_text(&self) -> String {
+        let mut lines = vec![format!("Attachment saved: {}", self.summary)];
+        if self.reply_lines.is_empty() {
+            lines.push(format!("Send /attach {} for details.", self.record_id));
+        } else {
+            lines.extend(self.reply_lines.clone());
+        }
+        lines.join("\n")
+    }
+
+    fn prompt_context(&self) -> Option<String> {
+        if self.prompt_lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Attached images ingested by agentnoise:\n{}\nUse these local file paths when inspecting the images.",
+            self.prompt_lines.join("\n")
+        ))
+    }
+
+    fn wiki_ingest_context(&self) -> Option<String> {
+        if self.prompt_lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Attached images for the LLM Wiki ingest pipeline:\n{}\nUse the wiki File Ingestion workflow for images: create immutable raw metadata stubs for these local file sources, include the file paths and any visible-content description/provenance, then continue with the user's wiki request.",
+            self.prompt_lines.join("\n")
+        ))
+    }
+}
+
+fn ingest_wn_attachments(
+    app: &AgentApp,
+    wn: &WnClient,
+    group_id: &str,
+    sender: Option<&str>,
+    request: agentnoise::app::AttachmentIngestAction,
+) -> AttachmentIngestResult {
+    let record = request.record;
+    let mut result = AttachmentIngestResult::new(
+        record.id.clone(),
+        attachments::render_record_summary(&record),
+    );
+
+    for (index, attachment) in record.attachments.iter().enumerate() {
+        if !attachments::is_picture_attachment(attachment) {
+            continue;
+        }
+
+        let display_name = attachment
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("image");
+
+        if let Some(local_path) = attachment
+            .local_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            let source_path = Path::new(local_path);
+            if source_path.is_file() {
+                copy_ingested_attachment(
+                    app,
+                    IngestCopyTarget {
+                        group_id,
+                        sender,
+                        record_id: &record.id,
+                        index,
+                        attachment,
+                        source_path,
+                        display_name,
+                    },
+                    &mut result,
+                );
+                continue;
+            }
+            result.reply_lines.push(format!(
+                "image saved but local copy failed for {display_name}: source path is not a file: {local_path}"
+            ));
+            result.prompt_lines.push(format!(
+                "- {display_name}: metadata saved as {}, but source path was not readable: {local_path}",
+                record.id
+            ));
+            if !attachments::is_downloadable_media(attachment) {
+                continue;
+            }
+        }
+
+        let Some(hash) = attachment
+            .hash
+            .as_deref()
+            .map(str::trim)
+            .filter(|hash| !hash.is_empty())
+        else {
+            result.reply_lines.push(format!(
+                "image saved but not downloaded: {display_name} has no White Noise media hash"
+            ));
+            result.prompt_lines.push(format!(
+                "- {display_name}: metadata saved as {}, but no downloadable media hash was present",
+                record.id
+            ));
+            continue;
+        };
+
+        match wn.download_media_from(group_id, hash) {
+            Ok(media) => {
+                let Some(source_path) = media.file_path.as_deref() else {
+                    result.reply_lines.push(format!(
+                        "image saved but not downloaded: White Noise did not return a local path for {display_name}"
+                    ));
+                    result.prompt_lines.push(format!(
+                        "- {display_name}: metadata saved as {}, but White Noise did not return a local path",
+                        record.id
+                    ));
+                    continue;
+                };
+                copy_ingested_attachment(
+                    app,
+                    IngestCopyTarget {
+                        group_id,
+                        sender,
+                        record_id: &record.id,
+                        index,
+                        attachment,
+                        source_path,
+                        display_name,
+                    },
+                    &mut result,
+                );
+            }
+            Err(error) => {
+                result.reply_lines.push(format!(
+                    "image saved but download failed for {display_name}: {error:#}"
+                ));
+                result.prompt_lines.push(format!(
+                    "- {display_name}: metadata saved as {}, but download failed: {error:#}",
+                    record.id
+                ));
+            }
+        }
+    }
+
+    result
+}
+
+struct IngestCopyTarget<'a> {
+    group_id: &'a str,
+    sender: Option<&'a str>,
+    record_id: &'a str,
+    index: usize,
+    attachment: &'a attachments::AttachmentInfo,
+    source_path: &'a Path,
+    display_name: &'a str,
+}
+
+fn copy_ingested_attachment(
+    app: &AgentApp,
+    target: IngestCopyTarget<'_>,
+    result: &mut AttachmentIngestResult,
+) {
+    let output_path = app.attachment_download_path_for_message(
+        Some(target.group_id),
+        target.sender,
+        target.record_id,
+        target.index,
+        target.attachment,
+    );
+    match copy_private_file(target.source_path, &output_path) {
+        Ok(size) => {
+            if let Err(error) = app.record_attachment_downloaded(
+                target.record_id,
+                target.index,
+                &output_path,
+                Some(size),
+            ) {
+                eprintln!("agentnoise: failed to update attachment store: {error:#}");
+            }
+            result.reply_lines.push(format!(
+                "image ingested: {} -> {} ({size} bytes)",
+                target.display_name,
+                output_path.display()
+            ));
+            result.prompt_lines.push(format!(
+                "- {}: {} ({size} bytes)",
+                target.display_name,
+                output_path.display()
+            ));
+        }
+        Err(error) => {
+            result.reply_lines.push(format!(
+                "image saved but local copy failed for {}: {error:#}",
+                target.display_name
+            ));
+            result.prompt_lines.push(format!(
+                "- {}: metadata saved as {}, but local copy failed: {error:#}",
+                target.display_name, target.record_id
+            ));
+        }
+    }
+}
+
+fn action_with_attachment_context(
+    action: RouteAction,
+    ingest: &AttachmentIngestResult,
+) -> RouteAction {
+    match action {
+        RouteAction::Run(mut request) => {
+            let context = if looks_like_wiki_agent_prompt(&request.prompt) {
+                ingest.wiki_ingest_context()
+            } else {
+                ingest.prompt_context()
+            };
+            if let Some(context) = context {
+                request.prompt = format!("{}\n\n{}", request.prompt.trim_end(), context);
+            }
+            RouteAction::Run(request)
+        }
+        RouteAction::Reply(reply) => {
+            RouteAction::Reply(format!("{}\n\n{}", ingest.reply_text(), reply.trim()))
+        }
+        action => action,
+    }
+}
+
+fn looks_like_wiki_agent_prompt(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    prompt == "@wiki"
+        || prompt.starts_with("@wiki ")
+        || prompt == "wiki"
+        || prompt.starts_with("wiki ")
+}
+
+fn upload_referenced_job_images(
+    app: &AgentApp,
+    wn: &WnClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    request: &AgentRequest,
+    record: &agentnoise::jobs::JobRecord,
+) {
+    if record.status != agentnoise::jobs::JobStatus::Succeeded {
+        return;
+    }
+    let Some(summary) = record
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    else {
+        return;
+    };
+    for path in referenced_image_paths(summary, app.config(), request)
+        .into_iter()
+        .take(4)
+    {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image");
+        let caption = format!("agent output: {file_name}");
+        if let Err(error) = wn.upload_media_to(group_id, &path, Some(&caption)) {
+            eprintln!(
+                "agentnoise: failed to upload referenced image {}: {error:#}",
+                path.display()
+            );
+            try_send_reply_recorded(
+                wn,
+                event_journal,
+                group_id,
+                &format!(
+                    "Warning: failed to send image {}: {error:#}",
+                    path.display()
+                ),
+            );
+        }
+    }
+}
+
+fn referenced_image_paths(text: &str, config: &Config, request: &AgentRequest) -> Vec<PathBuf> {
+    let Some((root, workdir)) = request_workspace_paths(config, request) else {
+        return Vec::new();
+    };
+    let root = root.canonicalize().unwrap_or(root);
+    let workdir = workdir.canonicalize().unwrap_or(workdir);
+    let mut output = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in image_path_candidates(text) {
+        let candidate_path = Path::new(&candidate);
+        let path = if candidate_path.is_absolute() {
+            candidate_path.to_path_buf()
+        } else {
+            workdir.join(candidate_path)
+        };
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.is_file() || !path.starts_with(&root) {
+            continue;
+        }
+        if is_agentnoise_attachment_path(&path) {
+            continue;
+        }
+        if !attachments::has_image_extension(&path.display().to_string()) {
+            continue;
+        }
+        let key = path.display().to_string();
+        if seen.insert(key) {
+            output.push(path);
+        }
+    }
+    output
+}
+
+fn is_agentnoise_attachment_path(path: &Path) -> bool {
+    let mut components = path.components().filter_map(|component| match component {
+        std::path::Component::Normal(value) => value.to_str(),
+        _ => None,
+    });
+    while let Some(component) = components.next() {
+        if component == ".agentnoise" && matches!(components.next(), Some("attachments")) {
+            return true;
+        }
+    }
+    false
+}
+
+fn request_workspace_paths(config: &Config, request: &AgentRequest) -> Option<(PathBuf, PathBuf)> {
+    let root = if let Some(root) = &request.workspace_root {
+        root.clone()
+    } else {
+        let alias = request.repo_alias.as_deref()?;
+        config.repo_path(alias)?
+    };
+    let workdir = workspace::resolve_cwd(&root, request.cwd.as_deref()).ok()?;
+    Some((root, workdir))
+}
+
+fn image_path_candidates(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for chunk in text.split(['(', ')', '<', '>', '"', '\'', '`']) {
+        for token in chunk.split_whitespace() {
+            let token = token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    ',' | ';' | ':' | '!' | '?' | '.' | '[' | ']' | '{' | '}' | '*'
+                )
+            });
+            if token.is_empty() || token.contains("://") {
+                continue;
+            }
+            if attachments::has_image_extension(token) {
+                candidates.push(token.to_string());
+            }
+        }
+    }
+    candidates
+}
+
+fn try_download_wn_media(
+    app: &AgentApp,
+    wn: &WnClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    request: agentnoise::app::MediaDownloadAction,
+) {
+    let reply = match wn.download_media_from(group_id, &request.original_file_hash) {
+        Ok(media) => {
+            let Some(path) = media.file_path.as_deref() else {
+                return try_send_reply_recorded(
+                    wn,
+                    event_journal,
+                    group_id,
+                    "downloaded\nWhite Noise did not return a local file path.",
+                );
+            };
+            let size = match copy_private_file(path, &request.output_path) {
+                Ok(size) => size,
+                Err(error) => {
+                    return try_send_reply_recorded(
+                        wn,
+                        event_journal,
+                        group_id,
+                        &format!("Error: saving download failed: {error:#}"),
+                    );
+                }
+            };
+            if let Err(error) = app.record_attachment_downloaded(
+                &request.record_id,
+                request.attachment_index,
+                &request.output_path,
+                Some(size),
+            ) {
+                eprintln!("agentnoise: failed to update attachment store: {error:#}");
+            }
+            let mut lines = vec![format!("downloaded {}", request.output_path.display())];
+            lines.push(format!("{size} bytes"));
+            if path != request.output_path {
+                lines.push(format!("source: {}", path.display()));
+            }
+            lines.join("\n")
+        }
+        Err(error) => format!("Error: download failed: {error:#}"),
+    };
+    try_send_reply_recorded(wn, event_journal, group_id, &reply);
+}
+
+fn copy_private_file(source: &Path, destination: &Path) -> Result<u64> {
+    if source == destination {
+        return fs::metadata(source)
+            .map(|metadata| metadata.len())
+            .with_context(|| format!("reading metadata for {}", source.display()));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let bytes = fs::copy(source, destination)
+        .with_context(|| format!("copying {} to {}", source.display(), destination.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", destination.display()))?;
+    }
+    Ok(bytes)
 }
 
 fn send_startup_hello_if_needed(
@@ -3382,6 +3957,229 @@ mod tests {
         );
 
         assert_eq!(groups, vec!["active".to_string()]);
+    }
+
+    #[test]
+    fn attachment_context_is_added_to_agent_runs() {
+        let mut ingest = AttachmentIngestResult::new("att-123".to_string(), "1 file".to_string());
+        ingest
+            .prompt_lines
+            .push("- shot.png: /tmp/agentnoise/shot.png (42 bytes)".to_string());
+
+        let action = action_with_attachment_context(
+            RouteAction::Run(AgentRequest::prompt(AgentKind::Codex, "inspect this")),
+            &ingest,
+        );
+
+        assert!(matches!(
+            action,
+            RouteAction::Run(request)
+                if request.prompt.contains("inspect this")
+                    && request.prompt.contains("Attached images ingested")
+                    && request.prompt.contains("/tmp/agentnoise/shot.png")
+        ));
+    }
+
+    #[test]
+    fn wiki_attachment_context_uses_ingest_pipeline_language() {
+        let mut ingest = AttachmentIngestResult::new("att-123".to_string(), "1 file".to_string());
+        ingest.prompt_lines.push(
+            "- shot.png: /workspace/.agentnoise/attachments/att-123/01-shot.png (42 bytes)"
+                .to_string(),
+        );
+
+        let action = action_with_attachment_context(
+            RouteAction::Run(AgentRequest::prompt(AgentKind::Codex, "@wiki catalog this")),
+            &ingest,
+        );
+
+        assert!(matches!(
+            action,
+            RouteAction::Run(request)
+                if request.prompt.contains("LLM Wiki ingest pipeline")
+                    && request.prompt.contains("raw metadata stubs")
+                    && request.prompt.contains(".agentnoise/attachments")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ingest_wn_attachments_downloads_pictures_and_records_local_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.png");
+        std::fs::write(&source, "png bytes").unwrap();
+        let wn_bin = temp.path().join("wn");
+        std::fs::write(
+            &wn_bin,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"{}"}}}}'
+"#,
+                source.display(),
+                "11".repeat(32)
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&wn_bin).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wn_bin, permissions).unwrap();
+
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.whitenoise.wn_bin = wn_bin.display().to_string();
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config.clone(), None).unwrap();
+        let wn = WnClient::new(config.whitenoise);
+        let event = MessageEvent {
+            group_id: Some("group-a".to_string()),
+            sender: Some("phone".to_string()),
+            text: String::new(),
+            unsupported: None,
+            id: Some("msg1".to_string()),
+            trigger: None,
+            is_initial: false,
+            attachments: vec![attachments::AttachmentInfo {
+                kind: "image".to_string(),
+                name: Some("shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: None,
+                size: None,
+                hash: Some("11".repeat(32)),
+                local_path: None,
+            }],
+        };
+        let action = match app.route_unsupported_event(&event).unwrap() {
+            RouteAction::IngestAttachments(action) => action,
+            other => panic!("expected ingest action, got {other:?}"),
+        };
+
+        let ingest = ingest_wn_attachments(&app, &wn, "group-a", Some("phone"), action);
+
+        assert!(ingest.reply_text().contains("image ingested"));
+        let details = match app
+            .route_message(Some("group-a"), Some("phone"), "/attach 1")
+            .unwrap()
+        {
+            RouteAction::Reply(reply) => reply,
+            other => panic!("expected reply, got {other:?}"),
+        };
+        assert!(details.contains("local:"));
+        assert!(details.contains("01-shot.png"));
+        assert!(repo.path().join(".agentnoise/attachments").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ingest_wn_attachments_copies_existing_local_media_into_workspace() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let source = temp.path().join("wn-media-cache.png");
+        std::fs::write(&source, "png bytes from wn cache").unwrap();
+
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config.clone(), None).unwrap();
+        let wn = WnClient::new(config.whitenoise);
+        let event = MessageEvent {
+            group_id: Some("group-a".to_string()),
+            sender: Some("phone".to_string()),
+            text: String::new(),
+            unsupported: None,
+            id: Some("msg1".to_string()),
+            trigger: None,
+            is_initial: false,
+            attachments: vec![attachments::AttachmentInfo {
+                kind: "media_attachments".to_string(),
+                name: Some("shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: None,
+                size: None,
+                hash: None,
+                local_path: Some(source.display().to_string()),
+            }],
+        };
+        let action = match app.route_unsupported_event(&event).unwrap() {
+            RouteAction::IngestAttachments(action) => action,
+            other => panic!("expected ingest action, got {other:?}"),
+        };
+
+        let ingest = ingest_wn_attachments(&app, &wn, "group-a", Some("phone"), action);
+
+        assert!(ingest.reply_text().contains("image ingested"));
+        assert!(
+            ingest
+                .prompt_context()
+                .unwrap()
+                .contains(".agentnoise/attachments")
+        );
+        let copied = repo
+            .path()
+            .join(".agentnoise/attachments")
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("01-shot.png");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"png bytes from wn cache");
+        assert_eq!(
+            std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let details = match app
+            .route_message(Some("group-a"), Some("phone"), "/attach 1")
+            .unwrap()
+        {
+            RouteAction::Reply(reply) => reply,
+            other => panic!("expected reply, got {other:?}"),
+        };
+        assert!(details.contains(&copied.display().to_string()));
+        assert!(!details.contains(&source.display().to_string()));
+    }
+
+    #[test]
+    fn referenced_image_paths_are_workspace_scoped() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let image = repo.path().join("chart.png");
+        let outside_image = outside.path().join("secret.png");
+        let input_image = repo
+            .path()
+            .join(".agentnoise/attachments/att-123/01-shot.png");
+        std::fs::write(&image, "png").unwrap();
+        std::fs::write(&outside_image, "png").unwrap();
+        std::fs::create_dir_all(input_image.parent().unwrap()).unwrap();
+        std::fs::write(&input_image, "png").unwrap();
+
+        let mut config = Config::template();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        let request = AgentRequest::new(AgentKind::Codex, "work", "make chart");
+        let text = format!(
+            "Wrote ![chart](chart.png), read {}, also see {}.",
+            input_image.display(),
+            outside_image.display(),
+        );
+
+        let paths = referenced_image_paths(&text, &config, &request);
+
+        assert_eq!(paths, vec![image.canonicalize().unwrap()]);
     }
 
     #[test]

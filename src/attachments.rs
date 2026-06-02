@@ -22,6 +22,8 @@ pub struct AttachmentInfo {
     pub size: Option<u64>,
     #[serde(default)]
     pub hash: Option<String>,
+    #[serde(default)]
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +131,36 @@ impl AttachmentStore {
             .cloned()
     }
 
+    pub fn set_local_path(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        path: &Path,
+        size: Option<u64>,
+    ) -> Result<AttachmentRecord> {
+        let mut records = self
+            .inner
+            .records
+            .lock()
+            .map_err(|_| anyhow::anyhow!("attachment store lock poisoned"))?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.id == record_id)
+            .with_context(|| format!("unknown attachment record: {record_id}"))?;
+        let attachment = record
+            .attachments
+            .get_mut(attachment_index)
+            .with_context(|| format!("attachment {} is out of range", attachment_index + 1))?;
+        attachment.local_path = Some(path.display().to_string());
+        if let Some(size) = size {
+            attachment.size = Some(size);
+        }
+        let updated = record.clone();
+        drop(records);
+        self.save()?;
+        Ok(updated)
+    }
+
     fn save(&self) -> Result<()> {
         let records = self
             .inner
@@ -173,6 +205,9 @@ fn collect_attachments(value: &Value, parent_key: Option<&str>, out: &mut Vec<At
             }
         }
         Value::Array(values) => {
+            if let Some(info) = attachment_from_imeta_tag(values, parent_key) {
+                out.push(info);
+            }
             for value in values {
                 collect_attachments(value, parent_key, out);
             }
@@ -185,6 +220,7 @@ fn collect_attachments(value: &Value, parent_key: Option<&str>, out: &mut Vec<At
                 url: Some(text.clone()),
                 size: None,
                 hash: None,
+                local_path: None,
             });
         }
         Value::String(_) => {}
@@ -195,14 +231,56 @@ fn collect_attachments(value: &Value, parent_key: Option<&str>, out: &mut Vec<At
 fn attachment_from_object(value: &Value, parent_key: Option<&str>) -> Option<AttachmentInfo> {
     Some(AttachmentInfo {
         kind: parent_key.unwrap_or("attachment").to_string(),
-        name: find_string(value, &["name", "filename", "file_name", "title"]),
+        name: find_string(
+            value,
+            &[
+                "name",
+                "filename",
+                "file_name",
+                "fileName",
+                "original_filename",
+                "originalFilename",
+                "title",
+            ],
+        ),
         mime_type: find_string(
             value,
-            &["mime_type", "mimeType", "content_type", "contentType"],
+            &[
+                "mime_type",
+                "mimeType",
+                "content_type",
+                "contentType",
+                "media_type",
+                "mediaType",
+            ],
         ),
-        url: find_string(value, &["url", "uri", "download_url", "media_url"]),
+        url: find_string(
+            value,
+            &[
+                "url",
+                "uri",
+                "download_url",
+                "downloadUrl",
+                "media_url",
+                "mediaUrl",
+                "blossom_url",
+                "blossomUrl",
+            ],
+        ),
         size: find_u64(value, &["size", "bytes", "content_length", "contentLength"]),
-        hash: find_string(value, &["hash", "sha256", "digest"]),
+        hash: find_hash(
+            value,
+            &[
+                "hash",
+                "sha256",
+                "digest",
+                "original_file_hash",
+                "originalFileHash",
+                "file_hash",
+                "fileHash",
+            ],
+        ),
+        local_path: find_string(value, &["local_path", "localPath", "file_path", "filePath"]),
     })
     .filter(|info| {
         info.name.is_some()
@@ -210,17 +288,96 @@ fn attachment_from_object(value: &Value, parent_key: Option<&str>) -> Option<Att
             || info.url.is_some()
             || info.size.is_some()
             || info.hash.is_some()
+            || info.local_path.is_some()
     })
 }
 
+fn attachment_from_imeta_tag(values: &[Value], parent_key: Option<&str>) -> Option<AttachmentInfo> {
+    if values.first().and_then(Value::as_str).map(str::trim) != Some("imeta") {
+        return None;
+    }
+
+    let mut info = AttachmentInfo {
+        kind: parent_key.unwrap_or("imeta").to_string(),
+        name: None,
+        mime_type: None,
+        url: None,
+        size: None,
+        hash: None,
+        local_path: None,
+    };
+
+    for value in values.iter().skip(1).filter_map(Value::as_str) {
+        let value = value.trim();
+        if let Some(rest) = value.strip_prefix("url ") {
+            info.url = Some(rest.trim().to_string());
+        } else if let Some(rest) = value.strip_prefix("m ") {
+            info.mime_type = Some(rest.trim().to_string());
+        } else if let Some(rest) = value.strip_prefix("x ") {
+            info.hash = Some(rest.trim().to_string());
+        } else if let Some(rest) = value.strip_prefix("filename ") {
+            info.name = Some(rest.trim().to_string());
+        } else if let Some(rest) = value.strip_prefix("size ")
+            && let Ok(size) = rest.trim().parse::<u64>()
+        {
+            info.size = Some(size);
+        }
+    }
+
+    (info.name.is_some()
+        || info.mime_type.is_some()
+        || info.url.is_some()
+        || info.size.is_some()
+        || info.hash.is_some())
+    .then_some(info)
+}
+
 fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            for key in keys {
+                if let Some(Value::String(value)) = object.get(*key) {
+                    return Some(value.clone());
+                }
+            }
+            object.values().find_map(|value| find_string(value, keys))
+        }
+        Value::Array(values) => values.iter().find_map(|value| find_string(value, keys)),
+        _ => None,
+    }
+}
+
+fn find_hash(value: &Value, keys: &[&str]) -> Option<String> {
     let object = value.as_object()?;
     for key in keys {
-        if let Some(Value::String(value)) = object.get(*key) {
-            return Some(value.clone());
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        if let Some(value) = value.as_str() {
+            return Some(value.to_string());
+        }
+        if let Some(values) = value.as_array()
+            && let Some(hash) = bytes_array_to_hex(values)
+        {
+            return Some(hash);
         }
     }
     None
+}
+
+fn bytes_array_to_hex(values: &[Value]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut output = String::with_capacity(values.len() * 2);
+    for value in values {
+        let byte = value.as_u64()?;
+        if byte > u8::MAX as u64 {
+            return None;
+        }
+        output.push_str(&format!("{:02x}", byte));
+    }
+    Some(output)
 }
 
 fn find_u64(value: &Value, keys: &[&str]) -> Option<u64> {
@@ -236,11 +393,54 @@ fn find_u64(value: &Value, keys: &[&str]) -> Option<u64> {
 fn dedupe_attachments(attachments: Vec<AttachmentInfo>) -> Vec<AttachmentInfo> {
     let mut out = Vec::new();
     for attachment in attachments {
-        if !out.iter().any(|existing| existing == &attachment) {
+        if let Some(existing) = out
+            .iter_mut()
+            .find(|existing| attachments_overlap(existing, &attachment))
+        {
+            merge_attachment(existing, attachment);
+        } else {
             out.push(attachment);
         }
     }
     out
+}
+
+fn attachments_overlap(left: &AttachmentInfo, right: &AttachmentInfo) -> bool {
+    left == right
+        || same_nonempty(left.url.as_deref(), right.url.as_deref())
+        || same_nonempty(left.hash.as_deref(), right.hash.as_deref())
+        || same_nonempty(left.local_path.as_deref(), right.local_path.as_deref())
+}
+
+fn same_nonempty(left: Option<&str>, right: Option<&str>) -> bool {
+    let Some(left) = left.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let Some(right) = right.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    left == right
+}
+
+fn merge_attachment(existing: &mut AttachmentInfo, incoming: AttachmentInfo) {
+    if existing.name.is_none() {
+        existing.name = incoming.name;
+    }
+    if existing.mime_type.is_none() {
+        existing.mime_type = incoming.mime_type;
+    }
+    if existing.url.is_none() {
+        existing.url = incoming.url;
+    }
+    if existing.size.is_none() {
+        existing.size = incoming.size;
+    }
+    if existing.hash.is_none() {
+        existing.hash = incoming.hash;
+    }
+    if existing.local_path.is_none() {
+        existing.local_path = incoming.local_path;
+    }
 }
 
 fn is_attachment_key(key: &str) -> bool {
@@ -259,8 +459,19 @@ fn is_attachment_metadata_key(key: &str) -> bool {
             | "contentType"
             | "filename"
             | "file_name"
+            | "fileName"
             | "download_url"
+            | "downloadUrl"
             | "media_url"
+            | "mediaUrl"
+            | "original_file_hash"
+            | "originalFileHash"
+            | "file_hash"
+            | "fileHash"
+            | "blossom_url"
+            | "blossomUrl"
+            | "file_path"
+            | "filePath"
     )
 }
 
@@ -313,8 +524,78 @@ pub fn render_record_details(record: &AttachmentRecord) -> String {
         if let Some(hash) = &attachment.hash {
             lines.push(format!("   hash: {hash}"));
         }
+        if let Some(local_path) = &attachment.local_path {
+            lines.push(format!("   local: {local_path}"));
+        } else if is_downloadable_media(attachment) {
+            lines.push(format!(
+                "   download: /download {} {}",
+                record.id,
+                index + 1
+            ));
+        }
     }
     lines.join("\n")
+}
+
+pub fn is_downloadable_media(attachment: &AttachmentInfo) -> bool {
+    attachment
+        .hash
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub fn is_picture_attachment(attachment: &AttachmentInfo) -> bool {
+    if attachment
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|mime_type| mime_type.to_ascii_lowercase().starts_with("image/"))
+    {
+        return true;
+    }
+    if attachment
+        .kind
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| matches!(part, "image" | "images" | "picture" | "photo"))
+    {
+        return true;
+    }
+    attachment
+        .name
+        .as_deref()
+        .or(attachment.url.as_deref())
+        .is_some_and(has_image_extension)
+}
+
+pub fn safe_file_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '\0' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim().trim_matches('.').trim();
+    if sanitized.is_empty() || sanitized.chars().all(|ch| ch == '_') {
+        "attachment".to_string()
+    } else {
+        sanitized.chars().take(180).collect()
+    }
+}
+
+pub fn has_image_extension(value: &str) -> bool {
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif" | "avif"
+    )
 }
 
 fn short_id() -> String {
@@ -339,12 +620,100 @@ mod tests {
     #[test]
     fn extracts_nested_attachment_metadata() {
         let value: Value = serde_json::from_str(
-            r#"{"message":{"attachments":[{"mime_type":"image/png","filename":"shot.png","size":42}]}}"#,
+            r#"{"message":{"attachments":[{"mime_type":"image/png","filename":"shot.png","size":42,"original_file_hash":"abcd"}]}}"#,
         )
         .unwrap();
         let attachments = extract_attachments(&value);
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
         assert_eq!(attachments[0].name.as_deref(), Some("shot.png"));
+        assert_eq!(attachments[0].hash.as_deref(), Some("abcd"));
+        assert!(is_downloadable_media(&attachments[0]));
+    }
+
+    #[test]
+    fn extracts_and_merges_whitenoise_imeta_tags() {
+        let value: Value = serde_json::from_str(
+            r#"{
+              "message": {
+                "media_attachments": [{
+                  "mime_type": "image/png",
+                  "blossom_url": "https://blossom.example/hash",
+                  "file_path": "/tmp/wn-cache/hash.png"
+                }],
+                "tags": [[
+                  "imeta",
+                  "url https://blossom.example/hash",
+                  "m image/png",
+                  "x b8f8384ea6047270b32b2870e30c5c8c79f083d247bb322ddfa812927f74172e",
+                  "filename phone-input.png",
+                  "dim 3x3"
+                ]]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let attachments = extract_attachments(&value);
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].name.as_deref(), Some("phone-input.png"));
+        assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(
+            attachments[0].url.as_deref(),
+            Some("https://blossom.example/hash")
+        );
+        assert_eq!(
+            attachments[0].hash.as_deref(),
+            Some("b8f8384ea6047270b32b2870e30c5c8c79f083d247bb322ddfa812927f74172e")
+        );
+        assert_eq!(
+            attachments[0].local_path.as_deref(),
+            Some("/tmp/wn-cache/hash.png")
+        );
+    }
+
+    #[test]
+    fn extracts_array_hashes_as_hex() {
+        let value: Value = serde_json::from_str(
+            r#"{"media":{"mime_type":"image/png","original_file_hash":[184,248,56,78]}}"#,
+        )
+        .unwrap();
+
+        let attachments = extract_attachments(&value);
+
+        assert_eq!(attachments[0].hash.as_deref(), Some("b8f8384e"));
+    }
+
+    #[test]
+    fn sanitizes_download_file_names() {
+        assert_eq!(safe_file_name("../secret.png"), "_secret.png");
+        assert_eq!(safe_file_name(" \n "), "attachment");
+        assert_eq!(safe_file_name("report.pdf"), "report.pdf");
+    }
+
+    #[test]
+    fn detects_picture_attachments() {
+        let attachment = AttachmentInfo {
+            kind: "media".to_string(),
+            name: Some("shot.png".to_string()),
+            mime_type: None,
+            url: None,
+            size: None,
+            hash: None,
+            local_path: None,
+        };
+        assert!(is_picture_attachment(&attachment));
+
+        let attachment = AttachmentInfo {
+            kind: "file".to_string(),
+            name: Some("notes.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            url: None,
+            size: None,
+            hash: None,
+            local_path: None,
+        };
+        assert!(!is_picture_attachment(&attachment));
     }
 }

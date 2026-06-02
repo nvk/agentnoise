@@ -1,6 +1,21 @@
 # Release Notes
 
-## Unreleased
+## 0.1.29 - 2026-06-02
+
+- Made first-run White Noise discovery publishing local-first: setup now keeps
+  the newly created desktop identity even if relay-list/profile/key-package
+  publication times out, prints a warning, and lets listener startup retry the
+  relay reconciliation.
+- Added White Noise picture ingest: phone-sent images are saved, downloaded
+  into `.agentnoise/attachments/` inside the active workspace when a media hash
+  is present, and added to captioned agent prompts automatically. `/wiki`
+  image prompts now use the LLM Wiki file-ingestion framing, and agent job
+  replies that reference image files inside the active workspace are uploaded
+  back to the chat.
+- Added `agentnoise fake-phone tui`, compiled into the default `agentnoise`
+  binary for Homebrew installs. It provides a human-driven burner fake phone
+  with live replies, local `:attach <path> [caption]` media sends, chat
+  switching, and automatic job handoff following.
 
 ## 0.1.28 - 2026-05-23
 

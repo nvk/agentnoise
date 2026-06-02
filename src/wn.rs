@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +21,16 @@ pub struct MessageEvent {
     pub trigger: Option<String>,
     pub is_initial: bool,
     pub attachments: Vec<AttachmentInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaFileRecord {
+    pub file_path: Option<PathBuf>,
+    pub original_file_hash: Option<String>,
+    pub encrypted_file_hash: Option<String>,
+    pub mime_type: Option<String>,
+    pub media_type: Option<String>,
+    pub blossom_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -187,6 +198,58 @@ impl WnClient {
         Ok(())
     }
 
+    pub fn upload_media_to(
+        &self,
+        group_id: &str,
+        path: &Path,
+        caption: Option<&str>,
+    ) -> Result<MediaFileRecord> {
+        let group_id = group_id.trim();
+        if group_id.is_empty() {
+            bail!("White Noise group id is empty");
+        }
+        if !path.is_file() {
+            bail!("upload path is not a file: {}", path.display());
+        }
+        let _send_guard = self
+            .send_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("White Noise send lock poisoned"))?;
+        let mut command = Command::new(whitenoise_cli::resolve_wn(&self.config.wn_bin));
+        self.add_socket_arg(&mut command);
+        command.arg("media").arg("upload").arg("--json");
+        self.add_account_arg(&mut command);
+        command.arg("--send");
+        if let Some(caption) = caption.map(str::trim).filter(|caption| !caption.is_empty()) {
+            command.arg("--message").arg(caption);
+        }
+        command.arg(group_id).arg(path);
+        let value = run_json_command(command, "running wn media upload")?;
+        media_file_record(&value)
+    }
+
+    pub fn download_media_from(
+        &self,
+        group_id: &str,
+        original_file_hash: &str,
+    ) -> Result<MediaFileRecord> {
+        let group_id = group_id.trim();
+        if group_id.is_empty() {
+            bail!("White Noise group id is empty");
+        }
+        let original_file_hash = original_file_hash.trim();
+        if original_file_hash.is_empty() {
+            bail!("White Noise media hash is empty");
+        }
+        let mut command = Command::new(whitenoise_cli::resolve_wn(&self.config.wn_bin));
+        self.add_socket_arg(&mut command);
+        command.arg("media").arg("download").arg("--json");
+        self.add_account_arg(&mut command);
+        command.arg(group_id).arg(original_file_hash);
+        let value = run_json_command(command, "running wn media download")?;
+        media_file_record(&value)
+    }
+
     pub fn parse_events_from_reader(reader: impl Read) -> impl Iterator<Item = Result<Value>> {
         serde_json::Deserializer::from_reader(reader)
             .into_iter::<Value>()
@@ -263,6 +326,40 @@ impl WnClient {
     }
 }
 
+fn run_json_command(mut command: Command, context: &str) -> Result<Value> {
+    let output = command.output().context(context.to_string())?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = format!("{stdout}\n{stderr}").trim().to_string();
+        if detail.is_empty() {
+            bail!("{context} exited with {}", output.status);
+        }
+        bail!("{context} exited with {}: {detail}", output.status);
+    }
+    serde_json::from_slice(&output.stdout).with_context(|| format!("{context}: parsing JSON"))
+}
+
+fn media_file_record(value: &Value) -> Result<MediaFileRecord> {
+    let value = value.get("result").unwrap_or(value);
+    let record = MediaFileRecord {
+        file_path: find_string(value, &["file_path", "filePath", "path"]).map(PathBuf::from),
+        original_file_hash: find_string(value, &["original_file_hash", "originalFileHash"]),
+        encrypted_file_hash: find_string(value, &["encrypted_file_hash", "encryptedFileHash"]),
+        mime_type: find_string(value, &["mime_type", "mimeType"]),
+        media_type: find_string(value, &["media_type", "mediaType"]),
+        blossom_url: find_string(value, &["blossom_url", "blossomUrl", "url"]),
+    };
+    if record.file_path.is_none()
+        && record.original_file_hash.is_none()
+        && record.encrypted_file_hash.is_none()
+        && record.blossom_url.is_none()
+    {
+        bail!("wn media command did not return media file metadata");
+    }
+    Ok(record)
+}
+
 fn message_events(value: &Value, trigger: Option<String>, is_initial: bool) -> Vec<MessageEvent> {
     match value {
         Value::Array(values) => values
@@ -303,7 +400,10 @@ fn unsupported_message(text: &str, attachments: &[AttachmentInfo]) -> Option<Str
         return None;
     }
 
-    Some("Attachment received. Metadata was saved; send /attachments or /attach <id>.".to_string())
+    Some(
+        "Attachment received. Pictures are ingested automatically; send /attachments or /attach <id>."
+            .to_string(),
+    )
 }
 
 fn find_group_id(value: &Value) -> Option<String> {
@@ -554,6 +654,116 @@ mod tests {
         assert_eq!(
             events[1].group_id.as_deref(),
             Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn parses_media_file_command_json() {
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"file_path":"/tmp/shot.png","original_file_hash":"aaaa","encrypted_file_hash":"bbbb","mime_type":"image/png","blossom_url":"https://blob.example/shot"}}"#,
+        )
+        .unwrap();
+        let media = media_file_record(&value).unwrap();
+        assert_eq!(
+            media.file_path.as_deref(),
+            Some(std::path::Path::new("/tmp/shot.png"))
+        );
+        assert_eq!(media.original_file_hash.as_deref(), Some("aaaa"));
+        assert_eq!(
+            media.blossom_url.as_deref(),
+            Some("https://blob.example/shot")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_media_invokes_wn_and_parses_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let wn = temp.path().join("wn");
+        let log = temp.path().join("wn.log");
+        std::fs::write(
+            &wn,
+            format!(
+                r#"#!/bin/sh
+printf '<%s>\n' "$@" > '{}'
+printf '%s\n' '{{"result":{{"original_file_hash":"aaaa","encrypted_file_hash":"bbbb","blossom_url":"https://blob.example/shot"}}}}'
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&wn).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wn, permissions).unwrap();
+        let file = temp.path().join("shot.png");
+        std::fs::write(&file, "image bytes").unwrap();
+
+        let mut config = crate::config::Config::template().whitenoise;
+        config.wn_bin = wn.display().to_string();
+        let client = WnClient::new(config);
+
+        let media = client
+            .upload_media_to(
+                "0123456789abcdef0123456789abcdef",
+                &file,
+                Some("phone caption"),
+            )
+            .unwrap();
+
+        assert_eq!(media.original_file_hash.as_deref(), Some("aaaa"));
+        assert_eq!(
+            media.blossom_url.as_deref(),
+            Some("https://blob.example/shot")
+        );
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap(),
+            format!(
+                "<media>\n<upload>\n<--json>\n<--send>\n<--message>\n<phone caption>\n<0123456789abcdef0123456789abcdef>\n<{}>\n",
+                file.display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_media_invokes_wn_and_parses_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let wn = temp.path().join("wn");
+        let log = temp.path().join("wn.log");
+        let downloaded = temp.path().join("shot.png");
+        std::fs::write(
+            &wn,
+            format!(
+                r#"#!/bin/sh
+printf '<%s>\n' "$@" > '{}'
+printf '%s\n' '{{"result":{{"file_path":"{}","original_file_hash":"aaaa"}}}}'
+"#,
+                log.display(),
+                downloaded.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&wn).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wn, permissions).unwrap();
+
+        let mut config = crate::config::Config::template().whitenoise;
+        config.wn_bin = wn.display().to_string();
+        let client = WnClient::new(config);
+
+        let media = client
+            .download_media_from("0123456789abcdef0123456789abcdef", "aaaa")
+            .unwrap();
+
+        assert_eq!(media.file_path.as_deref(), Some(downloaded.as_path()));
+        assert_eq!(media.original_file_hash.as_deref(), Some("aaaa"));
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap(),
+            "<media>\n<download>\n<--json>\n<0123456789abcdef0123456789abcdef>\n<aaaa>\n"
         );
     }
 

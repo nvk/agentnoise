@@ -7,25 +7,53 @@ pub enum ChatCommand {
     Help,
     Status,
     Agents,
-    AgentSessions { limit: Option<usize> },
-    New { name: Option<String> },
-    Rename { name: Option<String> },
+    AgentSessions {
+        limit: Option<usize>,
+    },
+    New {
+        name: Option<String>,
+    },
+    Rename {
+        name: Option<String>,
+    },
     Sessions,
-    Resume { target: Option<String> },
+    Resume {
+        target: Option<String>,
+    },
     Close,
     Repos,
-    Use { repo_alias: String },
+    Use {
+        repo_alias: String,
+    },
     Pwd,
-    Ls { path: Option<String> },
-    Cd { path: String },
+    Ls {
+        path: Option<String>,
+    },
+    Cd {
+        path: String,
+    },
     Jobs,
-    Tail { job_id: String },
-    Cancel { job_id: String },
+    Tail {
+        job_id: String,
+    },
+    Cancel {
+        job_id: String,
+    },
     Approvals,
-    Approve { approval_id: String },
-    Deny { approval_id: String },
+    Approve {
+        approval_id: String,
+    },
+    Deny {
+        approval_id: String,
+    },
     Attachments,
-    Attach { target: Option<String> },
+    Attach {
+        target: Option<String>,
+    },
+    Download {
+        target: String,
+        index: Option<usize>,
+    },
     Worktrees,
     Worktree(WorktreeCommand),
     Run(AgentRequest),
@@ -100,6 +128,7 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
         "attach" => Ok(ChatCommand::Attach {
             target: optional(rest),
         }),
+        "download" | "down" => parse_download(rest),
         "worktrees" => Ok(ChatCommand::Worktrees),
         "worktree" => parse_worktree(rest),
         "codex" => parse_run(AgentKind::Codex, rest),
@@ -112,6 +141,28 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
         "hermes-resume" => parse_resume(AgentKind::Hermes, rest),
         _ => parse_profile_command(&command, rest),
     }
+}
+
+fn parse_download(rest: &str) -> Result<ChatCommand> {
+    let (target, maybe_index) = split_first(rest);
+    if target.is_empty() {
+        bail!("usage: /download <attachment-id|number> [file-number]");
+    }
+    let index = if maybe_index.trim().is_empty() {
+        None
+    } else {
+        let index = maybe_index.trim().parse::<usize>().map_err(|_| {
+            anyhow::anyhow!("usage: /download <attachment-id|number> [file-number]")
+        })?;
+        if index == 0 {
+            bail!("usage: /download <attachment-id|number> [file-number]");
+        }
+        Some(index)
+    };
+    Ok(ChatCommand::Download {
+        target: target.to_string(),
+        index,
+    })
 }
 
 fn parse_profile_command(command: &str, rest: &str) -> Result<ChatCommand> {
@@ -403,6 +454,13 @@ mod tests {
             parse_chat_command("/attach 1").unwrap(),
             ChatCommand::Attach {
                 target: Some("1".to_string())
+            }
+        );
+        assert_eq!(
+            parse_chat_command("/download att-123 2").unwrap(),
+            ChatCommand::Download {
+                target: "att-123".to_string(),
+                index: Some(2)
             }
         );
         assert_eq!(

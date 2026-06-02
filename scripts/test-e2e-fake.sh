@@ -124,7 +124,7 @@ if grep -q "replies: none before timeout" "$tmpdir/status.out"; then
   echo "fake-phone /status did not receive a reply" >&2
   exit 1
 fi
-if ! grep -q "Status: OK" "$tmpdir/status.out"; then
+if ! grep -q "running |" "$tmpdir/status.out"; then
   sed -n '1,200p' "$tmpdir/status.out" >&2
   sed -n '1,200p' "$tmpdir/status.err" >&2 || true
   echo "fake-phone /status did not receive the agentnoise status reply" >&2

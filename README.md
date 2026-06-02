@@ -22,6 +22,13 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.29** - **Media ingest and fake-phone TUI.** Phone-sent picture
+attachments are saved into the active workspace, captioned prompts include the
+image paths automatically, `/wiki` image prompts use the LLM Wiki ingest
+framing, and agent replies can upload generated workspace images back to the
+chat. Added the default-built `agentnoise fake-phone tui` with live replies,
+`:attach <path> [caption]`, chat switching, and automatic handoff following.
+
 **v0.1.28** - **Transport/worker split.** Homebrew, launchd, systemd, and
 rc services now run `agentnoise transport run`, which keeps White Noise
 subscriptions and pairing alive and writes jobs to a local SQLite queue. Local
@@ -645,6 +652,7 @@ plaintext burner identity and avoids Secret Service setup.
 - `/deny <approval>`
 - `/attachments`
 - `/attach <number|id>`
+- `/download <number|id> [file-number]`
 - `/worktrees`
 - `/worktree new <name>`
 - `/worktree use <name>`
@@ -700,9 +708,20 @@ GUI-backed sync folders. `agentnoise doctor` warns about this; run
 `agentnoise up` from an interactive terminal if you must use an iCloud
 workspace.
 
-Images and files sent by the phone are not handed to coding agents yet.
-agentnoise saves the metadata it can see, replies with an attachment id, and
-lets the user inspect it with `/attachments` and `/attach <id>`.
+Images sent by the phone are accepted automatically. agentnoise saves the
+attachment metadata, calls `wn media download` when White Noise exposes a media
+file hash, copies downloaded pictures into
+`.agentnoise/attachments/<attachment-id>/` under the chat's selected
+repo/worktree, and adds those local file paths to the agent prompt when the
+image arrives with a caption or work-chat follow-up. That workspace-local
+default is readable by the default `bondage`/nono agent profiles because it sits
+inside the same workdir passed to the agent. `/wiki` image prompts are framed
+for the LLM Wiki file-ingestion workflow so the wiki can create raw metadata
+stubs before continuing the requested wiki task. `/attachments` and `/attach
+<id>` show saved metadata and local paths; `/download <id>` remains available
+for manual retrieval. When a completed agent job references an image file it
+created in the selected repo/worktree, agentnoise sends that picture back
+through White Noise media upload automatically.
 
 Git worktrees are opt-in per chat. `/worktree new fix-ui` creates a git
 worktree under the configured `runner.worktree_dir`, switches only that chat to
@@ -718,6 +737,7 @@ touching the real phone identity or the normal agentnoise keychain.
 
 ```sh
 agentnoise fake-phone plan
+agentnoise fake-phone tui --pin 123456
 agentnoise fake-phone roundtrip --pin 123456 /status
 agentnoise fake-phone roundtrip /help
 agentnoise fake-phone roundtrip \
@@ -727,6 +747,16 @@ agentnoise fake-phone roundtrip \
   --expect agentnoise-e2e-ok \
   /codex "Reply with exactly: agentnoise-e2e-ok"
 ```
+
+`fake-phone tui` is compiled into the default `agentnoise` binary, including
+Homebrew installs. It opens a human-driven terminal fake phone with the same
+burner identity/root as `roundtrip`: type `/status`, `/help`, `/wiki ...`, or
+plain text to send to the active chat. Local TUI commands start with `:` so
+they do not collide with agentnoise slash commands: `:attach <path> [caption]`
+sends a picture/file through White Noise media, `:chats` lists followed chats,
+`:use <number|group-prefix>` switches chats, and `:quit` exits. The TUI
+auto-follows `whitenoise://chat/<group>` job handoff links unless
+`--no-follow-handoffs` is set.
 
 For first-pairing tests, pass the current desktop PIN. After pairing, omit
 `--pin`. The harness resends the test message for the timeout window because a

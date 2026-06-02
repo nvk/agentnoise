@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -39,6 +40,15 @@ pub struct FakePhoneRoundtrip {
     pub min_replies: usize,
     pub require_job_final: bool,
     pub shared_daemon: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FakePhoneTerminal {
+    pub root: PathBuf,
+    pub pin: Option<String>,
+    pub group_name: String,
+    pub shared_daemon: bool,
+    pub follow_handoffs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +130,411 @@ pub fn roundtrip(config: &Config, options: FakePhoneRoundtrip) -> Result<FakePho
         matched: outcome.matched,
         saw_job_final: outcome.saw_job_final,
     })
+}
+
+pub fn terminal(config: &Config, options: FakePhoneTerminal) -> Result<()> {
+    let plan = plan(config, Some(&options.root));
+    fs::create_dir_all(&plan.root).with_context(|| format!("creating {}", plan.root.display()))?;
+    fs::create_dir_all(&plan.data_dir)
+        .with_context(|| format!("creating {}", plan.data_dir.display()))?;
+    fs::create_dir_all(&plan.logs_dir)
+        .with_context(|| format!("creating {}", plan.logs_dir.display()))?;
+
+    let _daemon = if options.shared_daemon {
+        None
+    } else {
+        let mut daemon = ChildGuard::new(start_fake_wnd(config, &plan)?);
+        wait_for_socket(&plan, &mut daemon.child, Duration::from_secs(10))?;
+        Some(daemon)
+    };
+
+    let mut fake_config = fake_whitenoise_config(config, &plan, options.shared_daemon);
+    let phone_npub = create_or_reuse_identity(&fake_config, &plan)?;
+    fake_config.account = Some(phone_npub.clone());
+    let agent_npub = config
+        .whitenoise
+        .bot_npub
+        .as_deref()
+        .or(config.whitenoise.account.as_deref())
+        .map(str::trim)
+        .filter(|npub| !npub.is_empty())
+        .context("config has no agentnoise npub; run `agentnoise setup` first")?;
+    let group_id = create_or_reuse_group(&fake_config, &plan, &options.group_name, agent_npub)?;
+    let client = WnClient::new(fake_config.clone_with_group(&group_id));
+    if let Some(pin) = options
+        .pin
+        .as_deref()
+        .map(str::trim)
+        .filter(|pin| !pin.is_empty())
+    {
+        client.send_to(&group_id, pin)?;
+    }
+
+    run_terminal_loop(
+        client,
+        fake_config,
+        phone_npub,
+        group_id,
+        options.follow_handoffs,
+    )
+}
+
+#[derive(Debug)]
+enum TerminalEvent {
+    Input(String),
+    EndInput,
+    Message(MessageForTerminal),
+    Error(String),
+}
+
+#[derive(Debug)]
+struct MessageForTerminal {
+    group_id: String,
+    sender: Option<String>,
+    text: String,
+    attachments: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalCommand {
+    Help,
+    Quit,
+    Chats,
+    Use(String),
+    Attach {
+        path: PathBuf,
+        caption: Option<String>,
+    },
+    Pin(String),
+    Send(String),
+    Empty,
+}
+
+fn run_terminal_loop(
+    client: WnClient,
+    config: WhitenoiseConfig,
+    phone_npub: String,
+    initial_group_id: String,
+    follow_handoffs: bool,
+) -> Result<()> {
+    let (tx, rx) = mpsc::channel();
+    spawn_terminal_stdin(tx.clone());
+
+    let mut active_group = initial_group_id.clone();
+    let mut groups = vec![initial_group_id.clone()];
+    let mut children = vec![subscribe_terminal_group(
+        client.clone(),
+        config.clone(),
+        initial_group_id.clone(),
+        tx.clone(),
+    )?];
+
+    print_terminal_intro(&phone_npub, &initial_group_id, follow_handoffs);
+    print_terminal_prompt(&active_group);
+    for item in rx {
+        match item {
+            TerminalEvent::Input(line) => {
+                let command = parse_terminal_input(&line);
+                let should_quit =
+                    handle_terminal_command(&client, &mut active_group, &groups, command)?;
+                if should_quit {
+                    break;
+                }
+                print_terminal_prompt(&active_group);
+            }
+            TerminalEvent::EndInput => break,
+            TerminalEvent::Message(message) => {
+                print_terminal_message(&active_group, &message);
+                if follow_handoffs
+                    && let Some(next_group_id) = extract_chat_uri_group_id(&message.text)
+                    && !groups.iter().any(|group_id| group_id == &next_group_id)
+                {
+                    match subscribe_terminal_group(
+                        client.clone(),
+                        config.clone(),
+                        next_group_id.clone(),
+                        tx.clone(),
+                    ) {
+                        Ok(child) => {
+                            children.push(child);
+                            groups.push(next_group_id.clone());
+                            active_group = next_group_id.clone();
+                            println!(
+                                "fake-phone: followed handoff; active chat {}",
+                                short_group_id(&active_group)
+                            );
+                        }
+                        Err(error) => {
+                            println!(
+                                "fake-phone: failed to follow handoff {}: {error:#}",
+                                short_group_id(&next_group_id)
+                            );
+                        }
+                    }
+                }
+                print_terminal_prompt(&active_group);
+            }
+            TerminalEvent::Error(error) => {
+                println!("fake-phone: {error}");
+                print_terminal_prompt(&active_group);
+            }
+        }
+    }
+
+    for child in &mut children {
+        child.kill().ok();
+        child.wait().ok();
+    }
+    println!();
+    println!("fake-phone: bye");
+    Ok(())
+}
+
+fn spawn_terminal_stdin(tx: mpsc::Sender<TerminalEvent>) {
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(TerminalEvent::Input(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(TerminalEvent::Error(format!("stdin failed: {error}")));
+                    break;
+                }
+            }
+        }
+        let _ = tx.send(TerminalEvent::EndInput);
+    });
+}
+
+fn subscribe_terminal_group(
+    client: WnClient,
+    config: WhitenoiseConfig,
+    group_id: String,
+    tx: mpsc::Sender<TerminalEvent>,
+) -> Result<Child> {
+    if let Err(error) = whitenoise_cli::accept_group(&config, &group_id) {
+        eprintln!("agentnoise fake-phone tui: failed to accept group {group_id}: {error:#}");
+    }
+    let mut child = client.subscribe_group_with_limit(&group_id, 20)?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("fake phone tui subscribe did not expose stdout")?;
+    thread::spawn(move || {
+        for value in WnClient::parse_events_from_reader(stdout) {
+            let value = match value {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = tx.send(TerminalEvent::Error(format!("{error:#}")));
+                    return;
+                }
+            };
+            for event in WnClient::parse_events_for_group(&value, &group_id) {
+                let text = if event.text.trim().is_empty() {
+                    event.unsupported.unwrap_or_default()
+                } else {
+                    event.text
+                };
+                let _ = tx.send(TerminalEvent::Message(MessageForTerminal {
+                    group_id: group_id.clone(),
+                    sender: event.sender,
+                    text,
+                    attachments: event.attachments.len(),
+                }));
+            }
+        }
+    });
+    Ok(child)
+}
+
+fn handle_terminal_command(
+    client: &WnClient,
+    active_group: &mut String,
+    groups: &[String],
+    command: TerminalCommand,
+) -> Result<bool> {
+    match command {
+        TerminalCommand::Help => print_terminal_help(),
+        TerminalCommand::Quit => return Ok(true),
+        TerminalCommand::Chats => print_terminal_chats(active_group, groups),
+        TerminalCommand::Use(target) => match resolve_terminal_group(groups, &target) {
+            Some(group_id) => {
+                *active_group = group_id.to_string();
+                println!("fake-phone: active chat {}", short_group_id(active_group));
+            }
+            None => println!("fake-phone: no such chat: {target}"),
+        },
+        TerminalCommand::Attach { path, caption } => {
+            let media = client.upload_media_to(active_group, &path, caption.as_deref())?;
+            let hash = media
+                .original_file_hash
+                .as_deref()
+                .or(media.encrypted_file_hash.as_deref())
+                .unwrap_or("uploaded");
+            println!(
+                "fake-phone: sent attachment {} ({})",
+                path.display(),
+                short_hash(hash)
+            );
+        }
+        TerminalCommand::Pin(pin) => {
+            client.send_to(active_group, &pin)?;
+        }
+        TerminalCommand::Send(text) => {
+            client.send_to(active_group, &text)?;
+        }
+        TerminalCommand::Empty => {}
+    }
+    Ok(false)
+}
+
+fn parse_terminal_input(line: &str) -> TerminalCommand {
+    let line = line.trim();
+    if line.is_empty() {
+        return TerminalCommand::Empty;
+    }
+    let Some(rest) = line.strip_prefix(':') else {
+        return TerminalCommand::Send(line.to_string());
+    };
+    let (command, rest) = split_first(rest);
+    match command.to_ascii_lowercase().as_str() {
+        "help" | "h" | "?" => TerminalCommand::Help,
+        "quit" | "q" | "exit" => TerminalCommand::Quit,
+        "chats" | "groups" | "g" => TerminalCommand::Chats,
+        "use" | "chat" | "switch" => {
+            if rest.trim().is_empty() {
+                TerminalCommand::Chats
+            } else {
+                TerminalCommand::Use(rest.trim().to_string())
+            }
+        }
+        "attach" | "media" | "image" | "file" => {
+            let (path, caption) = split_first(rest);
+            if path.is_empty() {
+                TerminalCommand::Help
+            } else {
+                TerminalCommand::Attach {
+                    path: PathBuf::from(path),
+                    caption: (!caption.trim().is_empty()).then(|| caption.trim().to_string()),
+                }
+            }
+        }
+        "pin" => {
+            if rest.trim().is_empty() {
+                TerminalCommand::Help
+            } else {
+                TerminalCommand::Pin(rest.trim().to_string())
+            }
+        }
+        _ => TerminalCommand::Send(line.to_string()),
+    }
+}
+
+fn split_first(input: &str) -> (&str, &str) {
+    let input = input.trim();
+    match input.find(char::is_whitespace) {
+        Some(index) => (&input[..index], input[index..].trim()),
+        None => (input, ""),
+    }
+}
+
+fn resolve_terminal_group<'a>(groups: &'a [String], target: &str) -> Option<&'a str> {
+    if let Ok(index) = target.parse::<usize>()
+        && index > 0
+    {
+        return groups.get(index - 1).map(String::as_str);
+    }
+    groups
+        .iter()
+        .find(|group| group.as_str() == target || group.starts_with(target))
+        .map(String::as_str)
+}
+
+fn print_terminal_intro(phone_npub: &str, group_id: &str, follow_handoffs: bool) {
+    println!("agentnoise fake phone");
+    println!("npub: {phone_npub}");
+    println!("active chat: {}", short_group_id(group_id));
+    println!(
+        "handoffs: {}",
+        if follow_handoffs {
+            "auto-follow"
+        } else {
+            "off"
+        }
+    );
+    println!("type /status, /help, /wiki ... or any message to send it");
+    println!("local commands start with ':'; try :help");
+}
+
+fn print_terminal_help() {
+    println!("fake-phone commands");
+    println!("  plain text or /status       send to active chat");
+    println!("  :attach <path> [caption]    send a picture/file with optional caption");
+    println!("  :pin <code>                 send a pairing PIN");
+    println!("  :chats                      list followed chats");
+    println!("  :use <number|group-prefix>  switch active chat");
+    println!("  :quit                       exit");
+}
+
+fn print_terminal_chats(active_group: &str, groups: &[String]) {
+    println!("fake-phone chats");
+    for (index, group_id) in groups.iter().enumerate() {
+        let marker = if group_id == active_group { "*" } else { " " };
+        println!("{marker} {}. {}", index + 1, short_group_id(group_id));
+    }
+}
+
+fn print_terminal_message(active_group: &str, message: &MessageForTerminal) {
+    let active = if message.group_id == active_group {
+        "*"
+    } else {
+        " "
+    };
+    let sender = message
+        .sender
+        .as_deref()
+        .map(short_sender)
+        .unwrap_or_else(|| "unknown".to_string());
+    let attachments = if message.attachments == 0 {
+        String::new()
+    } else {
+        format!(" [{} attachment(s)]", message.attachments)
+    };
+    println!(
+        "\n{active}[{}] {sender}: {}{attachments}",
+        short_group_id(&message.group_id),
+        message.text
+    );
+}
+
+fn print_terminal_prompt(active_group: &str) {
+    print!("fake-phone[{}]> ", short_group_id(active_group));
+    let _ = io::stdout().flush();
+}
+
+fn short_group_id(group_id: &str) -> String {
+    group_id.chars().take(8).collect()
+}
+
+fn short_sender(sender: &str) -> String {
+    if sender.chars().count() <= 12 {
+        sender.to_string()
+    } else {
+        let head = sender.chars().take(8).collect::<String>();
+        format!("{head}…")
+    }
+}
+
+fn short_hash(hash: &str) -> String {
+    if hash.chars().count() <= 12 {
+        hash.to_string()
+    } else {
+        hash.chars().take(12).collect()
+    }
 }
 
 struct ChildGuard {
@@ -707,6 +1122,52 @@ mod tests {
             Some("abcdef".to_string())
         );
         assert!(load_stored_group(&plan, "npub1other").unwrap().is_none());
+    }
+
+    #[test]
+    fn fake_phone_tui_parses_local_commands_without_stealing_slash_commands() {
+        assert_eq!(
+            parse_terminal_input("/status"),
+            TerminalCommand::Send("/status".to_string())
+        );
+        assert_eq!(
+            parse_terminal_input(":pin 123456"),
+            TerminalCommand::Pin("123456".to_string())
+        );
+        assert_eq!(
+            parse_terminal_input(":use abc123"),
+            TerminalCommand::Use("abc123".to_string())
+        );
+        assert_eq!(parse_terminal_input(":quit"), TerminalCommand::Quit);
+    }
+
+    #[test]
+    fn fake_phone_tui_parses_attachment_command() {
+        assert_eq!(
+            parse_terminal_input(":attach /tmp/shot.png /wiki inspect this"),
+            TerminalCommand::Attach {
+                path: PathBuf::from("/tmp/shot.png"),
+                caption: Some("/wiki inspect this".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn fake_phone_tui_resolves_group_by_number_or_prefix() {
+        let groups = vec![
+            "abcdef0123456789".to_string(),
+            "feedface01234567".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_terminal_group(&groups, "2"),
+            Some("feedface01234567")
+        );
+        assert_eq!(
+            resolve_terminal_group(&groups, "abcdef"),
+            Some("abcdef0123456789")
+        );
+        assert_eq!(resolve_terminal_group(&groups, "3"), None);
     }
 
     #[test]
