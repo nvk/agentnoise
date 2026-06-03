@@ -22,6 +22,11 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.34** - **Cleaner failed-job replies.** Failed Codex/Claude jobs no
+longer dump raw JSON stream fragments into phone chat when no final assistant
+answer was decoded. The chat reply now gives a concise failure reason and keeps
+the raw log available via `/tail <job>`.
+
 **v0.1.33** - **Quieter quiet-mode heartbeats.** `progress_mode = "quiet"`
 now enforces a five-minute minimum between "still working" chat pings, while
 still allowing `silence_ping_seconds = 0` to disable them entirely. The ping

@@ -900,7 +900,7 @@ fn summarize(
     let mut combined = String::new();
     if let Some(stdout) = decoded_stdout.as_deref() {
         combined.push_str(stdout.trim());
-    } else if !stdout.trim().is_empty() {
+    } else if should_include_raw_stdout(agent, success) && !stdout.trim().is_empty() {
         combined.push_str(stdout.trim());
     }
 
@@ -916,13 +916,24 @@ fn summarize(
         combined.push_str(&stderr);
     }
     if combined.is_empty() {
-        return "job produced no output".to_string();
+        return if success {
+            "job produced no output".to_string()
+        } else {
+            "agent exited before producing a final answer".to_string()
+        };
     }
 
     let formatted = format_chat_text(&combined);
     let chars = formatted.chars().collect::<Vec<_>>();
     let start = chars.len().saturating_sub(max_chars);
     chars[start..].iter().collect()
+}
+
+fn should_include_raw_stdout(agent: AgentKind, success: bool) -> bool {
+    match agent {
+        AgentKind::Codex | AgentKind::Claude => success,
+        AgentKind::Hermes => true,
+    }
 }
 
 fn decode_agent_stdout(agent: AgentKind, stdout: &str) -> Option<String> {
@@ -1600,6 +1611,24 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         assert_eq!(
             summarize(AgentKind::Claude, stdout, "", true, 1000),
             "Done."
+        );
+    }
+
+    #[test]
+    fn failed_codex_summary_does_not_dump_raw_json_stream_tail() {
+        let stdout = r#""pair-programming\",\n        \"remote-control\",\n        \"vscode-extension\"\n      ],\n      \"visibility\": \"public\",\n      \"forks\": 0,\n      \"open_issues\": 4,\n      \"watchers\": 2\n    }\n  ]\n}\n","exit_code":0,"status":"completed"}}"#;
+
+        assert_eq!(
+            summarize(AgentKind::Codex, stdout, "", false, 1000),
+            "agent exited before producing a final answer"
+        );
+    }
+
+    #[test]
+    fn failed_hermes_summary_keeps_raw_stdout() {
+        assert_eq!(
+            summarize(AgentKind::Hermes, "useful failure detail", "", false, 1000),
+            "useful failure detail"
         );
     }
 

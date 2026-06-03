@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.34 - 2026-06-03
+
+- Kept failed Codex/Claude jobs from dumping raw JSON stream fragments into
+  phone chat when no final assistant answer was decoded; failed replies now use
+  a concise failure reason and leave raw logs in `/tail <job>`.
+
 ## 0.1.33 - 2026-06-03
 
 - Made quiet-mode heartbeats less chatty: `progress_mode = "quiet"` now clamps
