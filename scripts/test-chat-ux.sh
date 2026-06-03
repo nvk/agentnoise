@@ -42,7 +42,8 @@ expect() {
 }
 
 send_msg alpha111111 "/status"
-expect "running | direct"
+expect "agentnoise: running"
+expect "launcher: direct"
 expect "jobs: 0 active"
 expect "repos: 1"
 
@@ -59,8 +60,10 @@ expect "g-alpha"
 expect "/jump 1"
 
 send_msg alpha111111 "/new bugfix ui"
-expect "created bugfix-ui"
-expect "continue in the new chat"
+expect "Created chat: bugfix-ui"
+expect "Use /list to switch."
+expect "Ready: bugfix-ui"
+expect "Try: /codex <prompt>"
 
 send_msg beta222222 "/rename bugfix"
 expect "session bugfix"

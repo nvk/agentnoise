@@ -1,5 +1,20 @@
 # Release Notes
 
+## 0.1.31 - 2026-06-03
+
+- Added `runner.progress_mode` with a default `quiet` mode that suppresses raw
+  command/tool progress and routine agent self-narration from phone chat while
+  keeping approvals, errors, retries, and quiet-job pings visible.
+- Reworked job accepted, progress, work-chat handoff, and final-result copy to
+  be outcome-first mobile chat messages instead of job-log style text. Long
+  finals are compacted for phone and point to `/tail <job>` for the full answer.
+- Strengthened the injected agent prompt with explicit White Noise mobile-chat
+  delivery context: short result first, no raw logs or internal narration, and
+  compact wiki digests with full detail stored in files.
+- Prevented bare follow-up text in a work chat with an active queued job from
+  silently launching a second job; agentnoise now explains that the previous
+  job is still active and offers `/cancel`.
+
 ## 0.1.30 - 2026-06-02
 
 - Extended White Noise media ingest beyond images to the full current chat-media

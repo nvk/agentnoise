@@ -1030,15 +1030,17 @@ fn agentnoise_prompt(request: &AgentRequest) -> String {
     let mut context = vec![
         "Agentnoise context:".to_string(),
         "- You are running under agentnoise, a White Noise phone-to-desktop control bridge.".to_string(),
-        "- The user is chatting from a phone; reply concise, outcome-first, with no Markdown tables or raw logs unless asked.".to_string(),
-        "- Full logs stay local; mention /tail <job> when extra detail is useful.".to_string(),
+        "- Reply destination: a White Noise mobile work chat. Your final answer may appear as a small phone notification or chat bubble.".to_string(),
+        "- Put the outcome or needed action on the first line. Default budget: 6 short lines or about 700-900 characters.".to_string(),
+        "- Use plain text and short bullets. No Markdown tables, raw logs, shell commands, tool names, or internal process narration unless the user explicitly asks.".to_string(),
+        "- If the useful answer is long, give a compact digest first and say what to ask for next. Full logs stay local through /tail <job>.".to_string(),
         "- The selected repo, cwd, and session come from agentnoise. Do not ask the user to SSH into this machine.".to_string(),
         "- If this task touches agentnoise, consider pairing, service startup, relay/message reliability, and phone UX.".to_string(),
     ];
 
     if looks_like_wiki_prompt(&request.prompt) {
         context.push(
-            "- LLM-Wiki instructions or plugins may be available; return a compact digest with paths and sources, not a pasted article.".to_string(),
+            "- LLM-Wiki instructions or plugins may be available; store full detail in wiki files and return only a compact digest with saved paths/sources.".to_string(),
         );
     }
     if let Some(repo) = request.repo_alias.as_deref() {
@@ -1530,6 +1532,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         let prompt = agentnoise_prompt(&request);
 
         assert!(prompt.contains("LLM-Wiki"));
+        assert!(prompt.contains("Reply destination: a White Noise mobile work chat"));
+        assert!(prompt.contains("No Markdown tables, raw logs, shell commands"));
         assert!(prompt.contains("User request:\n@wiki research chat UX"));
     }
 

@@ -1038,13 +1038,17 @@ fn reply_requests_pairing_pin(reply: &str) -> bool {
 
 fn is_job_session_started_reply(text: &str) -> bool {
     let text = text.trim();
-    (text.starts_with("Started session: ") || text.starts_with("started "))
+    (text.starts_with("Started session: ")
+        || text.starts_with("Started work chat: ")
+        || text.starts_with("started "))
         && text.contains("whitenoise://chat/")
 }
 
 fn is_job_ack_reply(text: &str) -> bool {
     let text = text.trim();
     ((text.starts_with("Got it: ") || text.contains("\nGot it: ")) && text.contains(" job queued"))
+        || text.starts_with("Queued.")
+        || text.starts_with("Queued resume.")
         || (text.starts_with("Job ") && text.contains(": started"))
         || text
             .lines()
@@ -1066,13 +1070,17 @@ fn is_job_final_reply(text: &str) -> bool {
     let Some(first) = text.lines().next().map(str::trim) else {
         return false;
     };
-    (first.starts_with("Job ") || first.starts_with("an-"))
+    let old_style = (first.starts_with("Job ") || first.starts_with("an-"))
         && (first.contains(" done")
             || first.contains(" succeeded")
             || first.contains(" failed")
             || first.contains(" cancelled")
-            || first.contains(" interrupted"))
-        && text.contains("\n/tail ")
+            || first.contains(" interrupted"));
+    let new_style = ["Done", "Failed", "Cancelled", "Interrupted"]
+        .iter()
+        .any(|status| first.starts_with(&format!("{status} · an-")));
+
+    (old_style || new_style) && (text.contains("\n/tail ") || text.contains(": /tail "))
 }
 
 #[cfg(test)]
@@ -1190,7 +1198,7 @@ mod tests {
             "/status"
         ));
         assert!(is_command_reply(
-            "running | bondage\nmain | sandbox:/",
+            "agentnoise: running\nlauncher: bondage\nchat: main\nworkspace: sandbox:/",
             "/status"
         ));
     }
@@ -1203,7 +1211,7 @@ mod tests {
             &expected
         ));
         assert!(reply_should_stop_resending(
-            "codex queued\nsandbox:/\nI'll reply here when done.",
+            "Queued.\ncodex · sandbox:/\nI'll post the answer here.",
             &expected
         ));
         assert!(reply_should_stop_resending(
@@ -1211,7 +1219,7 @@ mod tests {
             &expected
         ));
         assert!(reply_should_stop_resending(
-            "started m5-research\nopen: whitenoise://chat/abcdef0123456789\ncontinue there",
+            "Started work chat: m5-research\nOpen: whitenoise://chat/abcdef0123456789",
             &expected
         ));
         assert!(reply_should_stop_resending("all done", &expected));
@@ -1230,7 +1238,7 @@ mod tests {
             "Pairing PIN invalid or expired. Check the desktop log for the current PIN."
         ));
         assert!(!reply_requests_pairing_pin(
-            "running | direct\nmain | sandbox:/"
+            "agentnoise: running\nlauncher: direct\nchat: main\nworkspace: sandbox:/"
         ));
     }
 
@@ -1241,6 +1249,9 @@ mod tests {
         assert!(is_job_final_reply("an-12345 done\nok\n\n/tail an-12345"));
         assert!(is_job_final_reply(
             "an-12345 failed\nboom\n\n/tail an-12345"
+        ));
+        assert!(is_job_final_reply(
+            "Done · an-12345\nok\n\nDetails: /tail an-12345"
         ));
     }
 
@@ -1270,9 +1281,9 @@ mod tests {
             shared_daemon: false,
         };
         let mut outcome = ReplyOutcome::new(&options);
-        outcome.record("codex queued".to_string());
+        outcome.record("Queued.\ncodex · sandbox:/\nI'll post the answer here.".to_string());
         assert!(!outcome.satisfied());
-        outcome.record("an-12345 done\nok\n\n/tail an-12345".to_string());
+        outcome.record("Done · an-12345\nok\n\nDetails: /tail an-12345".to_string());
         assert!(outcome.satisfied());
     }
 }

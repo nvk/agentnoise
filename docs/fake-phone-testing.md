@@ -97,7 +97,7 @@ Useful flags:
 ```sh
 agentnoise fake-phone roundtrip --timeout-seconds 120 /status
 agentnoise fake-phone roundtrip --root /tmp/agentnoise-fake-phone /help
-agentnoise fake-phone roundtrip --expect "running |" /status
+agentnoise fake-phone roundtrip --expect "agentnoise: running" /status
 agentnoise fake-phone roundtrip --require-job-final --expect done /codex "Reply exactly: done"
 ```
 

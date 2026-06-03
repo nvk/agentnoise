@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::ProgressMode;
 use crate::runner::AgentKind;
 use crate::text::short_ref;
 
@@ -135,7 +136,11 @@ pub fn parse_progress_line(agent: AgentKind, line: &str) -> Option<ProgressEvent
     })
 }
 
-pub fn render_progress(event: &ProgressEvent) -> String {
+pub fn render_progress(event: &ProgressEvent, mode: ProgressMode) -> Option<String> {
+    if !should_render_progress(event, mode) {
+        return None;
+    }
+
     let job = event
         .job_id
         .as_deref()
@@ -148,23 +153,114 @@ pub fn render_progress(event: &ProgressEvent) -> String {
         .filter(|detail| !detail.trim().is_empty())
         .map(|detail| format!("\n{}", detail.trim()))
         .unwrap_or_default();
-    match event.kind {
-        ProgressKind::Started => format!("{job} started\n{}", event.agent),
-        ProgressKind::Approval => format!("{job} approval needed{detail}"),
-        ProgressKind::Error => format!("{job} error{detail}"),
+    Some(match event.kind {
+        ProgressKind::Started => format!("Working · {job}\n{}", event.agent),
+        ProgressKind::Approval => format!("Approval needed · {job}{detail}"),
+        ProgressKind::Error => format!("Error · {job}{detail}"),
         ProgressKind::Tool => {
             let label = event.label.replace('_', " ");
-            format!("{job} working\n{label}{detail}")
+            format!("Working · {job}\n{label}{detail}")
         }
         ProgressKind::Step if event.label == "still running" => {
-            format!("{job} still running{detail}")
+            let detail = event
+                .detail
+                .as_deref()
+                .and_then(format_still_running_detail)
+                .unwrap_or_else(|| detail.trim().to_string());
+            if detail.is_empty() {
+                format!("Still working · {job}")
+            } else {
+                format!("Still working · {job}\n{detail}")
+            }
+        }
+        ProgressKind::Step if event.label == "retrying" => {
+            format!("Retrying · {job}{detail}")
         }
         ProgressKind::Step => {
             let label = event.label.replace('_', " ");
-            format!("{job} {label}{detail}")
+            if detail.is_empty() {
+                format!("Update · {job}\n{label}")
+            } else {
+                format!("Update · {job}{detail}")
+            }
         }
-        ProgressKind::Finished => format!("{job} {}", event.label),
+        ProgressKind::Finished => format!("{} · {job}", event.label),
+    })
+}
+
+fn should_render_progress(event: &ProgressEvent, mode: ProgressMode) -> bool {
+    if event.final_event || matches!(event.kind, ProgressKind::Approval | ProgressKind::Error) {
+        return true;
     }
+
+    match mode {
+        ProgressMode::Verbose => true,
+        ProgressMode::Quiet => {
+            matches!(event.kind, ProgressKind::Step)
+                && matches!(event.label.as_str(), "still running" | "retrying")
+        }
+        ProgressMode::Normal => match event.kind {
+            ProgressKind::Started => true,
+            ProgressKind::Tool => false,
+            ProgressKind::Step => {
+                matches!(event.label.as_str(), "still running" | "retrying")
+                    || event
+                        .detail
+                        .as_deref()
+                        .is_some_and(is_user_visible_milestone)
+            }
+            ProgressKind::Finished | ProgressKind::Approval | ProgressKind::Error => true,
+        },
+    }
+}
+
+fn is_user_visible_milestone(detail: &str) -> bool {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return false;
+    }
+    let lower = detail.to_ascii_lowercase();
+    let noisy = [
+        "i'm checking",
+        "i’m checking",
+        "i'm pulling",
+        "i’m pulling",
+        "i'm rerunning",
+        "i’m rerunning",
+        "quick verification",
+        "verification pass",
+        "frontmatter",
+        "command execution",
+        "shell splitting",
+        "no-word-splitting",
+    ];
+    !noisy.iter().any(|needle| lower.contains(needle))
+        && (lower.contains("saved")
+            || lower.contains("created")
+            || lower.contains("updated")
+            || lower.contains("blocked")
+            || lower.contains("need")
+            || lower.contains("ready"))
+}
+
+fn format_still_running_detail(detail: &str) -> Option<String> {
+    let mut lines = detail.lines();
+    let timings = lines.next()?.trim();
+    let commands = lines.next().map(str::trim).filter(|line| !line.is_empty());
+    let mut output = timings.to_string();
+    if let Some(commands) = commands {
+        let mut parts = commands.split_whitespace();
+        if let Some(tail) = parts.next()
+            && tail == "/tail"
+            && let Some(job) = parts.next()
+        {
+            output.push_str(&format!("\nLogs: /tail {job}"));
+        }
+        if let Some(cancel_index) = commands.find("/cancel") {
+            output.push_str(&format!("\nCancel: {}", commands[cancel_index..].trim()));
+        }
+    }
+    Some(output)
 }
 
 fn format_duration(seconds: u64) -> String {
@@ -276,8 +372,41 @@ mod tests {
         let event = still_running(AgentKind::Codex, "an-ba257469", 75, 60);
 
         assert_eq!(
-            render_progress(&event),
-            "an-ba257 still running\n1m 15s elapsed, quiet 1m\n/tail an-ba257  /cancel an-ba257"
+            render_progress(&event, ProgressMode::Quiet).unwrap(),
+            "Still working · an-ba257\n1m 15s elapsed, quiet 1m\nLogs: /tail an-ba257\nCancel: /cancel an-ba257"
+        );
+    }
+
+    #[test]
+    fn quiet_mode_suppresses_tool_and_agent_chatter() {
+        let mut tool = event(
+            ProgressKind::Tool,
+            "command_execution",
+            Some("/bin/zsh".into()),
+        );
+        tool.job_id = Some("an-ba257469".to_string());
+        assert!(render_progress(&tool, ProgressMode::Quiet).is_none());
+
+        let mut chatter = event(
+            ProgressKind::Step,
+            "agent_message",
+            Some("I’m pulling PyPI/GitHub metadata now.".into()),
+        );
+        chatter.job_id = Some("an-ba257469".to_string());
+        assert!(render_progress(&chatter, ProgressMode::Quiet).is_none());
+    }
+
+    #[test]
+    fn verbose_mode_keeps_raw_progress_for_debugging() {
+        let mut tool = event(
+            ProgressKind::Tool,
+            "command_execution",
+            Some("/bin/zsh".into()),
+        );
+        tool.job_id = Some("an-ba257469".to_string());
+        assert_eq!(
+            render_progress(&tool, ProgressMode::Verbose).unwrap(),
+            "Working · an-ba257\ncommand execution\n/bin/zsh"
         );
     }
 }

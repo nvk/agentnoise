@@ -97,6 +97,8 @@ pub struct RunnerConfig {
     pub max_output_chars: usize,
     #[serde(default = "default_progress_interval_seconds")]
     pub progress_interval_seconds: u64,
+    #[serde(default)]
+    pub progress_mode: ProgressMode,
     #[serde(default = "default_silence_ping_seconds")]
     pub silence_ping_seconds: u64,
     #[serde(default = "default_startup_silence_timeout_seconds")]
@@ -149,6 +151,16 @@ impl fmt::Display for RunnerLauncher {
             Self::Direct => "direct",
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum ProgressMode {
+    #[default]
+    Quiet,
+    Normal,
+    Verbose,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -299,6 +311,7 @@ impl Config {
                 max_prompt_chars: default_max_prompt_chars(),
                 max_output_chars: default_max_output_chars(),
                 progress_interval_seconds: default_progress_interval_seconds(),
+                progress_mode: ProgressMode::Quiet,
                 silence_ping_seconds: default_silence_ping_seconds(),
                 startup_silence_timeout_seconds: default_startup_silence_timeout_seconds(),
                 startup_retry_attempts: default_startup_retry_attempts(),

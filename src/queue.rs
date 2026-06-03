@@ -290,6 +290,38 @@ impl JobQueue {
         })
     }
 
+    pub fn active_for_reply_group(&self, reply_group_id: &str) -> Result<Option<QueuedJob>> {
+        self.with_connection(|conn| {
+            conn.query_row(
+                r#"
+                SELECT
+                    id, status, request_json, source_group_id, reply_group_id, source_event_id,
+                    created_at, claimed_by, claimed_at, started_at, finished_at, log_path, summary, error
+                FROM jobs
+                WHERE reply_group_id = ?1
+                  AND status IN (?2, ?3, ?4)
+                ORDER BY
+                  CASE status
+                    WHEN ?4 THEN 0
+                    WHEN ?3 THEN 1
+                    ELSE 2
+                  END,
+                  created_at DESC
+                LIMIT 1
+                "#,
+                params![
+                    reply_group_id,
+                    QueueStatus::Queued.as_str(),
+                    QueueStatus::Claimed.as_str(),
+                    QueueStatus::Running.as_str(),
+                ],
+                row_to_job,
+            )
+            .optional()
+            .with_context(|| format!("reading active job for reply group {reply_group_id}"))
+        })
+    }
+
     fn mark_finished(
         &self,
         id: &str,
@@ -423,5 +455,25 @@ mod tests {
         let counts = queue.counts().unwrap();
         assert_eq!(counts.queued, 0);
         assert_eq!(counts.claimed, 1);
+    }
+
+    #[test]
+    fn finds_active_job_for_reply_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = JobQueue::open(temp.path().join("queue.sqlite3")).unwrap();
+        let job = queue
+            .enqueue(&request(), "inbox", "reply", "event-1")
+            .unwrap();
+        queue
+            .enqueue(&request(), "inbox", "other", "event-2")
+            .unwrap();
+
+        let active = queue.active_for_reply_group("reply").unwrap().unwrap();
+        assert_eq!(active.id, job.id);
+
+        queue
+            .mark_succeeded(&job.id, "done", None)
+            .expect("mark succeeded");
+        assert!(queue.active_for_reply_group("reply").unwrap().is_none());
     }
 }

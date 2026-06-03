@@ -26,7 +26,7 @@ use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
 use agentnoise::subscriptions::{self, SubscriptionRegistry};
-use agentnoise::text::compact_timestamp;
+use agentnoise::text::{compact_timestamp, short_ref};
 use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
 use agentnoise::wn::{MessageEvent, WnClient};
 use agentnoise::workspace;
@@ -2467,6 +2467,32 @@ fn listen(
                     }
                 }
 
+                if let Some(queue) = job_queue.as_ref()
+                    && is_bare_active_job_followup(
+                        &event,
+                        group_id,
+                        &app.config().whitenoise.group_id,
+                    )
+                {
+                    match queue.active_for_reply_group(group_id) {
+                        Ok(Some(job)) => {
+                            try_send_reply_recorded(
+                                &wn,
+                                &event_journal,
+                                group_id,
+                                &active_job_followup_text(&job),
+                            );
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "agentnoise: failed to check active queue job for {group_id}: {error:#}"
+                            );
+                        }
+                    }
+                }
+
                 let mut action = app.route_message(
                     event.group_id.as_deref(),
                     event.sender.as_deref(),
@@ -2786,6 +2812,33 @@ fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
             }
         }
     }
+}
+
+fn is_bare_active_job_followup(
+    event: &MessageEvent,
+    group_id: &str,
+    primary_group_id: &str,
+) -> bool {
+    let text = event.text.trim();
+    !text.is_empty()
+        && !text.starts_with('/')
+        && !group_id.trim().is_empty()
+        && group_id != primary_group_id.trim()
+}
+
+fn active_job_followup_text(job: &QueuedJob) -> String {
+    let job_id = short_ref(&job.id);
+    let status = match job.status {
+        agentnoise::queue::QueueStatus::Queued => "queued",
+        agentnoise::queue::QueueStatus::Claimed => "starting",
+        agentnoise::queue::QueueStatus::Running => "running",
+        agentnoise::queue::QueueStatus::Succeeded | agentnoise::queue::QueueStatus::Failed => {
+            "active"
+        }
+    };
+    format!(
+        "Still working · {job_id}\nStatus: {status}\nI won't start a second bare-text job in this chat yet.\nAfter the result, resend that follow-up or use /cancel {job_id}."
+    )
 }
 
 fn run_inline_job(
@@ -3904,6 +3957,45 @@ mod tests {
             vec!["m2".to_string()]
         );
         assert_eq!(reconciled_events_after(&messages, Some("missing")).len(), 2);
+    }
+
+    #[test]
+    fn bare_text_in_active_work_chat_is_treated_as_followup() {
+        let event = message_event("worker", "m1", "Give me list");
+
+        assert!(is_bare_active_job_followup(&event, "worker", "inbox"));
+        assert!(!is_bare_active_job_followup(&event, "inbox", "inbox"));
+
+        let slash = message_event("worker", "m2", "/tail an-123");
+        assert!(!is_bare_active_job_followup(&slash, "worker", "inbox"));
+    }
+
+    #[test]
+    fn active_job_followup_text_does_not_start_second_job_silently() {
+        let mut request = AgentRequest::prompt(AgentKind::Codex, "work");
+        request.repo_alias = Some("sandbox".to_string());
+        let job = QueuedJob {
+            id: "q-abcdef12".to_string(),
+            status: agentnoise::queue::QueueStatus::Running,
+            request,
+            source_group_id: "inbox".to_string(),
+            reply_group_id: "worker".to_string(),
+            source_event_id: "m1".to_string(),
+            created_at: "2026-06-02T18:00:00Z".to_string(),
+            claimed_by: None,
+            claimed_at: None,
+            started_at: None,
+            finished_at: None,
+            log_path: None,
+            summary: None,
+            error: None,
+        };
+
+        let text = active_job_followup_text(&job);
+
+        assert!(text.contains("Still working · q-abcde"));
+        assert!(text.contains("I won't start a second bare-text job"));
+        assert!(text.contains("/cancel q-abcde"));
     }
 
     #[test]

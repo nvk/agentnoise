@@ -22,6 +22,13 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.31** - **Quiet mobile chat replies.** agentnoise now defaults to a
+phone-first progress mode: raw command/tool progress and agent self-narration
+stay in `/tail`, job acks/finals use clearer chat labels, long list replies are
+compacted with a "Full answer" tail pointer, and agent prompts now include the
+White Noise mobile-chat delivery contract. Bare follow-up text in a work chat
+with an active queued job is no longer silently launched as a second job.
+
 **v0.1.30** - **Full White Noise media ingest.** agentnoise now auto-ingests
 the White Noise chat-media allowlist into the active workspace: JPEG/PNG/GIF/WebP,
 MP4/WebM/MOV, MP3/OGG/M4A/WAV, and PDF. Captioned prompts and `/wiki` runs get
@@ -669,8 +676,9 @@ Each White Noise chat is one agentnoise session. The first paired chat is the
 inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
 open a fresh work chat; agentnoise names it from the machine hostname and a
 2-4 word prompt summary, sends an open link back to the inbox, and posts
-progress plus final output in the new chat. Follow-up plain text sent inside
-that work chat continues with the same agent/profile/wiki mode, while slash
+quiet status plus final output in the new chat. Follow-up plain text sent inside
+that work chat continues with the same agent/profile/wiki mode after the prior
+queued job has finished, while slash
 commands remain available when you want to change workspace, inspect jobs, or
 force a different agent.
 
@@ -692,15 +700,15 @@ Plain text in the inbox, and plain text in chats without a remembered agent
 mode, is not executed. The reply points the user at `/help` and `/codex
 <prompt>` so a mistyped phone message does not look like a dead daemon.
 
-Codex and Claude JSON streams are converted into occasional progress messages
-while a job runs. The default interval is conservative
-(`runner.progress_interval_seconds = 15`) so the phone chat does not become
-unreadable. If a running job goes quiet, agentnoise sends a "still running"
-ping after `runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel
-<job>` hints. If a new launch emits no output at all for
+Codex and Claude JSON streams are parsed for progress while a job runs, but the
+default `runner.progress_mode = "quiet"` keeps raw command/tool progress and
+agent self-narration out of the phone chat. Use `progress_mode = "verbose"` only
+when debugging transport. If a running job goes quiet, agentnoise sends a
+"still working" ping after `runner.silence_ping_seconds = 60` with `/tail
+<job>` and `/cancel <job>` hints. If a new launch emits no output at all for
 `runner.startup_silence_timeout_seconds = 90`, agentnoise terminates that
 attempt and retries once by default. Final job output still arrives as one
-normal reply, with `/tail <job>` for logs.
+normal reply, compacted for phone when needed, with `/tail <job>` for logs.
 
 If a configured agent profile looks intentionally elevated, for example a
 profile or permission mode containing `unsafe`, agentnoise creates an approval

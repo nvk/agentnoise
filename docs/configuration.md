@@ -57,6 +57,7 @@ Simple setup for raw Codex/Claude, with no `agentbondage` required:
 [runner]
 launcher = "direct"
 progress_interval_seconds = 15
+progress_mode = "quiet"
 silence_ping_seconds = 60
 startup_silence_timeout_seconds = 90
 startup_retry_attempts = 1
@@ -92,6 +93,7 @@ launcher = "bondage"
 bondage_bin = "bondage"
 bondage_conf = "~/.config/bondage/bondage.conf"
 progress_interval_seconds = 15
+progress_mode = "quiet"
 silence_ping_seconds = 60
 startup_silence_timeout_seconds = 90
 startup_retry_attempts = 1
@@ -108,6 +110,12 @@ profile = "claude-agentnoise"
 bin = "claude"
 permission_mode = "auto"
 ```
+
+`progress_mode = "quiet"` is the default phone-safe mode. It keeps raw tool
+calls, shell commands, and routine agent self-narration in `/tail` while still
+sending approvals, errors, retry notices, and quiet-job pings. Use
+`progress_mode = "normal"` for a few more human milestones, or `"verbose"` only
+when debugging agentnoise progress parsing.
 
 Your `bondage.conf` must contain matching profile sections:
 

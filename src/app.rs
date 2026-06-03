@@ -18,7 +18,7 @@ use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
 use crate::subscriptions::{self, SubscriptionState};
-use crate::text::short_ref;
+use crate::text::{mobile_digest, short_ref};
 use crate::wn::MessageEvent;
 use crate::workspace;
 use crate::worktrees::{self, WorktreeStore};
@@ -49,19 +49,19 @@ impl NewSessionRequest {
 
     pub fn ready_text(&self) -> String {
         format!(
-            "session {}\n{}\nready: /pwd /codex <prompt>",
+            "Ready: {}\nWorkspace: {}\nTry: /codex <prompt>",
             self.name,
             workspace_text(&self.state)
         )
     }
 
     pub fn created_text(&self) -> String {
-        format!("created {}\ncontinue in the new chat\n/list", self.name)
+        format!("Created chat: {}\nUse /list to switch.", self.name)
     }
 
     pub fn created_text_for_group(&self, group_id: &str) -> String {
         format!(
-            "created {}\nopen: {}\ncontinue there",
+            "Created chat: {}\nOpen: {}",
             self.name,
             white_noise_chat_uri(group_id)
         )
@@ -69,19 +69,14 @@ impl NewSessionRequest {
 
     pub fn job_started_text_for_group(&self, group_id: &str) -> String {
         format!(
-            "started {}\nopen: {}\ncontinue there",
+            "Started work chat: {}\nOpen: {}",
             self.name,
             white_noise_chat_uri(group_id)
         )
     }
 
     pub fn job_ready_text(&self, ack: &str) -> String {
-        format!(
-            "session {}\n{}\n{}",
-            self.name,
-            workspace_text(&self.state),
-            ack
-        )
+        ack.to_string()
     }
 }
 
@@ -346,7 +341,7 @@ impl AgentApp {
     pub fn run_ack_text(&self, request: &AgentRequest) -> String {
         if let Some(session) = request.resume_session.as_deref() {
             return format!(
-                "{} resume queued\nsession: {}\nI'll reply here when done.",
+                "Queued resume.\n{} · session {}\nI'll post the answer here.",
                 request.agent,
                 short_ref(session)
             );
@@ -354,10 +349,10 @@ impl AgentApp {
 
         let workspace = request_workspace_text(request);
         if workspace == "selected workspace" {
-            format!("{} queued\nI'll reply here when done.", request.agent)
+            format!("Queued.\n{}\nI'll post the answer here.", request.agent)
         } else {
             format!(
-                "{} queued\n{}\nI'll reply here when done.",
+                "Queued.\n{} · {}\nI'll post the answer here.",
                 request.agent, workspace
             )
         }
@@ -378,12 +373,15 @@ impl AgentApp {
         send_progress: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<JobRecord> {
         let mut limiter = ProgressRateLimiter::new(self.config.runner.progress_interval_seconds);
+        let progress_mode = self.config.runner.progress_mode;
         let callback = Arc::new(Mutex::new(move |event: crate::progress::ProgressEvent| {
             if event.kind == ProgressKind::Finished {
                 return;
             }
-            if limiter.should_send(&event) {
-                send_progress(render_progress(&event));
+            if let Some(text) = render_progress(&event, progress_mode)
+                && limiter.should_send(&event)
+            {
+                send_progress(text);
             }
         }));
         let record = self.runner.run_blocking_with_progress(
@@ -516,7 +514,7 @@ impl AgentApp {
             .unwrap_or_default();
 
         format!(
-            "running | {}\n{} | {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
+            "agentnoise: running\nlauncher: {}\nchat: {}\nworkspace: {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
             self.config.runner.launcher,
             session_name,
             workspace,
@@ -1645,18 +1643,28 @@ fn render_job_reply(record: &JobRecord) -> String {
         .filter(|summary| !summary.is_empty())
         .unwrap_or("no output captured");
 
-    format!("{id} {status}\n{summary}\n\n/tail {id}")
+    let digest = mobile_digest(summary, 900, 10);
+    let detail_label = if digest.truncated {
+        "Full answer"
+    } else {
+        "Details"
+    };
+
+    format!(
+        "{status} · {id}\n{}\n\n{detail_label}: /tail {id}",
+        digest.text
+    )
 }
 
 fn job_status_label(status: JobStatus) -> &'static str {
     match status {
-        JobStatus::Succeeded => "done",
-        JobStatus::Failed => "failed",
-        JobStatus::Cancelled => "cancelled",
-        JobStatus::Interrupted => "interrupted",
-        JobStatus::Pending => "pending",
-        JobStatus::Running => "running",
-        JobStatus::CancelRequested => "cancelling",
+        JobStatus::Succeeded => "Done",
+        JobStatus::Failed => "Failed",
+        JobStatus::Cancelled => "Cancelled",
+        JobStatus::Interrupted => "Interrupted",
+        JobStatus::Pending => "Pending",
+        JobStatus::Running => "Running",
+        JobStatus::CancelRequested => "Cancelling",
     }
 }
 
@@ -1920,7 +1928,9 @@ mod tests {
         assert!(matches!(
             app.route_message(Some("group-a"), Some("phone"), "/status")
                 .unwrap(),
-            RouteAction::Reply(reply) if reply.contains("subs: 1/1 ok")
+            RouteAction::Reply(reply) if reply.contains("agentnoise: running")
+                && reply.contains("workspace: sandbox:/")
+                && reply.contains("subs: 1/1 ok")
         ));
     }
 
@@ -2185,9 +2195,9 @@ mod tests {
         };
         let ack = app.run_ack_text(&request);
 
-        assert!(ack.contains("codex queued"));
-        assert!(ack.contains("work:/"));
-        assert!(ack.contains("I'll reply here when done."));
+        assert!(ack.contains("Queued."));
+        assert!(ack.contains("codex · work:/"));
+        assert!(ack.contains("I'll post the answer here."));
     }
 
     #[test]
@@ -2392,12 +2402,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             )
             .unwrap();
 
-        assert!(reply.starts_with("an-"));
-        assert!(reply.contains("done"));
+        assert!(reply.starts_with("Done · an-"));
         assert!(reply.contains("done once"));
-        assert!(reply.contains("/tail an-"));
+        assert!(reply.contains("Details: /tail an-"));
         let progress = progress.lock().unwrap();
-        assert!(progress.iter().any(|text| text.contains("started")));
+        assert!(progress.iter().all(|text| !text.contains("started")));
         assert!(!progress.iter().any(|text| text.contains("succeeded")));
     }
 
