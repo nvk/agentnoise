@@ -22,42 +22,26 @@ such alpha, much wow.
 
 ## Changelog
 
-**v0.1.34** - **Cleaner failed-job replies.** Failed Codex/Claude jobs no
-longer dump raw JSON stream fragments into phone chat when no final assistant
-answer was decoded. The chat reply now gives a concise failure reason and keeps
-the raw log available via `/tail <job>`.
+Detailed per-version notes live in [docs/release-notes.md](docs/release-notes.md).
+The README keeps the recent history grouped by product milestone.
 
-**v0.1.33** - **Quieter quiet-mode heartbeats.** `progress_mode = "quiet"`
-now enforces a five-minute minimum between "still working" chat pings, while
-still allowing `silence_ping_seconds = 0` to disable them entirely. The ping
-copy is clearer: it says how long the job has had no output and keeps `/tail`
-and `/cancel` on one compact action line.
+**v0.1.31-v0.1.34** - **Mobile chat UX stabilization.** agentnoise now
+defaults to phone-safe progress: raw command/tool progress and routine agent
+self-narration stay in `/tail`, job acks/finals use compact chat labels, long
+answers point to `/tail <job>`, and agent prompts include the White Noise
+mobile-chat delivery contract. This release window also fixed the active-job
+self-echo loop, clamped quiet-mode "still working" pings to a five-minute
+minimum, and kept failed Codex/Claude jobs from dumping raw JSON stream
+fragments into phone chat.
 
-**v0.1.32** - **Active follow-up echo fix.** Fixed a `v0.1.31`
-regression where agentnoise's own echoed queue/heartbeat messages could trigger
-the active-job follow-up guard and create repeated "Still working" messages.
-The active-job guard now runs only after normal bot/sender filtering and uses a
-shorter phone reply.
-
-**v0.1.31** - **Quiet mobile chat replies.** agentnoise now defaults to a
-phone-first progress mode: raw command/tool progress and agent self-narration
-stay in `/tail`, job acks/finals use clearer chat labels, long list replies are
-compacted with a "Full answer" tail pointer, and agent prompts now include the
-White Noise mobile-chat delivery contract. Bare follow-up text in a work chat
-with an active queued job is no longer silently launched as a second job.
-
-**v0.1.30** - **Full White Noise media ingest.** agentnoise now auto-ingests
-the White Noise chat-media allowlist into the active workspace: JPEG/PNG/GIF/WebP,
-MP4/WebM/MOV, MP3/OGG/M4A/WAV, and PDF. Captioned prompts and `/wiki` runs get
-local file paths for all supported media, and agent replies can upload referenced
-supported media files from the workspace back to chat.
-
-**v0.1.29** - **Media ingest and fake-phone TUI.** Phone-sent picture
-attachments are saved into the active workspace, captioned prompts include the
-image paths automatically, `/wiki` image prompts use the LLM Wiki ingest
-framing, and agent replies can upload generated workspace images back to the
-chat. Added the default-built `agentnoise fake-phone tui` with live replies,
-`:attach <path> [caption]`, chat switching, and automatic handoff following.
+**v0.1.29-v0.1.30** - **White Noise media ingest and fake-phone TUI.**
+Phone-sent media is saved into the active workspace and attached to agent
+prompts, including `/wiki` runs that use LLM Wiki ingest framing. Supported
+chat media now covers JPEG/PNG/GIF/WebP, MP4/WebM/MOV, MP3/OGG/M4A/WAV, and
+PDF, and agent replies can upload referenced supported media files from the
+workspace back to chat. The default-built `agentnoise fake-phone tui` adds live
+replies, `:attach <path> [caption]`, chat switching, and automatic handoff
+following.
 
 **v0.1.28** - **Transport/worker split.** Homebrew, launchd, systemd, and
 rc services now run `agentnoise transport run`, which keeps White Noise
