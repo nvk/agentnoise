@@ -18,7 +18,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{Config, RunnerLauncher};
+use crate::config::{Config, ProgressMode, RunnerLauncher};
 use crate::jobs::{JobRecord, JobStore};
 use crate::paths::is_gui_backed_workspace_path;
 use crate::progress::{self, ProgressEvent};
@@ -219,7 +219,10 @@ impl Runner {
                 start_silence_heartbeat(
                     request.agent,
                     job.id.clone(),
-                    self.config.runner.silence_ping_seconds,
+                    effective_silence_ping_seconds(
+                        self.config.runner.silence_ping_seconds,
+                        self.config.runner.progress_mode,
+                    ),
                     Arc::clone(&last_activity),
                     Arc::clone(progress_callback),
                 )
@@ -660,6 +663,17 @@ fn start_silence_heartbeat(
     });
 
     Some(SilenceHeartbeat { stop, handle })
+}
+
+fn effective_silence_ping_seconds(configured_seconds: u64, progress_mode: ProgressMode) -> u64 {
+    if configured_seconds == 0 {
+        return 0;
+    }
+
+    match progress_mode {
+        ProgressMode::Quiet => configured_seconds.max(300),
+        ProgressMode::Normal | ProgressMode::Verbose => configured_seconds,
+    }
 }
 
 fn stop_silence_heartbeat(heartbeat: Option<SilenceHeartbeat>) {
@@ -1256,6 +1270,32 @@ mod tests {
     }
 
     #[test]
+    fn quiet_mode_clamps_silence_pings_to_phone_safe_interval() {
+        assert_eq!(effective_silence_ping_seconds(60, ProgressMode::Quiet), 300);
+        assert_eq!(effective_silence_ping_seconds(1, ProgressMode::Quiet), 300);
+        assert_eq!(
+            effective_silence_ping_seconds(600, ProgressMode::Quiet),
+            600
+        );
+    }
+
+    #[test]
+    fn disabled_silence_pings_stay_disabled_in_quiet_mode() {
+        assert_eq!(effective_silence_ping_seconds(0, ProgressMode::Quiet), 0);
+    }
+
+    #[test]
+    fn normal_and_verbose_keep_configured_silence_ping_interval() {
+        assert_eq!(effective_silence_ping_seconds(60, ProgressMode::Normal), 60);
+        assert_eq!(effective_silence_ping_seconds(1, ProgressMode::Normal), 1);
+        assert_eq!(
+            effective_silence_ping_seconds(60, ProgressMode::Verbose),
+            60
+        );
+        assert_eq!(effective_silence_ping_seconds(1, ProgressMode::Verbose), 1);
+    }
+
+    #[test]
     fn direct_jobs_time_out_and_fail() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -1296,7 +1336,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn quiet_direct_jobs_emit_still_running_progress() {
+    fn direct_jobs_emit_still_running_progress_when_interval_is_short() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let bin = temp.path().join("quiet-agent");
@@ -1320,6 +1360,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.progress_interval_seconds = 1;
+        config.runner.progress_mode = ProgressMode::Normal;
         config.runner.silence_ping_seconds = 1;
         config.runner.job_timeout_seconds = 10;
         config.agents.codex.bin = bin.display().to_string();

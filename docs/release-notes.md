@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.33 - 2026-06-03
+
+- Made quiet-mode heartbeats less chatty: `progress_mode = "quiet"` now clamps
+  still-running chat pings to a five-minute minimum, while
+  `silence_ping_seconds = 0` still disables them entirely.
+- Reworded the still-running ping to say how long the job has had no output and
+  keep `/tail` plus `/cancel` on one compact action line.
+
 ## 0.1.32 - 2026-06-03
 
 - Fixed a `0.1.31` active-job follow-up regression where agentnoise's own

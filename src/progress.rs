@@ -91,9 +91,9 @@ pub fn still_running(
         job_id: Some(job_id.to_string()),
         label: "still running".to_string(),
         detail: Some(format!(
-            "{} elapsed, quiet {}\n/tail {}  /cancel {}",
-            format_duration(elapsed_seconds),
+            "No output for {}; running {}.\n/tail {} · /cancel {}",
             format_duration(idle_seconds),
+            format_duration(elapsed_seconds),
             short_ref(job_id),
             short_ref(job_id)
         )),
@@ -244,6 +244,11 @@ fn is_user_visible_milestone(detail: &str) -> bool {
 }
 
 fn format_still_running_detail(detail: &str) -> Option<String> {
+    let detail = detail.trim();
+    if detail.starts_with("No output for ") {
+        return Some(detail.to_string());
+    }
+
     let mut lines = detail.lines();
     let timings = lines.next()?.trim();
     let commands = lines.next().map(str::trim).filter(|line| !line.is_empty());
@@ -373,7 +378,7 @@ mod tests {
 
         assert_eq!(
             render_progress(&event, ProgressMode::Quiet).unwrap(),
-            "Still working · an-ba257\n1m 15s elapsed, quiet 1m\nLogs: /tail an-ba257\nCancel: /cancel an-ba257"
+            "Still working · an-ba257\nNo output for 1m; running 1m 15s.\n/tail an-ba257 · /cancel an-ba257"
         );
     }
 

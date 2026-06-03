@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.33** - **Quieter quiet-mode heartbeats.** `progress_mode = "quiet"`
+now enforces a five-minute minimum between "still working" chat pings, while
+still allowing `silence_ping_seconds = 0` to disable them entirely. The ping
+copy is clearer: it says how long the job has had no output and keeps `/tail`
+and `/cancel` on one compact action line.
+
 **v0.1.32** - **Active follow-up echo fix.** Fixed a `v0.1.31`
 regression where agentnoise's own echoed queue/heartbeat messages could trigger
 the active-job follow-up guard and create repeated "Still working" messages.
@@ -710,8 +716,10 @@ Codex and Claude JSON streams are parsed for progress while a job runs, but the
 default `runner.progress_mode = "quiet"` keeps raw command/tool progress and
 agent self-narration out of the phone chat. Use `progress_mode = "verbose"` only
 when debugging transport. If a running job goes quiet, agentnoise sends a
-"still working" ping after `runner.silence_ping_seconds = 60` with `/tail
-<job>` and `/cancel <job>` hints. If a new launch emits no output at all for
+"still working" ping after `runner.silence_ping_seconds = 60`, but quiet mode
+enforces a five-minute minimum so phone chats are not pinged every minute. Set
+`silence_ping_seconds = 0` to disable those pings. Pings include `/tail <job>`
+and `/cancel <job>` hints. If a new launch emits no output at all for
 `runner.startup_silence_timeout_seconds = 90`, agentnoise terminates that
 attempt and retries once by default. Final job output still arrives as one
 normal reply, compacted for phone when needed, with `/tail <job>` for logs.

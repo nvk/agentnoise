@@ -137,7 +137,9 @@ to `0` only if you intentionally want no timeout.
 `silence_ping_seconds` controls the "still running" chat ping for a job that
 has produced no new output. Set it to `0` to disable those pings. The default
 keeps the phone chat alive when Codex, Claude, Hermes, or a launcher is still
-running but quiet.
+running but quiet. In `progress_mode = "quiet"`, agentnoise enforces a
+five-minute minimum between these chat pings even if the configured value is
+lower; `normal` and `verbose` use the configured interval exactly.
 
 `startup_silence_timeout_seconds` handles a different failure mode: a launcher
 or agent process starts but emits no stdout/stderr at all. agentnoise
