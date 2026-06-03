@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.35 - 2026-06-03
+
+- Fixed Claude Code launches with `--output-format stream-json` by adding the
+  now-required `--verbose` flag for both new `/claude` jobs and
+  `/claude-resume` jobs.
+- Kept new Claude prompts before variadic `--add-dir` arguments so Claude does
+  not accidentally treat the user prompt as another directory when the workspace
+  is attached.
+
 ## 0.1.34 - 2026-06-03
 
 - Kept failed Codex/Claude jobs from dumping raw JSON stream fragments into

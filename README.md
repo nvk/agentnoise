@@ -25,14 +25,15 @@ such alpha, much wow.
 Detailed per-version notes live in [docs/release-notes.md](docs/release-notes.md).
 The README keeps the recent history grouped by product milestone.
 
-**v0.1.31-v0.1.34** - **Mobile chat UX stabilization.** agentnoise now
+**v0.1.31-v0.1.35** - **Mobile chat UX stabilization.** agentnoise now
 defaults to phone-safe progress: raw command/tool progress and routine agent
 self-narration stay in `/tail`, job acks/finals use compact chat labels, long
 answers point to `/tail <job>`, and agent prompts include the White Noise
 mobile-chat delivery contract. This release window also fixed the active-job
 self-echo loop, clamped quiet-mode "still working" pings to a five-minute
-minimum, and kept failed Codex/Claude jobs from dumping raw JSON stream
-fragments into phone chat.
+minimum, kept failed Codex/Claude jobs from dumping raw JSON stream
+fragments into phone chat, and restored newer Claude Code compatibility by
+adding the required stream-json verbose launch flag.
 
 **v0.1.29-v0.1.30** - **White Noise media ingest and fake-phone TUI.**
 Phone-sent media is saved into the active workspace and attached to agent
