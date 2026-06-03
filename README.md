@@ -22,6 +22,12 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.32** - **Active follow-up echo fix.** Fixed a `v0.1.31`
+regression where agentnoise's own echoed queue/heartbeat messages could trigger
+the active-job follow-up guard and create repeated "Still working" messages.
+The active-job guard now runs only after normal bot/sender filtering and uses a
+shorter phone reply.
+
 **v0.1.31** - **Quiet mobile chat replies.** agentnoise now defaults to a
 phone-first progress mode: raw command/tool progress and agent self-narration
 stay in `/tail`, job acks/finals use clearer chat labels, long list replies are

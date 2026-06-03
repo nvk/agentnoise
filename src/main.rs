@@ -2467,8 +2467,17 @@ fn listen(
                     }
                 }
 
+                let mut action = app.route_message(
+                    event.group_id.as_deref(),
+                    event.sender.as_deref(),
+                    &event.text,
+                )?;
+                if let Some(ingest) = &attachment_ingest {
+                    action = action_with_attachment_context(action, ingest);
+                }
                 if let Some(queue) = job_queue.as_ref()
-                    && is_bare_active_job_followup(
+                    && should_intercept_active_followup(
+                        &action,
                         &event,
                         group_id,
                         &app.config().whitenoise.group_id,
@@ -2491,15 +2500,6 @@ fn listen(
                             );
                         }
                     }
-                }
-
-                let mut action = app.route_message(
-                    event.group_id.as_deref(),
-                    event.sender.as_deref(),
-                    &event.text,
-                )?;
-                if let Some(ingest) = &attachment_ingest {
-                    action = action_with_attachment_context(action, ingest);
                 }
 
                 match action {
@@ -2826,6 +2826,16 @@ fn is_bare_active_job_followup(
         && group_id != primary_group_id.trim()
 }
 
+fn should_intercept_active_followup(
+    action: &RouteAction,
+    event: &MessageEvent,
+    group_id: &str,
+    primary_group_id: &str,
+) -> bool {
+    matches!(action, RouteAction::Run(_))
+        && is_bare_active_job_followup(event, group_id, primary_group_id)
+}
+
 fn active_job_followup_text(job: &QueuedJob) -> String {
     let job_id = short_ref(&job.id);
     let status = match job.status {
@@ -2837,7 +2847,7 @@ fn active_job_followup_text(job: &QueuedJob) -> String {
         }
     };
     format!(
-        "Still working · {job_id}\nStatus: {status}\nI won't start a second bare-text job in this chat yet.\nAfter the result, resend that follow-up or use /cancel {job_id}."
+        "Still working · {job_id}\nStatus: {status}\nReply after it finishes, or use /tail {job_id} /cancel {job_id}."
     )
 }
 
@@ -3968,6 +3978,25 @@ mod tests {
 
         let slash = message_event("worker", "m2", "/tail an-123");
         assert!(!is_bare_active_job_followup(&slash, "worker", "inbox"));
+
+        assert!(should_intercept_active_followup(
+            &RouteAction::Run(AgentRequest::prompt(AgentKind::Codex, "Give me list")),
+            &event,
+            "worker",
+            "inbox"
+        ));
+        assert!(!should_intercept_active_followup(
+            &RouteAction::Reply("Queued.".to_string()),
+            &event,
+            "worker",
+            "inbox"
+        ));
+        assert!(!should_intercept_active_followup(
+            &RouteAction::Ignore,
+            &event,
+            "worker",
+            "inbox"
+        ));
     }
 
     #[test]
@@ -3994,7 +4023,8 @@ mod tests {
         let text = active_job_followup_text(&job);
 
         assert!(text.contains("Still working · q-abcde"));
-        assert!(text.contains("I won't start a second bare-text job"));
+        assert!(text.contains("Reply after it finishes"));
+        assert!(text.contains("/tail q-abcde"));
         assert!(text.contains("/cancel q-abcde"));
     }
 

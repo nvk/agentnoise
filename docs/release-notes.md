@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.32 - 2026-06-03
+
+- Fixed a `0.1.31` active-job follow-up regression where agentnoise's own
+  echoed outbound messages could bypass normal bot/sender filtering and trigger
+  repeated "Still working" replies in a work chat.
+- Shortened the active-job follow-up notice to a compact phone-safe status with
+  `/tail` and `/cancel` hints.
+
 ## 0.1.31 - 2026-06-03
 
 - Added `runner.progress_mode` with a default `quiet` mode that suppresses raw
