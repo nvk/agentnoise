@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use nostr::PublicKey;
@@ -19,6 +20,7 @@ pub struct SetupOptions {
     pub force_identity: bool,
     pub relays: Vec<String>,
     pub direct_agents: bool,
+    pub dev_burner_nsec: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub struct SetupResult {
     pub profile_display_name: String,
     pub relays: Vec<String>,
     pub qr: String,
+    pub dev_burner_nsec: bool,
 }
 
 /// Bootstrap agentnoise: write config, start the embedded Marmot v2 engine
@@ -51,6 +54,9 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     if options.direct_agents {
         config.runner.launcher = RunnerLauncher::Direct;
     }
+    if options.dev_burner_nsec {
+        config.darkmatter.dev_burner_nsec = true;
+    }
     if let Some(name) = options
         .profile_name
         .as_deref()
@@ -63,11 +69,8 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     if !options.relays.is_empty() {
         config.darkmatter.message_relays = options.relays.clone();
     }
-    if created_config {
-        config.save(config_path)?;
-    }
-
     ensure_runtime_dirs(&config)?;
+    config.save(config_path)?;
 
     // Open the engine just long enough to ensure the managed account exists.
     let dm_home = config.resolved_data_dir().join("darkmatter");
@@ -78,6 +81,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         dm_home,
         bootstrap_relays,
         &keychain_service,
+        config.darkmatter.dev_burner_nsec,
         options.force_identity,
         config.darkmatter.account.clone(),
     )?;
@@ -92,7 +96,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         &npub,
         &options.relays,
     )?;
-    let qr = identity::render_qr(&npub)?;
+    let qr = identity::render_qr(&payload.npub)?;
 
     if options.phone_npub.is_some() {
         // Phone-initiated group creation: under v2 the phone creates the
@@ -115,6 +119,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         profile_display_name: config.darkmatter.profile_display_name,
         relays: payload.relays,
         qr,
+        dev_burner_nsec: config.darkmatter.dev_burner_nsec,
     })
 }
 
@@ -125,6 +130,7 @@ fn ensure_engine_identity(
     dm_home: PathBuf,
     bootstrap_relays: Vec<String>,
     keychain_service: &str,
+    dev_burner_nsec: bool,
     _force: bool,
     previous_npub: Option<String>,
 ) -> Result<(String, bool)> {
@@ -138,7 +144,12 @@ fn ensure_engine_identity(
         .build()
         .context("building tokio runtime for setup")?;
     runtime.block_on(async {
-        let engine = DarkmatterEngine::open(dm_home, bootstrap_relays.clone(), keychain_service)?;
+        let engine = DarkmatterEngine::open(
+            dm_home,
+            bootstrap_relays.clone(),
+            keychain_service,
+            dev_burner_nsec,
+        )?;
         engine.start().await?;
         let configured = previous_npub.as_deref();
         let existed = match configured.map(str::trim).filter(|r| !r.is_empty()) {
@@ -146,6 +157,22 @@ fn ensure_engine_identity(
             None => false,
         };
         let account_id_hex = engine.ensure_account(configured, &bootstrap_relays).await?;
+        match tokio::time::timeout(
+            Duration::from_secs(12),
+            engine.publish_discovery(&account_id_hex, &bootstrap_relays),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                eprintln!("agentnoise: darkmatter discovery broadcast complete");
+            }
+            Ok(Err(error)) => {
+                eprintln!("agentnoise: darkmatter discovery broadcast failed: {error:#}");
+            }
+            Err(_) => {
+                eprintln!("agentnoise: darkmatter discovery broadcast timed out; continuing");
+            }
+        }
         engine.shutdown().await;
         let pk = PublicKey::from_hex(&account_id_hex).context("decoding account_id_hex")?;
         let npub = pk.to_bech32().context("encoding npub bech32")?;

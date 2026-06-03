@@ -108,9 +108,12 @@ pub fn render_doctor(config_path: &Path, config: &Config) -> String {
     checks.push(Check {
         level: Level::Ok,
         name: "secret store".to_string(),
-        detail:
+        detail: if config.darkmatter.dev_burner_nsec {
+            "file-backed dev burner identity; development only".to_string()
+        } else {
             "OS keychain via marmot-account KeychainSecretStore (service \"agentnoise\", item <account_id_hex>)"
-                .to_string(),
+                .to_string()
+        },
     });
 
     for repo in &config.repos {
@@ -313,6 +316,20 @@ mod tests {
 
         assert!(output.contains("secret store"));
         assert!(output.contains("KeychainSecretStore"));
+    }
+
+    #[test]
+    fn doctor_reports_dev_burner_secret_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.darkmatter.dev_burner_nsec = true;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+
+        let output = render_doctor(&temp.path().join("config.toml"), &config);
+
+        assert!(output.contains("secret store"));
+        assert!(output.contains("file-backed dev burner identity"));
     }
 
     #[test]

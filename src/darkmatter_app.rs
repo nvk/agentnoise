@@ -6,14 +6,13 @@
 //! On startup the engine reuses that account if present, otherwise creates a
 //! fresh identity, then starts the runtime workers.
 
+use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use cgka_traits::TransportEndpoint;
 use marmot_account::AccountHome;
-use marmot_app::{
-    AccountSetupRequest, AccountSetupResult, ManagedAccount, MarmotApp, MarmotAppRuntime,
-};
+use marmot_app::{AccountRelayListBootstrap, ManagedAccount, MarmotApp, MarmotAppRuntime};
 use nostr::PublicKey;
 use nostr::nips::nip19::FromBech32;
 
@@ -55,26 +54,46 @@ pub fn keychain_service_for_instance(instance: Option<&str>) -> String {
 pub struct DarkmatterEngine {
     app: MarmotApp,
     runtime: MarmotAppRuntime,
+    account_home: AccountHome,
     home: PathBuf,
 }
 
 impl DarkmatterEngine {
-    /// Construct the engine from an on-disk home, a non-empty relay list, and
-    /// the OS-keychain service name to store secrets under (see
-    /// [`keychain_service_for_instance`]). The marmot-app `AccountHome` is
-    /// opened with an OS-keychain-backed secret store — agentnoise never
-    /// persists nsec material to plaintext disk in production. (The fake-phone
-    /// harness uses the file-backed default directly via `MarmotApp::with_relays`
-    /// for fast tempdir-local test loops.)
-    pub fn open(home: PathBuf, relays: Vec<String>, keychain_service: &str) -> Result<Self> {
+    /// Construct the engine from an on-disk home and a non-empty relay list.
+    ///
+    /// Production opens marmot-app with an OS-keychain-backed `AccountHome`.
+    /// Development-only burner mode uses marmot-app's file-backed default so
+    /// headless test boxes can run without macOS keychain prompts.
+    pub fn open(
+        home: PathBuf,
+        relays: Vec<String>,
+        keychain_service: &str,
+        dev_burner_nsec: bool,
+    ) -> Result<Self> {
         if relays.is_empty() {
             bail!("darkmatter engine requires at least one relay url");
         }
-        let account_home = AccountHome::open_with_keychain(&home, keychain_service)
-            .map_err(|err| anyhow::anyhow!("opening keychain-backed AccountHome: {err}"))?;
-        let app = MarmotApp::with_relays_and_account_home(&home, relays, account_home);
+        let home = if dev_burner_nsec {
+            home.join("dev-burner")
+        } else {
+            home
+        };
+        fs::create_dir_all(&home)
+            .with_context(|| format!("creating darkmatter home {}", home.display()))?;
+        let account_home = if dev_burner_nsec {
+            AccountHome::open(&home)
+        } else {
+            AccountHome::open_with_keychain(&home, keychain_service)
+                .map_err(|err| anyhow::anyhow!("opening keychain-backed AccountHome: {err}"))?
+        };
+        let app = MarmotApp::with_relays_and_account_home(&home, relays, account_home.clone());
         let runtime = MarmotAppRuntime::new(app.clone());
-        Ok(Self { app, runtime, home })
+        Ok(Self {
+            app,
+            runtime,
+            account_home,
+            home,
+        })
     }
 
     pub fn home(&self) -> &PathBuf {
@@ -123,9 +142,10 @@ impl DarkmatterEngine {
     /// `configured` is the previously-persisted account reference (npub or hex)
     /// from `config.darkmatter.account`, if any. When it resolves to an
     /// existing account the account is reused unchanged. Otherwise a fresh
-    /// keypair is generated via [`MarmotAppRuntime::create_identity`], persisted
-    /// to the OS keychain via [`marmot_account::KeychainSecretStore`], and its
-    /// key package + relay lists are published once.
+    /// keypair is generated locally through [`marmot_account::AccountHome`] and
+    /// persisted to the configured secret store. Network discovery material is
+    /// published separately by [`Self::publish_discovery`] so relay failures do
+    /// not roll back a usable local identity.
     ///
     /// (Looking up by the persisted reference — rather than a constant friendly
     /// label — is what makes the identity stable across `setup`→`listen` and
@@ -143,23 +163,60 @@ impl DarkmatterEngine {
         if relays.is_empty() {
             bail!("ensure_account requires at least one relay url");
         }
-        let setup_relays: Vec<TransportEndpoint> = relays
+        if let Some(account) = self
+            .account_home
+            .accounts()
+            .context("listing local darkmatter accounts")?
+            .into_iter()
+            .find(|account| account.local_signing)
+        {
+            return Ok(account.account_id_hex);
+        }
+        let account = self
+            .account_home
+            .create_nostr_account()
+            .context("creating local darkmatter account")?;
+        self.runtime
+            .restart_account(&account.account_id_hex)
+            .await
+            .with_context(|| format!("starting darkmatter account {}", account.account_id_hex))?;
+        Ok(account.account_id_hex)
+    }
+
+    /// Broadcast the account relay lists clients use to find this desktop.
+    ///
+    /// This publishes all relay-list kinds Dark Matter currently cares about:
+    /// NIP-65, inbox, and key-package relay lists. Callers should treat this as
+    /// best-effort during setup/startup because slow public relays must not
+    /// roll back an otherwise usable local identity.
+    pub async fn publish_relay_lists(&self, account_id_hex: &str, relays: &[String]) -> Result<()> {
+        if relays.is_empty() {
+            bail!("cannot publish empty darkmatter relay list");
+        }
+        let endpoints = relays
             .iter()
             .map(|url| TransportEndpoint(url.clone()))
-            .collect();
-        let request = AccountSetupRequest {
-            identity: None,
-            default_relays: setup_relays.clone(),
-            bootstrap_relays: setup_relays,
-            publish_missing_relay_lists: true,
-            publish_initial_key_package: true,
-        };
-        let result: AccountSetupResult = self
-            .runtime
-            .create_identity(request)
+            .collect::<Vec<_>>();
+        self.app
+            .publish_account_relay_lists(
+                account_id_hex,
+                AccountRelayListBootstrap::new(endpoints.clone(), endpoints),
+            )
             .await
-            .map_err(|err| anyhow::anyhow!("darkmatter create_identity: {err}"))?;
-        Ok(result.account.account_id_hex)
+            .context("publishing darkmatter account relay lists")?;
+        Ok(())
+    }
+
+    /// Publish discovery material that lets another client create a new group
+    /// with this desktop. This is intentionally separate from account creation:
+    /// a slow or unavailable relay must not roll back the local keypair.
+    pub async fn publish_discovery(&self, account_id_hex: &str, relays: &[String]) -> Result<()> {
+        self.publish_relay_lists(account_id_hex, relays).await?;
+        self.runtime
+            .publish_key_package(account_id_hex)
+            .await
+            .map_err(|err| anyhow::anyhow!("publishing darkmatter key package: {err}"))?;
+        Ok(())
     }
 }
 

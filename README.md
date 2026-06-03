@@ -343,8 +343,9 @@ cargo build --release
 target/release/agentnoise up
 ```
 
-The QR scans as the desktop `npub`. The terminal also prints the `nprofile`
-with relay hints. Neither value exposes the desktop `nsec`.
+The QR scans as the desktop `npub`, which matches the current Dark Matter phone
+scanner. The terminal also prints the richer `nprofile` with relay hints for
+debugging and future client support. Neither value exposes the desktop `nsec`.
 
 Pairing relay hints are for discovery. Message delivery uses the Marmot v2
 account relay list. agentnoise keeps a broader message relay list in config
@@ -354,11 +355,9 @@ and publishes it via the embedded engine's `runtime.publish_account_relay_lists`
 [darkmatter]
 agent_text_stream_broker = "https://quic-broker.ipf.dev:4450"
 message_relays = [
-  "wss://index.hzrd149.com",
+  "wss://relay.damus.io",
   "wss://relay.primal.net",
-  "wss://relay.ditto.pub",
   "wss://nos.lol",
-  "wss://nostr.mom",
 ]
 ```
 
@@ -550,6 +549,8 @@ plaintext burner identity and avoids Secret Service setup.
 - `/deny <approval>`
 - `/attachments`
 - `/attach <number|id>`
+- `/download <number|id> [file-number]`
+- `/upload <workspace-path> [caption]`
 - `/worktrees`
 - `/worktree new <name>`
 - `/worktree use <name>`
@@ -604,9 +605,13 @@ GUI-backed sync folders. `agentnoise doctor` warns about this; run
 `agentnoise up` from an interactive terminal if you must use an iCloud
 workspace.
 
-Images and files sent by the phone are not handed to coding agents yet.
-agentnoise saves the metadata it can see, replies with an attachment id, and
-lets the user inspect it with `/attachments` and `/attach <id>`.
+Images and files sent by the phone are saved as Marmot media metadata and can
+be decrypted on demand with `/download <attachment-id|number> [file-number]`.
+Downloaded files are written under the local agentnoise data dir. To send a
+workspace file back to the phone, use `/upload <workspace-path> [caption]`;
+paths are resolved inside the selected repo/worktree, not as arbitrary
+filesystem paths. `/attachments` and `/attach <id>` list saved media references
+and show local download paths after retrieval.
 
 Git worktrees are opt-in per chat. `/worktree new fix-ui` creates a git
 worktree under the configured `runner.worktree_dir`, switches only that chat to

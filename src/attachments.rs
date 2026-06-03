@@ -22,6 +22,12 @@ pub struct AttachmentInfo {
     pub size: Option<u64>,
     #[serde(default)]
     pub hash: Option<String>,
+    #[serde(default)]
+    pub nonce: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +135,34 @@ impl AttachmentStore {
             .cloned()
     }
 
+    pub fn set_local_path(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        path: &Path,
+        size: u64,
+    ) -> Result<AttachmentRecord> {
+        let mut records = self
+            .inner
+            .records
+            .lock()
+            .map_err(|_| anyhow::anyhow!("attachment store lock poisoned"))?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.id == record_id)
+            .with_context(|| format!("unknown attachment record: {record_id}"))?;
+        let attachment = record
+            .attachments
+            .get_mut(attachment_index)
+            .with_context(|| format!("attachment {} is out of range", attachment_index + 1))?;
+        attachment.local_path = Some(path.display().to_string());
+        attachment.size = Some(size);
+        let updated = record.clone();
+        drop(records);
+        self.save()?;
+        Ok(updated)
+    }
+
     fn save(&self) -> Result<()> {
         let records = self
             .inner
@@ -160,6 +194,45 @@ pub fn extract_attachments(value: &Value) -> Vec<AttachmentInfo> {
     dedupe_attachments(out)
 }
 
+pub fn extract_media_attachments_from_tags(
+    tags: &[Vec<String>],
+    caption: Option<&str>,
+) -> Vec<AttachmentInfo> {
+    let mut out = Vec::new();
+    for tag in tags
+        .iter()
+        .filter(|tag| tag.first().is_some_and(|name| name == "imeta"))
+    {
+        let imeta = parse_imeta_tag(tag);
+        let Some(url) = imeta_value(&imeta, "url") else {
+            continue;
+        };
+        let name = imeta_value(&imeta, "filename").or_else(|| file_name_from_url(&url));
+        let mime_type = imeta_value(&imeta, "m");
+        let hash = imeta_value(&imeta, "x");
+        let nonce = imeta_value(&imeta, "n");
+        let version = imeta_value(&imeta, "v");
+        let kind = caption
+            .map(str::trim)
+            .filter(|caption| !caption.is_empty())
+            .map(|_| "media-with-caption")
+            .unwrap_or("media")
+            .to_string();
+        out.push(AttachmentInfo {
+            kind,
+            name,
+            mime_type,
+            url: Some(url),
+            size: None,
+            hash,
+            nonce,
+            version,
+            local_path: None,
+        });
+    }
+    dedupe_attachments(out)
+}
+
 fn collect_attachments(value: &Value, parent_key: Option<&str>, out: &mut Vec<AttachmentInfo>) {
     match value {
         Value::Object(object) => {
@@ -185,6 +258,9 @@ fn collect_attachments(value: &Value, parent_key: Option<&str>, out: &mut Vec<At
                 url: Some(text.clone()),
                 size: None,
                 hash: None,
+                nonce: None,
+                version: None,
+                local_path: None,
             });
         }
         Value::String(_) => {}
@@ -203,6 +279,9 @@ fn attachment_from_object(value: &Value, parent_key: Option<&str>) -> Option<Att
         url: find_string(value, &["url", "uri", "download_url", "media_url"]),
         size: find_u64(value, &["size", "bytes", "content_length", "contentLength"]),
         hash: find_string(value, &["hash", "sha256", "digest"]),
+        nonce: find_string(value, &["nonce", "nonce_hex", "nonceHex"]),
+        version: find_string(value, &["version", "v"]),
+        local_path: find_string(value, &["local_path", "localPath", "path"]),
     })
     .filter(|info| {
         info.name.is_some()
@@ -210,7 +289,37 @@ fn attachment_from_object(value: &Value, parent_key: Option<&str>) -> Option<Att
             || info.url.is_some()
             || info.size.is_some()
             || info.hash.is_some()
+            || info.nonce.is_some()
+            || info.version.is_some()
+            || info.local_path.is_some()
     })
+}
+
+fn parse_imeta_tag(tag: &[String]) -> Vec<(String, String)> {
+    tag.iter()
+        .skip(1)
+        .filter_map(|field| {
+            let (key, value) = field.split_once(' ')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+        .collect()
+}
+
+fn imeta_value(imeta: &[(String, String)], key: &str) -> Option<String> {
+    imeta
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, value)| value.clone())
+}
+
+fn file_name_from_url(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    path.rsplit('/')
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -313,8 +422,67 @@ pub fn render_record_details(record: &AttachmentRecord) -> String {
         if let Some(hash) = &attachment.hash {
             lines.push(format!("   hash: {hash}"));
         }
+        if let Some(nonce) = &attachment.nonce {
+            lines.push(format!("   nonce: {nonce}"));
+        }
+        if let Some(version) = &attachment.version {
+            lines.push(format!("   version: {version}"));
+        }
+        if let Some(local_path) = &attachment.local_path {
+            lines.push(format!("   local: {local_path}"));
+        } else if is_downloadable_media(attachment) {
+            lines.push(format!(
+                "   download: /download {} {}",
+                record.id,
+                index + 1
+            ));
+        }
     }
     lines.join("\n")
+}
+
+pub fn is_downloadable_media(attachment: &AttachmentInfo) -> bool {
+    attachment
+        .url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && attachment
+            .hash
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && attachment
+            .nonce
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && attachment
+            .version
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && attachment
+            .name
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && attachment
+            .mime_type
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub fn safe_file_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '\0' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim().trim_matches('.').trim();
+    if sanitized.is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized.chars().take(180).collect()
+    }
 }
 
 fn short_id() -> String {
@@ -346,5 +514,23 @@ mod tests {
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
         assert_eq!(attachments[0].name.as_deref(), Some("shot.png"));
+    }
+
+    #[test]
+    fn extracts_marmot_imeta_media_reference() {
+        let tags = vec![vec![
+            "imeta".to_string(),
+            "url https://blossom.example/blob".to_string(),
+            "m image/png".to_string(),
+            "filename shot.png".to_string(),
+            format!("x {}", "11".repeat(32)),
+            format!("n {}", "22".repeat(12)),
+            "v mip04-v2".to_string(),
+        ]];
+        let attachments = extract_media_attachments_from_tags(&tags, Some("caption"));
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].kind, "media-with-caption");
+        assert_eq!(attachments[0].name.as_deref(), Some("shot.png"));
+        assert!(is_downloadable_media(&attachments[0]));
     }
 }

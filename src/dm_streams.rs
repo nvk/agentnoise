@@ -288,6 +288,7 @@ impl AgentTextStream {
         let transcript_chunks = self.transcript.chunk_count();
         let request = AgentTextStreamFinishRequest {
             stream_id: self.stream_id.to_vec(),
+            start_event_id: self.start_event_id_hex.clone(),
             final_text_or_reference,
             transcript_hash,
             chunk_count: transcript_chunks,
@@ -446,6 +447,7 @@ impl StreamBrokerEndpoint {
                 trust: broker_trust_for_addr(*addr),
                 stream_id: stream_id.clone(),
                 start_event_id: start_event_id.clone(),
+                crypto: None,
             })
             .await
             {

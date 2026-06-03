@@ -28,6 +28,8 @@ pub enum RouteAction {
     Reply(String),
     NewSession(NewSessionRequest),
     ResumeSession(ResumeSessionRequest),
+    UploadMedia(MediaUploadAction),
+    DownloadMedia(MediaDownloadAction),
     Run(AgentRequest),
 }
 
@@ -87,6 +89,20 @@ pub struct ResumeSessionRequest {
     pub group_id: String,
     pub reply_text: String,
     pub target_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaUploadAction {
+    pub path: PathBuf,
+    pub caption: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaDownloadAction {
+    pub record_id: String,
+    pub attachment_index: usize,
+    pub attachment: attachments::AttachmentInfo,
+    pub output_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -243,6 +259,12 @@ impl AgentApp {
             ChatCommand::Attach { target } => {
                 Ok(RouteAction::Reply(self.attach_text(target.as_deref())))
             }
+            ChatCommand::Download { target, index } => {
+                self.download_media_action(group_id, &target, index)
+            }
+            ChatCommand::Upload { path, caption } => {
+                self.upload_media_action(group_id, &session_key, &path, caption)
+            }
             ChatCommand::Worktrees => Ok(RouteAction::Reply(self.worktrees_text(&session_key))),
             ChatCommand::Worktree(command) => Ok(RouteAction::Reply(
                 self.worktree_text(&session_key, command),
@@ -388,6 +410,18 @@ impl AgentApp {
         let key = session_key(Some(group_id), None);
         self.sessions.set(&key, state)?;
         Ok(key)
+    }
+
+    pub fn record_attachment_downloaded(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        path: &Path,
+        size: u64,
+    ) -> Result<()> {
+        self.attachments
+            .set_local_path(record_id, attachment_index, path, size)
+            .map(|_| ())
     }
 
     fn should_ignore_bot(&self, sender: Option<&str>) -> bool {
@@ -1052,6 +1086,110 @@ impl AgentApp {
         }
     }
 
+    fn upload_media_action(
+        &self,
+        group_id: Option<&str>,
+        sender_key: &str,
+        path: &str,
+        caption: Option<String>,
+    ) -> Result<RouteAction> {
+        if group_id
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .is_none()
+        {
+            return Ok(RouteAction::Reply(
+                "Error: /upload only works inside a Marmot chat.".to_string(),
+            ));
+        }
+        match self.resolve_session_path(sender_key, path) {
+            Ok((_alias, _session, path)) => {
+                if !path.is_file() {
+                    return Ok(RouteAction::Reply(format!(
+                        "Error: upload path is not a file: {}",
+                        path.display()
+                    )));
+                }
+                Ok(RouteAction::UploadMedia(MediaUploadAction {
+                    path,
+                    caption,
+                }))
+            }
+            Err(error) => Ok(RouteAction::Reply(format!(
+                "Error: upload failed: {error:#}"
+            ))),
+        }
+    }
+
+    fn download_media_action(
+        &self,
+        group_id: Option<&str>,
+        target: &str,
+        index: Option<usize>,
+    ) -> Result<RouteAction> {
+        let Some(group_id) = group_id.map(str::trim).filter(|group| !group.is_empty()) else {
+            return Ok(RouteAction::Reply(
+                "Error: /download only works inside a Marmot chat.".to_string(),
+            ));
+        };
+        let Some(record) = self.attachments.get(target) else {
+            return Ok(RouteAction::Reply(format!(
+                "No matching attachment: {target}"
+            )));
+        };
+        if record
+            .group_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|record_group| !record_group.is_empty())
+            .is_some_and(|record_group| record_group != group_id)
+        {
+            return Ok(RouteAction::Reply(
+                "Error: that attachment belongs to a different chat.".to_string(),
+            ));
+        }
+        let attachment_index = index.unwrap_or(1).saturating_sub(1);
+        let Some(attachment) = record.attachments.get(attachment_index).cloned() else {
+            return Ok(RouteAction::Reply(format!(
+                "No file {} on attachment {}",
+                attachment_index + 1,
+                record.id
+            )));
+        };
+        if !attachments::is_downloadable_media(&attachment) {
+            return Ok(RouteAction::Reply(format!(
+                "Attachment {} file {} does not include a downloadable Marmot media reference.",
+                record.id,
+                attachment_index + 1
+            )));
+        }
+        let output_path = self.attachment_download_path(&record.id, attachment_index, &attachment);
+        Ok(RouteAction::DownloadMedia(MediaDownloadAction {
+            record_id: record.id,
+            attachment_index,
+            attachment,
+            output_path,
+        }))
+    }
+
+    fn attachment_download_path(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> PathBuf {
+        let name = attachment
+            .name
+            .as_deref()
+            .map(attachments::safe_file_name)
+            .unwrap_or_else(|| "attachment".to_string());
+        self.config
+            .resolved_data_dir()
+            .join("attachments")
+            .join(record_id)
+            .join(format!("{:02}-{name}", attachment_index + 1))
+    }
+
     fn worktrees_text(&self, sender_key: &str) -> String {
         match self.session(sender_key) {
             Ok(session) => {
@@ -1618,6 +1756,8 @@ fn help_text() -> String {
         "/deny <approval>",
         "/attachments",
         "/attach <number|id>",
+        "/download <number|id> [file-number]",
+        "/upload <workspace-path> [caption]",
         "",
         "sessions",
         "/agent-sessions [limit]",
@@ -1803,6 +1943,84 @@ mod tests {
             app.route_unsupported_message(Some("stranger"), "Attachment received")
                 .unwrap(),
             RouteAction::Reply(reply) if reply.contains("not paired")
+        ));
+    }
+
+    #[test]
+    fn media_event_is_saved_and_downloadable() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let event = MessageEvent {
+            group_id: Some("group-a".to_string()),
+            sender: Some("phone".to_string()),
+            text: "see attached".to_string(),
+            unsupported: None,
+            id: Some("msg1".to_string()),
+            trigger: None,
+            is_initial: false,
+            attachments: vec![attachments::AttachmentInfo {
+                kind: "media".to_string(),
+                name: Some("shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: Some("https://blossom.example/abc".to_string()),
+                size: None,
+                hash: Some("11".repeat(32)),
+                nonce: Some("22".repeat(12)),
+                version: Some("mip04-v2".to_string()),
+                local_path: None,
+            }],
+        };
+        assert!(matches!(
+            app.route_unsupported_event(&event).unwrap(),
+            RouteAction::Reply(reply) if reply.contains("Attachment saved")
+        ));
+
+        let action = app
+            .route_message(Some("group-a"), Some("phone"), "/download 1")
+            .unwrap();
+        assert!(matches!(
+            action,
+            RouteAction::DownloadMedia(request)
+                if request.attachment.name.as_deref() == Some("shot.png")
+                    && request.output_path.ends_with("01-shot.png")
+        ));
+    }
+
+    #[test]
+    fn upload_resolves_workspace_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        fs::write(repo.path().join("note.txt"), "hello").unwrap();
+        let mut config = Config::template();
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let action = app
+            .route_message(
+                Some("group-a"),
+                Some("phone"),
+                "/upload note.txt hello phone",
+            )
+            .unwrap();
+        assert!(matches!(
+            action,
+            RouteAction::UploadMedia(request)
+                if request.path.ends_with("note.txt")
+                    && request.caption.as_deref() == Some("hello phone")
         ));
     }
 

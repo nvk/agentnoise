@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Dark Matter pairing QR codes now encode the bare desktop `npub`, matching
+  the current phone-client scanner. The richer `nprofile` with relay hints is
+  still printed next to the QR for debugging and future client support.
+- Dark Matter setup/startup now creates the desktop id locally first, then
+  broadcasts discovery material (relay lists plus key package) best-effort, so
+  relay timeouts do not roll back local identity creation.
+- Added Dark Matter encrypted media support: incoming phone files are captured
+  from `imeta` tags, `/download <attachment>` decrypts them into the local data
+  dir, and `/upload <workspace-path> [caption]` sends selected workspace files
+  back to the chat through Blossom.
+- Trimmed default Dark Matter pairing/message relays to the three mainstream
+  write relays used for install defaults: Damus, Primal, and nos.lol.
+
 ## 0.1.28 - 2026-05-23
 
 - Split the managed service path into `agentnoise transport run` plus

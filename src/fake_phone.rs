@@ -8,8 +8,8 @@
 //! 3. `phone.create_group([desktop])`, wait for desktop's `GroupJoined` event.
 //! 4. Spawn a desktop responder that subscribes to messages, wraps each reply
 //!    in an [`crate::dm_streams::AgentTextStream`] lifecycle so the phone sees
-//!    `AgentStreamStarted` / `AgentStreamFinalized` events (smoke test for the
-//!    v2 QUIC-live-preview wiring).
+//!    `AgentStreamStarted` plus the final stream message (smoke test for the v2
+//!    QUIC-live-preview wiring).
 //! 5. Phone sends the requested test message and collects replies + stream
 //!    events until min_replies are seen, expectations matched, or timeout
 //!    fires.
@@ -231,6 +231,9 @@ async fn run_roundtrip(options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
                     Some(RuntimeMessageUpdate::Message(message))
                         if message.message.sender == desktop_id =>
                     {
+                        if marmot_app::tag_value(&message.message.tags, "stream-start").is_some() {
+                            saw_finalize = true;
+                        }
                         replies.push(message.message.plaintext);
                     }
                     Some(_) => {}
@@ -243,11 +246,6 @@ async fn run_roundtrip(options: FakePhoneRoundtrip) -> Result<FakePhoneResult> {
                         if stream.account_id_hex == phone_id =>
                     {
                         saw_start = true;
-                    }
-                    Ok(MarmotAppEvent::AgentStreamFinalized(stream))
-                        if stream.account_id_hex == phone_id =>
-                    {
-                        saw_finalize = true;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -291,7 +289,7 @@ async fn handle_desktop_message(
     // harness never opens a real QUIC channel — the start/finish envelopes
     // alone exercise the protocol-layer wiring.
     let quic_candidates = vec!["quic://127.0.0.1:0".to_string()];
-    let (_envelope, _summary) = runtime
+    let (_envelope, summary) = runtime
         .start_agent_text_stream(
             account_id_hex,
             group_id,
@@ -301,6 +299,11 @@ async fn handle_desktop_message(
         )
         .await
         .map_err(|err| anyhow::anyhow!("start_agent_text_stream: {err}"))?;
+    let start_event_id = summary
+        .message_ids
+        .first()
+        .cloned()
+        .context("stream start did not return a message id")?;
 
     let reply = render_fake_desktop_reply(text, pin);
     runtime
@@ -314,6 +317,7 @@ async fn handle_desktop_message(
 
     let finish_request = AgentTextStreamFinishRequest {
         stream_id: stream_id.to_vec(),
+        start_event_id,
         final_text_or_reference: reply,
         transcript_hash,
         chunk_count: 1,
