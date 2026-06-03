@@ -429,6 +429,7 @@ impl Runner {
                     "-p".to_string(),
                     "--output-format".to_string(),
                     "stream-json".to_string(),
+                    "--verbose".to_string(),
                     "--resume".to_string(),
                     session.to_string(),
                     prompt,
@@ -441,16 +442,19 @@ impl Runner {
                     "-p".to_string(),
                     "--output-format".to_string(),
                     "stream-json".to_string(),
+                    "--verbose".to_string(),
                 ]);
                 if let Some(permission_mode) = &permission_mode
                     && !permission_mode.trim().is_empty()
                 {
                     args.extend(["--permission-mode".to_string(), permission_mode.clone()]);
                 }
+                // `--add-dir` is variadic in Claude Code; keep the prompt before it
+                // so the parser does not consume the prompt as another directory.
                 args.extend([
+                    prompt,
                     "--add-dir".to_string(),
                     repo_root.display().to_string(),
-                    prompt,
                 ]);
                 Some(workdir)
             }
@@ -1491,7 +1495,40 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
         assert!(plan.args.contains(&"--resume".to_string()));
         assert!(plan.args.contains(&"session-1".to_string()));
+        assert!(plan.args.contains(&"--verbose".to_string()));
         assert_eq!(plan.args.last().unwrap(), &agentnoise_prompt(&request));
+    }
+
+    #[test]
+    fn claude_prompt_precedes_variadic_add_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::template();
+        config.runner.launcher = crate::config::RunnerLauncher::Direct;
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+
+        let jobs =
+            JobStore::open(&config.resolved_jobs_path(), &config.resolved_log_dir()).unwrap();
+        let runner = Runner::new(config, jobs);
+        let request = AgentRequest::new(AgentKind::Claude, "work", "hello");
+        let plan = runner.build_command(&request).unwrap();
+
+        let prompt_index = plan
+            .args
+            .iter()
+            .position(|arg| arg == &agentnoise_prompt(&request))
+            .unwrap();
+        let add_dir_index = plan.args.iter().position(|arg| arg == "--add-dir").unwrap();
+
+        assert!(prompt_index < add_dir_index);
+        assert!(plan.args.contains(&"--verbose".to_string()));
+        assert_eq!(
+            plan.args[add_dir_index + 1],
+            repo.path().display().to_string()
+        );
     }
 
     #[test]
