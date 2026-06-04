@@ -1,3 +1,4 @@
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -6,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentnoise::app::{AgentApp, RouteAction};
+use agentnoise::attachments;
 use agentnoise::auth::PairingGate;
 use agentnoise::config::{Config, RunnerLauncher};
 use agentnoise::darkmatter_app::DarkmatterEngine;
@@ -23,6 +25,8 @@ use agentnoise::runtime::{
 };
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
+use agentnoise::text::short_ref;
+use agentnoise::workspace;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use marmot_app::RelayPlaneHealth;
@@ -663,6 +667,24 @@ fn main() -> Result<()> {
                     println!("{}", request.reply_text);
                     println!("Target chat: {}", request.group_id);
                     println!("{}", request.target_text);
+                }
+                RouteAction::IngestAttachments(request) => {
+                    println!(
+                        "Attachment ingest requested for {}. Run this from the live listener for real delivery.",
+                        attachments::render_record_summary(&request.record)
+                    );
+                }
+                RouteAction::UploadMedia(request) => {
+                    println!(
+                        "Upload requested for {}. Run this from the live listener for real delivery.",
+                        request.path.display()
+                    );
+                }
+                RouteAction::DownloadMedia(request) => {
+                    println!(
+                        "Download requested for {}. Run this from the live listener for real delivery.",
+                        request.output_path.display()
+                    );
                 }
                 RouteAction::Run(request) => println!("{}", app.run_request(request)?),
             }
@@ -1956,7 +1978,74 @@ fn run_listener(
             continue;
         }
 
-        let action = match app.route_message(
+        if event.attachments.is_empty()
+            && let Some(message) = event.unsupported.as_deref()
+        {
+            let action = match app.route_unsupported_message(event.sender.as_deref(), message) {
+                Ok(action) => action,
+                Err(error) => {
+                    eprintln!("agentnoise: routing failed: {error:#}");
+                    continue;
+                }
+            };
+            match action {
+                RouteAction::Ignore => {}
+                RouteAction::Reply(reply) => {
+                    try_send_dm_reply_recorded(&dm, &event_journal, &group_id, &reply);
+                }
+                RouteAction::IngestAttachments(_)
+                | RouteAction::NewSession(_)
+                | RouteAction::ResumeSession(_)
+                | RouteAction::UploadMedia(_)
+                | RouteAction::DownloadMedia(_)
+                | RouteAction::Run(_) => {}
+            }
+            continue;
+        }
+
+        let mut attachment_ingest = None;
+        if !event.attachments.is_empty() {
+            let action = match app.route_unsupported_event(&event) {
+                Ok(action) => action,
+                Err(error) => {
+                    eprintln!("agentnoise: routing failed: {error:#}");
+                    continue;
+                }
+            };
+            match action {
+                RouteAction::Ignore => continue,
+                RouteAction::Reply(reply) => {
+                    try_send_dm_reply_recorded(&dm, &event_journal, &group_id, &reply);
+                    continue;
+                }
+                RouteAction::IngestAttachments(request) => {
+                    let ingest = ingest_dm_attachments(
+                        &app,
+                        &dm,
+                        &group_id,
+                        event.sender.as_deref(),
+                        request,
+                    );
+                    if event.text.trim().is_empty() {
+                        try_send_dm_reply_recorded(
+                            &dm,
+                            &event_journal,
+                            &group_id,
+                            &ingest.reply_text(),
+                        );
+                        continue;
+                    }
+                    attachment_ingest = Some(ingest);
+                }
+                RouteAction::NewSession(_)
+                | RouteAction::ResumeSession(_)
+                | RouteAction::UploadMedia(_)
+                | RouteAction::DownloadMedia(_)
+                | RouteAction::Run(_) => {}
+            }
+        }
+
+        let mut action = match app.route_message(
             event.group_id.as_deref(),
             event.sender.as_deref(),
             &event.text,
@@ -1967,6 +2056,36 @@ fn run_listener(
                 continue;
             }
         };
+        if let Some(ingest) = &attachment_ingest {
+            action = action_with_attachment_context(action, ingest);
+        }
+
+        if let Some(queue) = job_queue.as_ref()
+            && should_intercept_active_followup(
+                &action,
+                &event,
+                &group_id,
+                &app.config().darkmatter.group_id,
+            )
+        {
+            match queue.active_for_reply_group(&group_id) {
+                Ok(Some(job)) => {
+                    try_send_dm_reply_recorded(
+                        &dm,
+                        &event_journal,
+                        &group_id,
+                        &active_job_followup_text(&job),
+                    );
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "agentnoise: failed to check active queue job for {group_id}: {error:#}"
+                    );
+                }
+            }
+        }
 
         match action {
             RouteAction::Ignore => {}
@@ -1980,6 +2099,13 @@ fn run_listener(
                     &group_id,
                     "agentnoise: parallel/resume sessions are not yet wired through darkmatter v2 (Phase 3 follow-up)",
                 );
+            }
+            RouteAction::IngestAttachments(_) => {}
+            RouteAction::UploadMedia(request) => {
+                try_upload_dm_media(&dm, &event_journal, &group_id, request);
+            }
+            RouteAction::DownloadMedia(request) => {
+                try_download_dm_media(&app, &dm, &event_journal, &group_id, request);
             }
             RouteAction::Run(request) => {
                 try_send_dm_reply_recorded(
@@ -2135,19 +2261,70 @@ fn dispatch_dm_agent_request(dispatch: DmAgentDispatch<'_>) {
     }
 }
 
+fn is_bare_active_job_followup(
+    event: &agentnoise::dm::MessageEvent,
+    group_id: &str,
+    primary_group_id: &str,
+) -> bool {
+    let text = event.text.trim();
+    !text.is_empty()
+        && !text.starts_with('/')
+        && !group_id.trim().is_empty()
+        && group_id != primary_group_id.trim()
+}
+
+fn should_intercept_active_followup(
+    action: &RouteAction,
+    event: &agentnoise::dm::MessageEvent,
+    group_id: &str,
+    primary_group_id: &str,
+) -> bool {
+    matches!(action, RouteAction::Run(_))
+        && is_bare_active_job_followup(event, group_id, primary_group_id)
+}
+
+fn active_job_followup_text(job: &QueuedJob) -> String {
+    let job_id = short_ref(&job.id);
+    let status = match job.status {
+        agentnoise::queue::QueueStatus::Queued => "queued",
+        agentnoise::queue::QueueStatus::Claimed => "starting",
+        agentnoise::queue::QueueStatus::Running => "running",
+        agentnoise::queue::QueueStatus::Succeeded | agentnoise::queue::QueueStatus::Failed => {
+            "active"
+        }
+    };
+    format!(
+        "Still working · {job_id}\nStatus: {status}\nReply after it finishes, or use /tail {job_id} /cancel {job_id}."
+    )
+}
+
 fn run_inline_dm_job(runner: DmJobRunner, group_id: String, request: AgentRequest) {
     thread::spawn(move || {
-        let reply = run_dm_job_to_reply(
+        let request_for_media = request.clone();
+        let result = run_dm_job_to_record(
             runner.clone(),
             group_id.clone(),
             format!("inline-{}", Uuid::new_v4().simple()),
             request,
-        )
-        .unwrap_or_else(|error| format!("Error: job failed to start: {error:#}"));
+        );
+        let reply = match &result {
+            Ok(record) => runner.app.render_job_record(record),
+            Err(error) => format!("Error: job failed to start: {error:#}"),
+        };
         if let Err(error) =
             send_dm_reply_recorded(&runner.dm, &runner.event_journal, &group_id, &reply)
         {
             eprintln!("agentnoise: failed to send job reply: {error:#}");
+        }
+        if let Ok(record) = result {
+            upload_referenced_dm_job_media(
+                &runner.app,
+                &runner.dm,
+                &runner.event_journal,
+                &group_id,
+                &request_for_media,
+                &record,
+            );
         }
     });
 }
@@ -2159,7 +2336,7 @@ fn run_queued_dm_job(queue: &JobQueue, runner: DmJobRunner, job: QueuedJob) -> R
         runner.clone(),
         group_id.clone(),
         job.id.clone(),
-        job.request,
+        job.request.clone(),
     );
 
     match result {
@@ -2180,6 +2357,14 @@ fn run_queued_dm_job(queue: &JobQueue, runner: DmJobRunner, job: QueuedJob) -> R
             }
             send_dm_reply_recorded(&runner.dm, &runner.event_journal, &group_id, &reply)
                 .context("sending queued job reply")?;
+            upload_referenced_dm_job_media(
+                &runner.app,
+                &runner.dm,
+                &runner.event_journal,
+                &group_id,
+                &job.request,
+                &record,
+            );
         }
         Err(error) => {
             let text = format!("Error: job failed to start: {error:#}");
@@ -2189,16 +2374,6 @@ fn run_queued_dm_job(queue: &JobQueue, runner: DmJobRunner, job: QueuedJob) -> R
         }
     }
     Ok(())
-}
-
-fn run_dm_job_to_reply(
-    runner: DmJobRunner,
-    group_id: String,
-    job_id: String,
-    request: AgentRequest,
-) -> Result<String> {
-    let record = run_dm_job_to_record(runner.clone(), group_id, job_id, request)?;
-    Ok(runner.app.render_job_record(&record))
 }
 
 fn run_dm_job_to_record(
@@ -2231,6 +2406,499 @@ fn queue_source_event_id(event: &agentnoise::dm::MessageEvent, group_id: &str) -
         .map(str::to_string)
         .unwrap_or_else(|| format!("local-{}", Uuid::new_v4().simple()));
     format!("{group_id}:{event_id}")
+}
+
+#[derive(Debug, Clone)]
+struct AttachmentIngestResult {
+    record_id: String,
+    summary: String,
+    reply_lines: Vec<String>,
+    prompt_lines: Vec<String>,
+}
+
+impl AttachmentIngestResult {
+    fn new(record_id: String, summary: String) -> Self {
+        Self {
+            record_id,
+            summary,
+            reply_lines: Vec::new(),
+            prompt_lines: Vec::new(),
+        }
+    }
+
+    fn reply_text(&self) -> String {
+        let mut lines = vec![format!("Attachment saved: {}", self.summary)];
+        if self.reply_lines.is_empty() {
+            lines.push(format!("Send /attach {} for details.", self.record_id));
+        } else {
+            lines.extend(self.reply_lines.clone());
+        }
+        lines.join("\n")
+    }
+
+    fn prompt_context(&self) -> Option<String> {
+        if self.prompt_lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Attached Dark Matter media ingested by agentnoise:\n{}\nUse these local file paths when inspecting the attached media.",
+            self.prompt_lines.join("\n")
+        ))
+    }
+
+    fn wiki_ingest_context(&self) -> Option<String> {
+        if self.prompt_lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Attached Dark Matter media for the LLM Wiki ingest pipeline:\n{}\nUse the wiki File Ingestion workflow for media/files: create immutable raw metadata stubs for these local file sources, include file paths plus visible-content or file-metadata descriptions/provenance, then continue with the user's wiki request.",
+            self.prompt_lines.join("\n")
+        ))
+    }
+}
+
+fn ingest_dm_attachments(
+    app: &AgentApp,
+    dm: &DmClient,
+    group_id: &str,
+    sender: Option<&str>,
+    request: agentnoise::app::AttachmentIngestAction,
+) -> AttachmentIngestResult {
+    let record = request.record;
+    let mut result = AttachmentIngestResult::new(
+        record.id.clone(),
+        attachments::render_record_summary(&record),
+    );
+
+    for (index, attachment) in record.attachments.iter().enumerate() {
+        let Some(media_kind) = attachments::supported_media_kind(attachment) else {
+            continue;
+        };
+        let media_label = media_kind.label();
+        let display_name = attachment
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(media_label);
+
+        if let Some(local_path) = attachment
+            .local_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            let source_path = Path::new(local_path);
+            if source_path.is_file() {
+                copy_ingested_attachment(
+                    app,
+                    IngestCopyTarget {
+                        group_id,
+                        sender,
+                        record_id: &record.id,
+                        index,
+                        attachment,
+                        source_path,
+                        display_name,
+                        media_label,
+                    },
+                    &mut result,
+                );
+                continue;
+            }
+            result.reply_lines.push(format!(
+                "{media_label} saved but local copy failed for {display_name}: source path is not a file: {local_path}"
+            ));
+            result.prompt_lines.push(format!(
+                "- {media_label} {display_name}: metadata saved as {}, but source path was not readable: {local_path}",
+                record.id
+            ));
+            if !attachments::is_downloadable_media(attachment) {
+                continue;
+            }
+        }
+
+        if !attachments::is_downloadable_media(attachment) {
+            result.reply_lines.push(format!(
+                "{media_label} saved but not downloaded: {display_name} has no complete Dark Matter media reference"
+            ));
+            result.prompt_lines.push(format!(
+                "- {media_label} {display_name}: metadata saved as {}, but no complete downloadable media reference was present",
+                record.id
+            ));
+            continue;
+        }
+
+        match dm.download_attachment_blocking(group_id, attachment) {
+            Ok(download) => {
+                let output_path = app.attachment_download_path_for_message(
+                    Some(group_id),
+                    sender,
+                    &record.id,
+                    index,
+                    attachment,
+                );
+                match write_private_file(&output_path, &download.plaintext) {
+                    Ok(()) => {
+                        if let Err(error) = app.record_attachment_downloaded(
+                            &record.id,
+                            index,
+                            &output_path,
+                            Some(download.size_bytes),
+                        ) {
+                            eprintln!("agentnoise: failed to update attachment store: {error:#}");
+                        }
+                        result.reply_lines.push(format!(
+                            "media ingested: {} {} -> {} ({} bytes)",
+                            media_label,
+                            display_name,
+                            output_path.display(),
+                            download.size_bytes
+                        ));
+                        result.prompt_lines.push(format!(
+                            "- {}: {} ({} bytes)",
+                            prompt_media_name(media_label, display_name),
+                            output_path.display(),
+                            download.size_bytes
+                        ));
+                    }
+                    Err(error) => {
+                        result.reply_lines.push(format!(
+                            "{media_label} saved but local write failed for {display_name}: {error:#}"
+                        ));
+                        result.prompt_lines.push(format!(
+                            "- {}: metadata saved as {}, but local write failed: {error:#}",
+                            prompt_media_name(media_label, display_name),
+                            record.id
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                result.reply_lines.push(format!(
+                    "{media_label} saved but download failed for {display_name}: {error:#}"
+                ));
+                result.prompt_lines.push(format!(
+                    "- {media_label} {display_name}: metadata saved as {}, but download failed: {error:#}",
+                    record.id
+                ));
+            }
+        }
+    }
+
+    result
+}
+
+struct IngestCopyTarget<'a> {
+    group_id: &'a str,
+    sender: Option<&'a str>,
+    record_id: &'a str,
+    index: usize,
+    attachment: &'a attachments::AttachmentInfo,
+    source_path: &'a Path,
+    display_name: &'a str,
+    media_label: &'a str,
+}
+
+fn copy_ingested_attachment(
+    app: &AgentApp,
+    target: IngestCopyTarget<'_>,
+    result: &mut AttachmentIngestResult,
+) {
+    let output_path = app.attachment_download_path_for_message(
+        Some(target.group_id),
+        target.sender,
+        target.record_id,
+        target.index,
+        target.attachment,
+    );
+    match copy_private_file(target.source_path, &output_path) {
+        Ok(size) => {
+            if let Err(error) = app.record_attachment_downloaded(
+                target.record_id,
+                target.index,
+                &output_path,
+                Some(size),
+            ) {
+                eprintln!("agentnoise: failed to update attachment store: {error:#}");
+            }
+            result.reply_lines.push(format!(
+                "media ingested: {} {} -> {} ({size} bytes)",
+                target.media_label,
+                target.display_name,
+                output_path.display()
+            ));
+            result.prompt_lines.push(format!(
+                "- {}: {} ({size} bytes)",
+                prompt_media_name(target.media_label, target.display_name),
+                output_path.display()
+            ));
+        }
+        Err(error) => {
+            result.reply_lines.push(format!(
+                "{} saved but local copy failed for {}: {error:#}",
+                target.media_label, target.display_name
+            ));
+            result.prompt_lines.push(format!(
+                "- {}: metadata saved as {}, but local copy failed: {error:#}",
+                prompt_media_name(target.media_label, target.display_name),
+                target.record_id
+            ));
+        }
+    }
+}
+
+fn prompt_media_name(media_label: &str, display_name: &str) -> String {
+    if display_name.eq_ignore_ascii_case(media_label) {
+        display_name.to_string()
+    } else {
+        format!("{media_label} {display_name}")
+    }
+}
+
+fn action_with_attachment_context(
+    action: RouteAction,
+    ingest: &AttachmentIngestResult,
+) -> RouteAction {
+    match action {
+        RouteAction::Run(mut request) => {
+            let context = if looks_like_wiki_agent_prompt(&request.prompt) {
+                ingest.wiki_ingest_context()
+            } else {
+                ingest.prompt_context()
+            };
+            if let Some(context) = context {
+                request.prompt = format!("{}\n\n{}", request.prompt.trim_end(), context);
+            }
+            RouteAction::Run(request)
+        }
+        RouteAction::Reply(reply) => {
+            RouteAction::Reply(format!("{}\n\n{}", ingest.reply_text(), reply.trim()))
+        }
+        action => action,
+    }
+}
+
+fn looks_like_wiki_agent_prompt(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    prompt == "@wiki"
+        || prompt.starts_with("@wiki ")
+        || prompt == "wiki"
+        || prompt.starts_with("wiki ")
+}
+
+fn upload_referenced_dm_job_media(
+    app: &AgentApp,
+    dm: &DmClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    request: &AgentRequest,
+    record: &agentnoise::jobs::JobRecord,
+) {
+    if record.status != agentnoise::jobs::JobStatus::Succeeded {
+        return;
+    }
+    let Some(summary) = record
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    else {
+        return;
+    };
+
+    for path in referenced_media_paths(summary, app.config(), request)
+        .into_iter()
+        .take(4)
+    {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("media");
+        let caption = format!("agent output: {file_name}");
+        if let Err(error) = dm.upload_file_blocking(group_id, &path, Some(caption)) {
+            eprintln!(
+                "agentnoise: failed to upload referenced media {}: {error:#}",
+                path.display()
+            );
+            try_send_dm_reply_recorded(
+                dm,
+                event_journal,
+                group_id,
+                &format!(
+                    "Warning: failed to send media {}: {error:#}",
+                    path.display()
+                ),
+            );
+        }
+    }
+}
+
+fn referenced_media_paths(text: &str, config: &Config, request: &AgentRequest) -> Vec<PathBuf> {
+    let Some((root, workdir)) = request_workspace_paths(config, request) else {
+        return Vec::new();
+    };
+    let root = root.canonicalize().unwrap_or(root);
+    let workdir = workdir.canonicalize().unwrap_or(workdir);
+    let mut output = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for candidate in media_path_candidates(text) {
+        let candidate_path = Path::new(&candidate);
+        let path = if candidate_path.is_absolute() {
+            candidate_path.to_path_buf()
+        } else {
+            workdir.join(candidate_path)
+        };
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.is_file() || !path.starts_with(&root) {
+            continue;
+        }
+        if is_agentnoise_attachment_path(&path) {
+            continue;
+        }
+        if !attachments::has_supported_media_extension(&path.display().to_string()) {
+            continue;
+        }
+        let key = path.display().to_string();
+        if seen.insert(key) {
+            output.push(path);
+        }
+    }
+    output
+}
+
+fn is_agentnoise_attachment_path(path: &Path) -> bool {
+    let mut components = path.components().filter_map(|component| match component {
+        std::path::Component::Normal(value) => value.to_str(),
+        _ => None,
+    });
+    while let Some(component) = components.next() {
+        if component == ".agentnoise" && matches!(components.next(), Some("attachments")) {
+            return true;
+        }
+    }
+    false
+}
+
+fn request_workspace_paths(config: &Config, request: &AgentRequest) -> Option<(PathBuf, PathBuf)> {
+    let root = if let Some(root) = &request.workspace_root {
+        root.clone()
+    } else {
+        let alias = request.repo_alias.as_deref()?;
+        config.repo_path(alias)?
+    };
+    let workdir = workspace::resolve_cwd(&root, request.cwd.as_deref()).ok()?;
+    Some((root, workdir))
+}
+
+fn media_path_candidates(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for chunk in text.split(['(', ')', '<', '>', '"', '\'', '`']) {
+        for token in chunk.split_whitespace() {
+            let token = token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    ',' | ';' | ':' | '!' | '?' | '.' | '[' | ']' | '{' | '}' | '*'
+                )
+            });
+            if token.is_empty() || token.contains("://") {
+                continue;
+            }
+            if attachments::has_supported_media_extension(token) {
+                candidates.push(token.to_string());
+            }
+        }
+    }
+    candidates
+}
+
+fn try_upload_dm_media(
+    dm: &DmClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    request: agentnoise::app::MediaUploadAction,
+) {
+    let reply = match dm.upload_file_blocking(group_id, &request.path, request.caption) {
+        Ok(upload) => format!(
+            "uploaded and sent {}\nhash: {}\nmedia: {}",
+            upload.reference.file_name, upload.reference.file_hash_hex, upload.reference.url
+        ),
+        Err(error) => format!("Error: upload failed: {error:#}"),
+    };
+    try_send_dm_reply_recorded(dm, event_journal, group_id, &reply);
+}
+
+fn try_download_dm_media(
+    app: &AgentApp,
+    dm: &DmClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    group_id: &str,
+    request: agentnoise::app::MediaDownloadAction,
+) {
+    let reply = match dm.download_attachment_blocking(group_id, &request.attachment) {
+        Ok(download) => match write_private_file(&request.output_path, &download.plaintext) {
+            Ok(()) => {
+                if let Err(error) = app.record_attachment_downloaded(
+                    &request.record_id,
+                    request.attachment_index,
+                    &request.output_path,
+                    Some(download.size_bytes),
+                ) {
+                    eprintln!("agentnoise: failed to update attachment store: {error:#}");
+                }
+                format!(
+                    "downloaded {}\n{} bytes\nsaved: {}",
+                    download.file_name,
+                    download.size_bytes,
+                    request.output_path.display()
+                )
+            }
+            Err(error) => format!("Error: saving download failed: {error:#}"),
+        },
+        Err(error) => format!("Error: download failed: {error:#}"),
+    };
+    try_send_dm_reply_recorded(dm, event_journal, group_id, &reply);
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+fn copy_private_file(source: &Path, destination: &Path) -> Result<u64> {
+    if source == destination {
+        return fs::metadata(source)
+            .map(|metadata| metadata.len())
+            .with_context(|| format!("reading metadata for {}", source.display()));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let bytes = fs::copy(source, destination)
+        .with_context(|| format!("copying {} to {}", source.display(), destination.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", destination.display()))?;
+    }
+    Ok(bytes)
 }
 
 fn send_dm_reply_recorded(
@@ -2778,6 +3446,158 @@ mod tests {
 
         config.darkmatter.group_id.clear();
         assert_eq!(local_session_notification_group_from_config(&config), None);
+    }
+
+    fn dm_message(sender: &str, id: &str, text: &str) -> agentnoise::dm::MessageEvent {
+        agentnoise::dm::MessageEvent {
+            group_id: Some("worker".to_string()),
+            sender: Some(sender.to_string()),
+            text: text.to_string(),
+            unsupported: None,
+            id: Some(id.to_string()),
+            trigger: None,
+            is_initial: false,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn bare_work_chat_followup_with_active_job_is_intercepted() {
+        let event = dm_message("phone", "m1", "can you keep going?");
+        assert!(is_bare_active_job_followup(&event, "worker", "inbox"));
+
+        let inbox = dm_message("phone", "m2", "can you keep going?");
+        assert!(!is_bare_active_job_followup(&inbox, "inbox", "inbox"));
+
+        let slash = dm_message("phone", "m3", "/tail an-123");
+        assert!(!is_bare_active_job_followup(&slash, "worker", "inbox"));
+
+        assert!(should_intercept_active_followup(
+            &RouteAction::Run(AgentRequest::prompt(AgentKind::Codex, "Give me list")),
+            &event,
+            "worker",
+            "inbox"
+        ));
+        assert!(!should_intercept_active_followup(
+            &RouteAction::Reply("Queued.".to_string()),
+            &event,
+            "worker",
+            "inbox"
+        ));
+        assert!(!should_intercept_active_followup(
+            &RouteAction::Ignore,
+            &event,
+            "worker",
+            "inbox"
+        ));
+    }
+
+    #[test]
+    fn active_job_followup_text_does_not_start_second_job_silently() {
+        let mut request = AgentRequest::prompt(AgentKind::Codex, "work");
+        request.repo_alias = Some("sandbox".to_string());
+        let job = QueuedJob {
+            id: "q-abcdef12".to_string(),
+            status: agentnoise::queue::QueueStatus::Running,
+            request,
+            source_group_id: "inbox".to_string(),
+            reply_group_id: "worker".to_string(),
+            source_event_id: "event-1".to_string(),
+            created_at: "now".to_string(),
+            claimed_by: None,
+            claimed_at: None,
+            started_at: None,
+            finished_at: None,
+            log_path: None,
+            summary: None,
+            error: None,
+        };
+
+        let text = active_job_followup_text(&job);
+
+        assert!(text.contains("Still working · q-abcde"));
+        assert!(text.contains("Reply after it finishes"));
+        assert!(text.contains("/tail q-abcde"));
+        assert!(text.contains("/cancel q-abcde"));
+    }
+
+    #[test]
+    fn attachment_context_is_added_to_captioned_run() {
+        let mut ingest = AttachmentIngestResult::new("att-123".to_string(), "1 file".to_string());
+        ingest.prompt_lines.push(
+            "- image shot.png: /repo/.agentnoise/attachments/att-123/01-shot.png (12 bytes)"
+                .to_string(),
+        );
+
+        let action = action_with_attachment_context(
+            RouteAction::Run(AgentRequest::prompt(AgentKind::Codex, "describe this")),
+            &ingest,
+        );
+
+        assert!(matches!(
+            action,
+            RouteAction::Run(request)
+                if request.prompt.contains("describe this")
+                    && request.prompt.contains("Attached Dark Matter media ingested")
+                    && request.prompt.contains("01-shot.png")
+        ));
+    }
+
+    #[test]
+    fn wiki_attachment_context_uses_ingest_pipeline_language() {
+        let mut ingest = AttachmentIngestResult::new("att-123".to_string(), "1 file".to_string());
+        ingest.prompt_lines.push(
+            "- PDF report.pdf: /repo/.agentnoise/attachments/att-123/01-report.pdf (12 bytes)"
+                .to_string(),
+        );
+
+        let action = action_with_attachment_context(
+            RouteAction::Run(AgentRequest::prompt(
+                AgentKind::Codex,
+                "@wiki ingest report",
+            )),
+            &ingest,
+        );
+
+        assert!(matches!(
+            action,
+            RouteAction::Run(request)
+                if request.prompt.contains("LLM Wiki ingest pipeline")
+                    && request.prompt.contains("File Ingestion workflow")
+                    && request.prompt.contains("01-report.pdf")
+        ));
+    }
+
+    #[test]
+    fn referenced_media_paths_stay_inside_workspace_and_skip_ingested_inputs() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let output = repo.path().join("out.png");
+        let ingested = repo
+            .path()
+            .join(".agentnoise")
+            .join("attachments")
+            .join("att-1")
+            .join("01-input.png");
+        let outside_file = outside.path().join("outside.png");
+        std::fs::create_dir_all(ingested.parent().unwrap()).unwrap();
+        std::fs::write(&output, b"png").unwrap();
+        std::fs::write(&ingested, b"png").unwrap();
+        std::fs::write(&outside_file, b"png").unwrap();
+
+        let mut config = Config::template();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        let request = AgentRequest::new(AgentKind::Codex, "work", "draw");
+        let text = format!(
+            "Created out.png and {} and {}",
+            ingested.display(),
+            outside_file.display()
+        );
+
+        let paths = referenced_media_paths(&text, &config, &request);
+
+        assert_eq!(paths, vec![output.canonicalize().unwrap()]);
     }
 
     #[test]

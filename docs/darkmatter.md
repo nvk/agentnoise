@@ -195,12 +195,12 @@ The v2 shape:
 - Replace chunked agent output with `AgentTextStream::start` + `record_chunk` + `finish` in `runner.rs`'s progress callback.
 - Switch `fn main()` to `#[tokio::main(flavor = "multi_thread")]` or build a runtime explicitly in the listener path.
 
-The `dm::MessageEvent` struct is shaped to match `wn::MessageEvent` field-for-field (minus attachments, which need a v2 media-component bridge), so `AgentApp::route_message` does not change.
+The `dm::MessageEvent` struct is shaped to match `wn::MessageEvent` field-for-field. Marmot v2 media is bridged from kind-9 `imeta` tags into `AttachmentInfo`, so the app can store attachment references, auto-ingest supported media into the active workspace, expose `/download` / `/upload` chat commands, and attach local media paths to captioned agent prompts.
 
 ---
 
 ## Open questions
 
-- **Attachments**: `wn::MessageEvent` carries `attachments: Vec<AttachmentInfo>`; v2 surfaces media via `MarmotAppMessagePayloadV1::Media` and `AppGroupImageComponent` (Blossom hash). A bridge is needed.
+- **Attachments**: Incoming kind-9 media `imeta` tags are captured as attachment records. Supported media is copied to `.agentnoise/attachments/` under the selected workspace when possible, `/wiki` captions get LLM Wiki file-ingestion context, `/download` decrypts Blossom media on demand, and `/upload` sends selected workspace files back to the current chat.
 - **QUIC candidate discovery**: `runtime.start_agent_text_stream` takes a `Vec<String>` of QUIC candidates. The exact production source (e.g., asking the `transport-quic-stream` crate for the bound addresses) is TBD.
 - **Pairing PIN parity**: HMAC-SHA256 PIN logic in `src/auth.rs` is protocol-agnostic and survives unchanged; what changes is the storage location of allowed senders (npub allowlist still works since both stacks share Nostr key identity).

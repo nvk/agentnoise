@@ -89,6 +89,7 @@ Simple setup for raw Codex/Claude, with no `agentbondage` required:
 [runner]
 launcher = "direct"
 progress_interval_seconds = 15
+progress_mode = "quiet"
 silence_ping_seconds = 60
 startup_silence_timeout_seconds = 90
 startup_retry_attempts = 1
@@ -125,6 +126,7 @@ launcher = "bondage"
 bondage_bin = "bondage"
 bondage_conf = "~/.config/bondage/bondage.conf"
 progress_interval_seconds = 15
+progress_mode = "quiet"
 silence_ping_seconds = 60
 startup_silence_timeout_seconds = 90
 startup_retry_attempts = 1
@@ -156,6 +158,12 @@ Your `bondage.conf` must contain matching profile sections:
 If a profile is missing, either add it to `bondage.conf` or switch to direct
 mode.
 
+`progress_mode = "quiet"` is the default phone-safe mode. It keeps raw tool
+calls, shell commands, and routine agent self-narration in `/tail` while still
+sending approvals, errors, retry notices, and quiet-job pings. Use
+`progress_mode = "normal"` for a few more human milestones, or `"verbose"` only
+when debugging agentnoise progress parsing.
+
 `agents.claude.model` is optional. Set it when your local Claude default points
 at a model alias that is not available for non-interactive `--print` runs, such
 as a 1M-context alias that requires usage credits.
@@ -167,7 +175,9 @@ to `0` only if you intentionally want no timeout.
 `silence_ping_seconds` controls the "still running" chat ping for a job that
 has produced no new output. Set it to `0` to disable those pings. The default
 keeps the phone chat alive when Codex, Claude, Hermes, or a launcher is still
-running but quiet.
+running but quiet. In `progress_mode = "quiet"`, agentnoise enforces a
+five-minute minimum between still-working chat pings so phone chats do not get
+noisy.
 
 `startup_silence_timeout_seconds` handles a different failure mode: a launcher
 or agent process starts but emits no stdout/stderr at all. agentnoise

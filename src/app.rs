@@ -8,7 +8,7 @@ use nostr::PublicKey;
 use uuid::Uuid;
 
 use crate::approvals::{self, ApprovalStore};
-use crate::attachments::{self, AttachmentStore};
+use crate::attachments::{self, AttachmentRecord, AttachmentStore};
 use crate::auth::{PairingGate, is_pairing_pin_message};
 use crate::capabilities;
 use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
@@ -18,7 +18,7 @@ use crate::jobs::{JobRecord, JobStatus, JobStore};
 use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
-use crate::text::short_ref;
+use crate::text::{mobile_digest, short_ref};
 use crate::workspace;
 use crate::worktrees::{self, WorktreeStore};
 
@@ -28,6 +28,9 @@ pub enum RouteAction {
     Reply(String),
     NewSession(NewSessionRequest),
     ResumeSession(ResumeSessionRequest),
+    IngestAttachments(AttachmentIngestAction),
+    UploadMedia(MediaUploadAction),
+    DownloadMedia(MediaDownloadAction),
     Run(AgentRequest),
 }
 
@@ -87,6 +90,25 @@ pub struct ResumeSessionRequest {
     pub group_id: String,
     pub reply_text: String,
     pub target_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachmentIngestAction {
+    pub record: AttachmentRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaUploadAction {
+    pub path: PathBuf,
+    pub caption: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaDownloadAction {
+    pub record_id: String,
+    pub attachment_index: usize,
+    pub attachment: attachments::AttachmentInfo,
+    pub output_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -243,6 +265,12 @@ impl AgentApp {
             ChatCommand::Attach { target } => {
                 Ok(RouteAction::Reply(self.attach_text(target.as_deref())))
             }
+            ChatCommand::Download { target, index } => {
+                self.download_media_action(group_id, &session_key, &target, index)
+            }
+            ChatCommand::Upload { path, caption } => {
+                self.upload_media_action(group_id, &session_key, &path, caption)
+            }
             ChatCommand::Worktrees => Ok(RouteAction::Reply(self.worktrees_text(&session_key))),
             ChatCommand::Worktree(command) => Ok(RouteAction::Reply(
                 self.worktree_text(&session_key, command),
@@ -288,11 +316,9 @@ impl AgentApp {
             event.id.clone(),
             event.attachments.clone(),
         )?;
-        Ok(RouteAction::Reply(format!(
-            "Attachment saved: {}\nSend /attach {} for details.",
-            attachments::render_record_summary(&record),
-            record.id
-        )))
+        Ok(RouteAction::IngestAttachments(AttachmentIngestAction {
+            record,
+        }))
     }
 
     pub fn route_initial_history_event(&self, event: &MessageEvent) -> Result<RouteAction> {
@@ -329,7 +355,7 @@ impl AgentApp {
     pub fn run_ack_text(&self, request: &AgentRequest) -> String {
         if let Some(session) = request.resume_session.as_deref() {
             return format!(
-                "{} resume queued\nsession: {}\nI'll reply here when done.",
+                "Queued resume.\n{} · session {}\nI'll post the answer here.",
                 request.agent,
                 short_ref(session)
             );
@@ -337,10 +363,10 @@ impl AgentApp {
 
         let workspace = request_workspace_text(request);
         if workspace == "selected workspace" {
-            format!("{} queued\nI'll reply here when done.", request.agent)
+            format!("Queued.\n{}\nI'll post the answer here.", request.agent)
         } else {
             format!(
-                "{} queued\n{}\nI'll reply here when done.",
+                "Queued.\n{} · {}\nI'll post the answer here.",
                 request.agent, workspace
             )
         }
@@ -361,12 +387,15 @@ impl AgentApp {
         send_progress: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<JobRecord> {
         let mut limiter = ProgressRateLimiter::new(self.config.runner.progress_interval_seconds);
+        let progress_mode = self.config.runner.progress_mode;
         let callback = Arc::new(Mutex::new(move |event: crate::progress::ProgressEvent| {
             if event.kind == ProgressKind::Finished {
                 return;
             }
-            if limiter.should_send(&event) {
-                send_progress(render_progress(&event));
+            if let Some(text) = render_progress(&event, progress_mode)
+                && limiter.should_send(&event)
+            {
+                send_progress(text);
             }
         }));
         let record = self.runner.run_blocking_with_progress(
@@ -388,6 +417,18 @@ impl AgentApp {
         let key = session_key(Some(group_id), None);
         self.sessions.set(&key, state)?;
         Ok(key)
+    }
+
+    pub fn record_attachment_downloaded(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        path: &Path,
+        size: Option<u64>,
+    ) -> Result<()> {
+        self.attachments
+            .set_local_path(record_id, attachment_index, path, size)
+            .map(|_| ())
     }
 
     fn should_ignore_bot(&self, sender: Option<&str>) -> bool {
@@ -483,7 +524,7 @@ impl AgentApp {
             .unwrap_or_else(|| "none".to_string());
 
         format!(
-            "running | {}\n{} | {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
+            "agentnoise: running\nlauncher: {}\nchat: {}\nworkspace: {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
             self.config.runner.launcher,
             session_name,
             workspace,
@@ -1052,6 +1093,164 @@ impl AgentApp {
         }
     }
 
+    fn upload_media_action(
+        &self,
+        group_id: Option<&str>,
+        sender_key: &str,
+        path: &str,
+        caption: Option<String>,
+    ) -> Result<RouteAction> {
+        if group_id
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .is_none()
+        {
+            return Ok(RouteAction::Reply(
+                "Error: /upload only works inside a Marmot chat.".to_string(),
+            ));
+        }
+        match self.resolve_session_path(sender_key, path) {
+            Ok((_alias, _session, path)) => {
+                if !path.is_file() {
+                    return Ok(RouteAction::Reply(format!(
+                        "Error: upload path is not a file: {}",
+                        path.display()
+                    )));
+                }
+                Ok(RouteAction::UploadMedia(MediaUploadAction {
+                    path,
+                    caption,
+                }))
+            }
+            Err(error) => Ok(RouteAction::Reply(format!(
+                "Error: upload failed: {error:#}"
+            ))),
+        }
+    }
+
+    fn download_media_action(
+        &self,
+        group_id: Option<&str>,
+        sender_key: &str,
+        target: &str,
+        index: Option<usize>,
+    ) -> Result<RouteAction> {
+        let Some(group_id) = group_id.map(str::trim).filter(|group| !group.is_empty()) else {
+            return Ok(RouteAction::Reply(
+                "Error: /download only works inside a Marmot chat.".to_string(),
+            ));
+        };
+        let Some(record) = self.attachments.get(target) else {
+            return Ok(RouteAction::Reply(format!(
+                "No matching attachment: {target}"
+            )));
+        };
+        if record
+            .group_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|record_group| !record_group.is_empty())
+            .is_some_and(|record_group| record_group != group_id)
+        {
+            return Ok(RouteAction::Reply(
+                "Error: that attachment belongs to a different chat.".to_string(),
+            ));
+        }
+        let attachment_index = index.unwrap_or(1).saturating_sub(1);
+        let Some(attachment) = record.attachments.get(attachment_index).cloned() else {
+            return Ok(RouteAction::Reply(format!(
+                "No file {} on attachment {}",
+                attachment_index + 1,
+                record.id
+            )));
+        };
+        if !attachments::is_downloadable_media(&attachment) {
+            return Ok(RouteAction::Reply(format!(
+                "Attachment {} file {} does not include a downloadable Marmot media reference.",
+                record.id,
+                attachment_index + 1
+            )));
+        }
+        let output_path = self.attachment_download_path_for_session(
+            sender_key,
+            &record.id,
+            attachment_index,
+            &attachment,
+        );
+        Ok(RouteAction::DownloadMedia(MediaDownloadAction {
+            record_id: record.id,
+            attachment_index,
+            attachment,
+            output_path,
+        }))
+    }
+
+    pub fn attachment_download_path_for_message(
+        &self,
+        group_id: Option<&str>,
+        sender: Option<&str>,
+        record_id: &str,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> PathBuf {
+        self.attachment_download_path_for_session(
+            &session_key(group_id, sender),
+            record_id,
+            attachment_index,
+            attachment,
+        )
+    }
+
+    fn attachment_download_path_for_session(
+        &self,
+        session_key: &str,
+        record_id: &str,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> PathBuf {
+        self.session_attachment_root(session_key)
+            .unwrap_or_else(|| self.config.resolved_data_dir().join("attachments"))
+            .join(record_id)
+            .join(self.attachment_file_name(attachment_index, attachment))
+    }
+
+    fn session_attachment_root(&self, session_key: &str) -> Option<PathBuf> {
+        let session = self.session(session_key).ok()?;
+        let alias = session.repo_alias.as_deref()?;
+        let root = session
+            .worktree_path
+            .clone()
+            .or_else(|| self.config.repo_path(alias))?;
+        let workdir = workspace::resolve_cwd(&root, Some(&session.cwd)).ok()?;
+        Some(workdir.join(".agentnoise").join("attachments"))
+    }
+
+    fn attachment_file_name(
+        &self,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> String {
+        let name = attachment
+            .name
+            .as_deref()
+            .map(attachments::safe_file_name)
+            .unwrap_or_else(|| "attachment".to_string());
+        format!("{:02}-{name}", attachment_index + 1)
+    }
+
+    pub fn attachment_download_path(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> PathBuf {
+        self.config
+            .resolved_data_dir()
+            .join("attachments")
+            .join(record_id)
+            .join(self.attachment_file_name(attachment_index, attachment))
+    }
+
     fn worktrees_text(&self, sender_key: &str) -> String {
         match self.session(sender_key) {
             Ok(session) => {
@@ -1452,18 +1651,28 @@ fn render_job_reply(record: &JobRecord) -> String {
         .filter(|summary| !summary.is_empty())
         .unwrap_or("no output captured");
 
-    format!("{id} {status}\n{summary}\n\n/tail {id}")
+    let digest = mobile_digest(summary, 900, 10);
+    let detail_label = if digest.truncated {
+        "Full answer"
+    } else {
+        "Details"
+    };
+
+    format!(
+        "{status} · {id}\n{}\n\n{detail_label}: /tail {id}",
+        digest.text
+    )
 }
 
 fn job_status_label(status: JobStatus) -> &'static str {
     match status {
-        JobStatus::Succeeded => "done",
-        JobStatus::Failed => "failed",
-        JobStatus::Cancelled => "cancelled",
-        JobStatus::Interrupted => "interrupted",
-        JobStatus::Pending => "pending",
-        JobStatus::Running => "running",
-        JobStatus::CancelRequested => "cancelling",
+        JobStatus::Succeeded => "Done",
+        JobStatus::Failed => "Failed",
+        JobStatus::Cancelled => "Cancelled",
+        JobStatus::Interrupted => "Interrupted",
+        JobStatus::Pending => "Pending",
+        JobStatus::Running => "Running",
+        JobStatus::CancelRequested => "Cancelling",
     }
 }
 
@@ -1618,6 +1827,8 @@ fn help_text() -> String {
         "/deny <approval>",
         "/attachments",
         "/attach <number|id>",
+        "/download <number|id> [file-number]",
+        "/upload <workspace-path> [caption]",
         "",
         "sessions",
         "/agent-sessions [limit]",
@@ -1807,6 +2018,87 @@ mod tests {
     }
 
     #[test]
+    fn media_event_is_saved_and_downloadable() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let event = MessageEvent {
+            group_id: Some("group-a".to_string()),
+            sender: Some("phone".to_string()),
+            text: "see attached".to_string(),
+            unsupported: None,
+            id: Some("msg1".to_string()),
+            trigger: None,
+            is_initial: false,
+            attachments: vec![attachments::AttachmentInfo {
+                kind: "media".to_string(),
+                name: Some("shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: Some("https://blossom.example/abc".to_string()),
+                size: None,
+                hash: Some("11".repeat(32)),
+                nonce: Some("22".repeat(12)),
+                version: Some("mip04-v2".to_string()),
+                local_path: None,
+            }],
+        };
+        assert!(matches!(
+            app.route_unsupported_event(&event).unwrap(),
+            RouteAction::IngestAttachments(request)
+                if attachments::render_record_summary(&request.record).contains("1 file")
+        ));
+
+        let action = app
+            .route_message(Some("group-a"), Some("phone"), "/download 1")
+            .unwrap();
+        assert!(matches!(
+            action,
+            RouteAction::DownloadMedia(request)
+                if request.attachment.name.as_deref() == Some("shot.png")
+                    && request.output_path.ends_with("01-shot.png")
+                    && request.output_path.components().any(|component|
+                        component.as_os_str() == ".agentnoise")
+        ));
+    }
+
+    #[test]
+    fn upload_resolves_workspace_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        fs::write(repo.path().join("note.txt"), "hello").unwrap();
+        let mut config = Config::template();
+        config.darkmatter.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let action = app
+            .route_message(
+                Some("group-a"),
+                Some("phone"),
+                "/upload note.txt hello phone",
+            )
+            .unwrap();
+        assert!(matches!(
+            action,
+            RouteAction::UploadMedia(request)
+                if request.path.ends_with("note.txt")
+                    && request.caption.as_deref() == Some("hello phone")
+        ));
+    }
+
+    #[test]
     fn bare_text_gets_helpful_reply_instead_of_ignore() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -1856,9 +2148,9 @@ mod tests {
         };
         let ack = app.run_ack_text(&request);
 
-        assert!(ack.contains("codex queued"));
-        assert!(ack.contains("work:/"));
-        assert!(ack.contains("I'll reply here when done."));
+        assert!(ack.contains("Queued."));
+        assert!(ack.contains("codex · work:/"));
+        assert!(ack.contains("I'll post the answer here."));
     }
 
     #[test]
@@ -2082,12 +2374,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             )
             .unwrap();
 
-        assert!(reply.starts_with("an-"));
-        assert!(reply.contains("done"));
+        assert!(reply.starts_with("Done · an-"));
         assert!(reply.contains("done once"));
-        assert!(reply.contains("/tail an-"));
+        assert!(reply.contains("Details: /tail an-"));
         let progress = progress.lock().unwrap();
-        assert!(progress.iter().any(|text| text.contains("started")));
+        assert!(progress.iter().all(|text| !text.contains("started")));
         assert!(!progress.iter().any(|text| text.contains("succeeded")));
     }
 

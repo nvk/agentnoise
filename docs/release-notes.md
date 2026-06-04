@@ -46,6 +46,24 @@
   attempting relay-list/profile/key-package discovery publishing. Relay
   timeouts are reported as warnings and retried on listener startup instead of
   rolling back the local identity.
+- Added Dark Matter encrypted media support: incoming phone files are captured
+  from `imeta` tags, `/download <attachment>` decrypts them into the selected
+  workspace when one is active (falling back to the local data dir), and
+  `/upload <workspace-path> [caption]` sends selected workspace files back to
+  the chat through Blossom.
+- Ported the mainline media ingest pipeline to Dark Matter: supported phone
+  media is copied into `.agentnoise/attachments/` inside the active workspace,
+  captioned prompts include local file paths, `/wiki` media uses the LLM Wiki
+  file-ingestion framing, and completed agent replies can send referenced
+  workspace media back to the chat.
+- Ported the mainline phone-UX polish to Dark Matter: `runner.progress_mode`
+  defaults to quiet, raw tool chatter stays in `/tail`, final replies are
+  compacted for phone, quiet-mode heartbeats clamp to a five-minute minimum,
+  active work-chat follow-ups no longer silently launch duplicate jobs, and
+  failed Codex/Claude JSON streams no longer dump raw JSON into chat.
+- Ported the Claude `stream-json --verbose` launch fix so prompts stay before
+  variadic `--add-dir` arguments on Dark Matter builds too.
+
 
 ## 0.1.28 - 2026-05-23
 

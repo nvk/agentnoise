@@ -42,7 +42,8 @@ expect() {
 }
 
 send_msg alpha111111 "/status"
-expect "running | direct"
+expect "agentnoise: running"
+expect "launcher: direct"
 expect "jobs: 0 active"
 expect "repos: 1"
 

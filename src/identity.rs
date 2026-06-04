@@ -26,14 +26,12 @@ pub const DEFAULT_PAIRING_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
     "wss://relay.primal.net",
     "wss://nos.lol",
-    "wss://relay.ditto.pub",
 ];
 
 pub const DEFAULT_MESSAGE_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
     "wss://relay.primal.net",
     "wss://nos.lol",
-    "wss://relay.ditto.pub",
 ];
 
 #[derive(Debug, Clone)]
@@ -132,6 +130,14 @@ mod tests {
         assert_eq!(payload.npub, npub);
         assert!(payload.nprofile.starts_with("nprofile1"));
         assert_eq!(payload.kind, "agentnoise");
+        assert_eq!(
+            payload.relays,
+            vec![
+                "wss://relay.damus.io".to_string(),
+                "wss://relay.primal.net".to_string(),
+                "wss://nos.lol".to_string(),
+            ]
+        );
     }
 
     #[test]
