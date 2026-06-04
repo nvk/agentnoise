@@ -18,7 +18,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{Config, RunnerLauncher};
+use crate::config::{Config, ProgressMode, RunnerLauncher};
 use crate::jobs::{JobRecord, JobStore};
 use crate::paths::is_gui_backed_workspace_path;
 use crate::progress::{self, ProgressEvent};
@@ -219,7 +219,10 @@ impl Runner {
                 start_silence_heartbeat(
                     request.agent,
                     job.id.clone(),
-                    self.config.runner.silence_ping_seconds,
+                    effective_silence_ping_seconds(
+                        self.config.runner.silence_ping_seconds,
+                        self.config.runner.progress_mode,
+                    ),
                     Arc::clone(&last_activity),
                     Arc::clone(progress_callback),
                 )
@@ -680,6 +683,17 @@ fn start_silence_heartbeat(
     Some(SilenceHeartbeat { stop, handle })
 }
 
+fn effective_silence_ping_seconds(configured_seconds: u64, progress_mode: ProgressMode) -> u64 {
+    if configured_seconds == 0 {
+        return 0;
+    }
+
+    match progress_mode {
+        ProgressMode::Quiet => configured_seconds.max(300),
+        ProgressMode::Normal | ProgressMode::Verbose => configured_seconds,
+    }
+}
+
 fn stop_silence_heartbeat(heartbeat: Option<SilenceHeartbeat>) {
     let Some(heartbeat) = heartbeat else {
         return;
@@ -904,7 +918,7 @@ fn summarize(
     let mut combined = String::new();
     if let Some(stdout) = decoded_stdout.as_deref() {
         combined.push_str(stdout.trim());
-    } else if !stdout.trim().is_empty() {
+    } else if should_include_raw_stdout(agent, success) && !stdout.trim().is_empty() {
         combined.push_str(stdout.trim());
     }
 
@@ -920,13 +934,24 @@ fn summarize(
         combined.push_str(&stderr);
     }
     if combined.is_empty() {
-        return "job produced no output".to_string();
+        return if success {
+            "job produced no output".to_string()
+        } else {
+            "agent exited before producing a final answer".to_string()
+        };
     }
 
     let formatted = format_chat_text(&combined);
     let chars = formatted.chars().collect::<Vec<_>>();
     let start = chars.len().saturating_sub(max_chars);
     chars[start..].iter().collect()
+}
+
+fn should_include_raw_stdout(agent: AgentKind, success: bool) -> bool {
+    match agent {
+        AgentKind::Codex | AgentKind::Claude => success,
+        AgentKind::Hermes => true,
+    }
 }
 
 fn decode_agent_stdout(agent: AgentKind, stdout: &str) -> Option<String> {
@@ -1047,16 +1072,18 @@ fn content_item_text(value: &Value) -> Option<String> {
 fn agentnoise_prompt(request: &AgentRequest) -> String {
     let mut context = vec![
         "Agentnoise context:".to_string(),
-        "- You are running under agentnoise, a Marmot v2 phone-to-desktop control bridge.".to_string(),
-        "- The user is chatting from a phone; reply concise, outcome-first, with no Markdown tables or raw logs unless asked.".to_string(),
-        "- Full logs stay local; mention /tail <job> when extra detail is useful.".to_string(),
+        "- You are running under agentnoise, a Dark Matter/Marmot v2 phone-to-desktop control bridge.".to_string(),
+        "- Reply destination: a Dark Matter mobile work chat. Your final answer may appear as a small phone notification or chat bubble.".to_string(),
+        "- Put the outcome or needed action on the first line. Default budget: 6 short lines or about 700-900 characters.".to_string(),
+        "- Use plain text and short bullets. No Markdown tables, raw logs, shell commands, tool names, or internal process narration unless the user explicitly asks.".to_string(),
+        "- If the useful answer is long, give a compact digest first and say what to ask for next. Full logs stay local through /tail <job>.".to_string(),
         "- The selected repo, cwd, and session come from agentnoise. Do not ask the user to SSH into this machine.".to_string(),
         "- If this task touches agentnoise, consider pairing, service startup, relay/message reliability, and phone UX.".to_string(),
     ];
 
     if looks_like_wiki_prompt(&request.prompt) {
         context.push(
-            "- LLM-Wiki instructions or plugins may be available; return a compact digest with paths and sources, not a pasted article.".to_string(),
+            "- LLM-Wiki instructions or plugins may be available; store full detail in wiki files and return only a compact digest with saved paths/sources.".to_string(),
         );
     }
     if let Some(repo) = request.repo_alias.as_deref() {
@@ -1272,6 +1299,32 @@ mod tests {
     }
 
     #[test]
+    fn quiet_mode_clamps_silence_pings_to_phone_safe_interval() {
+        assert_eq!(effective_silence_ping_seconds(60, ProgressMode::Quiet), 300);
+        assert_eq!(effective_silence_ping_seconds(1, ProgressMode::Quiet), 300);
+        assert_eq!(
+            effective_silence_ping_seconds(600, ProgressMode::Quiet),
+            600
+        );
+    }
+
+    #[test]
+    fn disabled_silence_pings_stay_disabled_in_quiet_mode() {
+        assert_eq!(effective_silence_ping_seconds(0, ProgressMode::Quiet), 0);
+    }
+
+    #[test]
+    fn normal_and_verbose_keep_configured_silence_ping_interval() {
+        assert_eq!(effective_silence_ping_seconds(60, ProgressMode::Normal), 60);
+        assert_eq!(effective_silence_ping_seconds(1, ProgressMode::Normal), 1);
+        assert_eq!(
+            effective_silence_ping_seconds(60, ProgressMode::Verbose),
+            60
+        );
+        assert_eq!(effective_silence_ping_seconds(1, ProgressMode::Verbose), 1);
+    }
+
+    #[test]
     fn direct_jobs_time_out_and_fail() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -1312,7 +1365,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn quiet_direct_jobs_emit_still_running_progress() {
+    fn direct_jobs_emit_still_running_progress_when_interval_is_short() {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let bin = temp.path().join("quiet-agent");
@@ -1336,6 +1389,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.progress_interval_seconds = 1;
+        config.runner.progress_mode = ProgressMode::Normal;
         config.runner.silence_ping_seconds = 1;
         config.runner.job_timeout_seconds = 10;
         config.agents.codex.bin = bin.display().to_string();
@@ -1512,6 +1566,24 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
         let model_index = plan.args.iter().position(|arg| arg == "--model").unwrap();
         assert_eq!(plan.args[model_index + 1], "sonnet");
+    }
+
+    #[test]
+    fn failed_codex_summary_does_not_dump_raw_json_stream_tail() {
+        let stdout = r#""pair-programming",\n        "remote-control",\n        "vscode-extension"\n      ],\n      "visibility": "public",\n      "forks": 0,\n      "open_issues": 4,\n      "watchers": 2\n    }\n  ]\n}\n","exit_code":0,"status":"completed"}}"#;
+
+        assert_eq!(
+            summarize(AgentKind::Codex, stdout, "", false, 1000),
+            "agent exited before producing a final answer"
+        );
+    }
+
+    #[test]
+    fn failed_hermes_summary_keeps_raw_stdout() {
+        assert_eq!(
+            summarize(AgentKind::Hermes, "useful failure detail", "", false, 1000),
+            "useful failure detail"
+        );
     }
 
     #[test]

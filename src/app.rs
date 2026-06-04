@@ -8,7 +8,7 @@ use nostr::PublicKey;
 use uuid::Uuid;
 
 use crate::approvals::{self, ApprovalStore};
-use crate::attachments::{self, AttachmentStore};
+use crate::attachments::{self, AttachmentRecord, AttachmentStore};
 use crate::auth::{PairingGate, is_pairing_pin_message};
 use crate::capabilities;
 use crate::chat::{ChatCommand, WorktreeCommand, parse_chat_command};
@@ -18,7 +18,7 @@ use crate::jobs::{JobRecord, JobStatus, JobStore};
 use crate::progress::{ProgressKind, ProgressRateLimiter, render_progress};
 use crate::runner::{AgentRequest, Runner};
 use crate::session::{ChatStateStore, SessionState};
-use crate::text::short_ref;
+use crate::text::{mobile_digest, short_ref};
 use crate::workspace;
 use crate::worktrees::{self, WorktreeStore};
 
@@ -28,6 +28,7 @@ pub enum RouteAction {
     Reply(String),
     NewSession(NewSessionRequest),
     ResumeSession(ResumeSessionRequest),
+    IngestAttachments(AttachmentIngestAction),
     UploadMedia(MediaUploadAction),
     DownloadMedia(MediaDownloadAction),
     Run(AgentRequest),
@@ -89,6 +90,11 @@ pub struct ResumeSessionRequest {
     pub group_id: String,
     pub reply_text: String,
     pub target_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachmentIngestAction {
+    pub record: AttachmentRecord,
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +266,7 @@ impl AgentApp {
                 Ok(RouteAction::Reply(self.attach_text(target.as_deref())))
             }
             ChatCommand::Download { target, index } => {
-                self.download_media_action(group_id, &target, index)
+                self.download_media_action(group_id, &session_key, &target, index)
             }
             ChatCommand::Upload { path, caption } => {
                 self.upload_media_action(group_id, &session_key, &path, caption)
@@ -310,11 +316,9 @@ impl AgentApp {
             event.id.clone(),
             event.attachments.clone(),
         )?;
-        Ok(RouteAction::Reply(format!(
-            "Attachment saved: {}\nSend /attach {} for details.",
-            attachments::render_record_summary(&record),
-            record.id
-        )))
+        Ok(RouteAction::IngestAttachments(AttachmentIngestAction {
+            record,
+        }))
     }
 
     pub fn route_initial_history_event(&self, event: &MessageEvent) -> Result<RouteAction> {
@@ -351,7 +355,7 @@ impl AgentApp {
     pub fn run_ack_text(&self, request: &AgentRequest) -> String {
         if let Some(session) = request.resume_session.as_deref() {
             return format!(
-                "{} resume queued\nsession: {}\nI'll reply here when done.",
+                "Queued resume.\n{} · session {}\nI'll post the answer here.",
                 request.agent,
                 short_ref(session)
             );
@@ -359,10 +363,10 @@ impl AgentApp {
 
         let workspace = request_workspace_text(request);
         if workspace == "selected workspace" {
-            format!("{} queued\nI'll reply here when done.", request.agent)
+            format!("Queued.\n{}\nI'll post the answer here.", request.agent)
         } else {
             format!(
-                "{} queued\n{}\nI'll reply here when done.",
+                "Queued.\n{} · {}\nI'll post the answer here.",
                 request.agent, workspace
             )
         }
@@ -383,12 +387,15 @@ impl AgentApp {
         send_progress: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<JobRecord> {
         let mut limiter = ProgressRateLimiter::new(self.config.runner.progress_interval_seconds);
+        let progress_mode = self.config.runner.progress_mode;
         let callback = Arc::new(Mutex::new(move |event: crate::progress::ProgressEvent| {
             if event.kind == ProgressKind::Finished {
                 return;
             }
-            if limiter.should_send(&event) {
-                send_progress(render_progress(&event));
+            if let Some(text) = render_progress(&event, progress_mode)
+                && limiter.should_send(&event)
+            {
+                send_progress(text);
             }
         }));
         let record = self.runner.run_blocking_with_progress(
@@ -417,7 +424,7 @@ impl AgentApp {
         record_id: &str,
         attachment_index: usize,
         path: &Path,
-        size: u64,
+        size: Option<u64>,
     ) -> Result<()> {
         self.attachments
             .set_local_path(record_id, attachment_index, path, size)
@@ -517,7 +524,7 @@ impl AgentApp {
             .unwrap_or_else(|| "none".to_string());
 
         format!(
-            "running | {}\n{} | {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
+            "agentnoise: running\nlauncher: {}\nchat: {}\nworkspace: {}\njobs: {active} active\nchats: {group_count}\nrepos: {}",
             self.config.runner.launcher,
             session_name,
             workspace,
@@ -1124,6 +1131,7 @@ impl AgentApp {
     fn download_media_action(
         &self,
         group_id: Option<&str>,
+        sender_key: &str,
         target: &str,
         index: Option<usize>,
     ) -> Result<RouteAction> {
@@ -1163,7 +1171,12 @@ impl AgentApp {
                 attachment_index + 1
             )));
         }
-        let output_path = self.attachment_download_path(&record.id, attachment_index, &attachment);
+        let output_path = self.attachment_download_path_for_session(
+            sender_key,
+            &record.id,
+            attachment_index,
+            &attachment,
+        );
         Ok(RouteAction::DownloadMedia(MediaDownloadAction {
             record_id: record.id,
             attachment_index,
@@ -1172,22 +1185,70 @@ impl AgentApp {
         }))
     }
 
-    fn attachment_download_path(
+    pub fn attachment_download_path_for_message(
         &self,
+        group_id: Option<&str>,
+        sender: Option<&str>,
         record_id: &str,
         attachment_index: usize,
         attachment: &attachments::AttachmentInfo,
     ) -> PathBuf {
+        self.attachment_download_path_for_session(
+            &session_key(group_id, sender),
+            record_id,
+            attachment_index,
+            attachment,
+        )
+    }
+
+    fn attachment_download_path_for_session(
+        &self,
+        session_key: &str,
+        record_id: &str,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> PathBuf {
+        self.session_attachment_root(session_key)
+            .unwrap_or_else(|| self.config.resolved_data_dir().join("attachments"))
+            .join(record_id)
+            .join(self.attachment_file_name(attachment_index, attachment))
+    }
+
+    fn session_attachment_root(&self, session_key: &str) -> Option<PathBuf> {
+        let session = self.session(session_key).ok()?;
+        let alias = session.repo_alias.as_deref()?;
+        let root = session
+            .worktree_path
+            .clone()
+            .or_else(|| self.config.repo_path(alias))?;
+        let workdir = workspace::resolve_cwd(&root, Some(&session.cwd)).ok()?;
+        Some(workdir.join(".agentnoise").join("attachments"))
+    }
+
+    fn attachment_file_name(
+        &self,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> String {
         let name = attachment
             .name
             .as_deref()
             .map(attachments::safe_file_name)
             .unwrap_or_else(|| "attachment".to_string());
+        format!("{:02}-{name}", attachment_index + 1)
+    }
+
+    pub fn attachment_download_path(
+        &self,
+        record_id: &str,
+        attachment_index: usize,
+        attachment: &attachments::AttachmentInfo,
+    ) -> PathBuf {
         self.config
             .resolved_data_dir()
             .join("attachments")
             .join(record_id)
-            .join(format!("{:02}-{name}", attachment_index + 1))
+            .join(self.attachment_file_name(attachment_index, attachment))
     }
 
     fn worktrees_text(&self, sender_key: &str) -> String {
@@ -1590,18 +1651,28 @@ fn render_job_reply(record: &JobRecord) -> String {
         .filter(|summary| !summary.is_empty())
         .unwrap_or("no output captured");
 
-    format!("{id} {status}\n{summary}\n\n/tail {id}")
+    let digest = mobile_digest(summary, 900, 10);
+    let detail_label = if digest.truncated {
+        "Full answer"
+    } else {
+        "Details"
+    };
+
+    format!(
+        "{status} · {id}\n{}\n\n{detail_label}: /tail {id}",
+        digest.text
+    )
 }
 
 fn job_status_label(status: JobStatus) -> &'static str {
     match status {
-        JobStatus::Succeeded => "done",
-        JobStatus::Failed => "failed",
-        JobStatus::Cancelled => "cancelled",
-        JobStatus::Interrupted => "interrupted",
-        JobStatus::Pending => "pending",
-        JobStatus::Running => "running",
-        JobStatus::CancelRequested => "cancelling",
+        JobStatus::Succeeded => "Done",
+        JobStatus::Failed => "Failed",
+        JobStatus::Cancelled => "Cancelled",
+        JobStatus::Interrupted => "Interrupted",
+        JobStatus::Pending => "Pending",
+        JobStatus::Running => "Running",
+        JobStatus::CancelRequested => "Cancelling",
     }
 }
 
@@ -1981,7 +2052,8 @@ mod tests {
         };
         assert!(matches!(
             app.route_unsupported_event(&event).unwrap(),
-            RouteAction::Reply(reply) if reply.contains("Attachment saved")
+            RouteAction::IngestAttachments(request)
+                if attachments::render_record_summary(&request.record).contains("1 file")
         ));
 
         let action = app
@@ -1992,6 +2064,8 @@ mod tests {
             RouteAction::DownloadMedia(request)
                 if request.attachment.name.as_deref() == Some("shot.png")
                     && request.output_path.ends_with("01-shot.png")
+                    && request.output_path.components().any(|component|
+                        component.as_os_str() == ".agentnoise")
         ));
     }
 
@@ -2074,9 +2148,9 @@ mod tests {
         };
         let ack = app.run_ack_text(&request);
 
-        assert!(ack.contains("codex queued"));
-        assert!(ack.contains("work:/"));
-        assert!(ack.contains("I'll reply here when done."));
+        assert!(ack.contains("Queued."));
+        assert!(ack.contains("codex · work:/"));
+        assert!(ack.contains("I'll post the answer here."));
     }
 
     #[test]
@@ -2300,12 +2374,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             )
             .unwrap();
 
-        assert!(reply.starts_with("an-"));
-        assert!(reply.contains("done"));
+        assert!(reply.starts_with("Done · an-"));
         assert!(reply.contains("done once"));
-        assert!(reply.contains("/tail an-"));
+        assert!(reply.contains("Details: /tail an-"));
         let progress = progress.lock().unwrap();
-        assert!(progress.iter().any(|text| text.contains("started")));
+        assert!(progress.iter().all(|text| !text.contains("started")));
         assert!(!progress.iter().any(|text| text.contains("succeeded")));
     }
 

@@ -295,8 +295,10 @@ fn guess_media_type(path: &Path) -> &'static str {
         "webp" => "image/webp",
         "heic" => "image/heic",
         "mp4" => "video/mp4",
+        "webm" => "video/webm",
         "mov" => "video/quicktime",
         "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
         "m4a" => "audio/mp4",
         "wav" => "audio/wav",
         "pdf" => "application/pdf",
@@ -350,5 +352,12 @@ mod tests {
     fn chunk_short_text_is_passthrough() {
         let chunks = chunk_text("hello", 200);
         assert_eq!(chunks, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn guesses_mainline_supported_media_types() {
+        assert_eq!(guess_media_type(Path::new("clip.webm")), "video/webm");
+        assert_eq!(guess_media_type(Path::new("voice.ogg")), "audio/ogg");
+        assert_eq!(guess_media_type(Path::new("report.pdf")), "application/pdf");
     }
 }

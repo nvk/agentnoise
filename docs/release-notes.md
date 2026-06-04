@@ -9,9 +9,22 @@
   broadcasts discovery material (relay lists plus key package) best-effort, so
   relay timeouts do not roll back local identity creation.
 - Added Dark Matter encrypted media support: incoming phone files are captured
-  from `imeta` tags, `/download <attachment>` decrypts them into the local data
-  dir, and `/upload <workspace-path> [caption]` sends selected workspace files
-  back to the chat through Blossom.
+  from `imeta` tags, `/download <attachment>` decrypts them into the selected
+  workspace when one is active (falling back to the local data dir), and
+  `/upload <workspace-path> [caption]` sends selected workspace files back to
+  the chat through Blossom.
+- Ported the mainline media ingest pipeline to Dark Matter: supported phone
+  media is copied into `.agentnoise/attachments/` inside the active workspace,
+  captioned prompts include local file paths, `/wiki` media uses the LLM Wiki
+  file-ingestion framing, and completed agent replies can send referenced
+  workspace media back to the chat.
+- Ported the mainline phone-UX polish to Dark Matter: `runner.progress_mode`
+  defaults to quiet, raw tool chatter stays in `/tail`, final replies are
+  compacted for phone, quiet-mode heartbeats clamp to a five-minute minimum,
+  active work-chat follow-ups no longer silently launch duplicate jobs, and
+  failed Codex/Claude JSON streams no longer dump raw JSON into chat.
+- Ported the Claude `stream-json --verbose` launch fix so prompts stay before
+  variadic `--add-dir` arguments on Dark Matter builds too.
 - Trimmed default Dark Matter pairing/message relays to the three mainstream
   write relays used for install defaults: Damus, Primal, and nos.lol.
 

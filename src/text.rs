@@ -10,7 +10,24 @@ pub fn format_chat_text(input: &str) -> String {
         .map(|line| line.trim_end().to_string())
         .collect::<Vec<_>>();
     let table_rewritten = rewrite_markdown_tables(&lines).join("\n");
-    collapse_blank_lines(&table_rewritten).trim().to_string()
+    let local_links_collapsed = collapse_local_markdown_links(&table_rewritten);
+    collapse_blank_lines(&local_links_collapsed)
+        .trim()
+        .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobileDigest {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub fn mobile_digest(input: &str, max_chars: usize, max_list_items: usize) -> MobileDigest {
+    let formatted = format_chat_text(input);
+    let mut truncated = false;
+    let compacted = compact_dense_lists(&formatted, max_list_items, &mut truncated);
+    let text = truncate_preserving_lines(&compacted, max_chars, &mut truncated);
+    MobileDigest { text, truncated }
 }
 
 pub fn short_ref(id: &str) -> String {
@@ -142,6 +159,146 @@ fn collapse_blank_lines(input: &str) -> String {
     output.join("\n")
 }
 
+fn collapse_local_markdown_links(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while let Some(open_offset) = input[index..].find('[') {
+        let open = index + open_offset;
+        let Some(close_offset) = input[open + 1..].find("](") else {
+            break;
+        };
+        let label_end = open + 1 + close_offset;
+        let target_start = label_end + 2;
+        let Some(target_end_offset) = input[target_start..].find(')') else {
+            break;
+        };
+        let target_end = target_start + target_end_offset;
+        let label = &input[open + 1..label_end];
+        let target = input[target_start..target_end]
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
+
+        output.push_str(&input[index..open]);
+        if is_local_link_target(target) {
+            output.push_str(label);
+        } else {
+            output.push_str(&input[open..=target_end]);
+        }
+        index = target_end + 1;
+    }
+
+    output.push_str(&input[index..]);
+    output
+}
+
+fn is_local_link_target(target: &str) -> bool {
+    target.starts_with('/')
+        || target.starts_with("~/")
+        || target.starts_with("file://")
+        || target.contains("/Library/Mobile Documents/")
+}
+
+fn compact_dense_lists(input: &str, max_items: usize, truncated: &mut bool) -> String {
+    if max_items == 0 {
+        return input.to_string();
+    }
+
+    let mut output = Vec::new();
+    let mut in_fence = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            output.push(line.to_string());
+            continue;
+        }
+
+        if !in_fence
+            && let Some((prefix, items)) = parse_dense_backtick_list(line)
+            && items.len() > max_items
+        {
+            *truncated = true;
+            if !prefix.is_empty() {
+                output.push(prefix);
+            }
+            output.push("First items:".to_string());
+            output.extend(items.iter().take(max_items).map(|item| format!("- {item}")));
+            output.push(format!("+{} more", items.len() - max_items));
+            continue;
+        }
+
+        output.push(line.to_string());
+    }
+
+    output.join("\n")
+}
+
+fn parse_dense_backtick_list(line: &str) -> Option<(String, Vec<String>)> {
+    let mut items = Vec::new();
+    let mut first_start = None;
+    let mut search = 0;
+    while let Some(open_offset) = line[search..].find('`') {
+        let open = search + open_offset;
+        let Some(close_offset) = line[open + 1..].find('`') else {
+            break;
+        };
+        let close = open + 1 + close_offset;
+        let item = line[open + 1..close].trim();
+        if !item.is_empty() {
+            first_start.get_or_insert(open);
+            items.push(item.to_string());
+        }
+        search = close + 1;
+    }
+
+    if items.len() < 6 {
+        return None;
+    }
+
+    let prefix = first_start
+        .map(|start| {
+            line[..start]
+                .trim()
+                .trim_end_matches(',')
+                .trim_end_matches(':')
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    Some((prefix, items))
+}
+
+fn truncate_preserving_lines(input: &str, max_chars: usize, truncated: &mut bool) -> String {
+    if max_chars == 0 || input.chars().count() <= max_chars {
+        return input.trim().to_string();
+    }
+
+    *truncated = true;
+    let suffix_budget = 3;
+    let budget = max_chars.saturating_sub(suffix_budget).max(1);
+    let mut output = String::new();
+
+    for line in input.lines() {
+        let candidate_len =
+            output.chars().count() + if output.is_empty() { 0 } else { 1 } + line.chars().count();
+        if candidate_len > budget {
+            break;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line);
+    }
+
+    if output.trim().is_empty() {
+        output = input.chars().take(budget).collect();
+    }
+    format!("{}...", output.trim_end())
+}
+
 fn is_table_row(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.matches('|').count() >= 2
@@ -199,6 +356,34 @@ mod tests {
         let input = "\x1b[31mError\x1b[0m\n\n\nnext";
 
         assert_eq!(format_chat_text(input), "Error\n\nnext");
+    }
+
+    #[test]
+    fn hides_local_file_markdown_link_targets() {
+        let input = "Saved [article.md](</Users/me/wiki/article.md>)";
+
+        assert_eq!(format_chat_text(input), "Saved article.md");
+    }
+
+    #[test]
+    fn mobile_digest_compacts_backtick_topic_lists() {
+        let input = "From the hub: 56 topics.\n\n`agent-visual-inspection`, `agentic-ai-plugins-pipelines`, `ai-coding-tool-privacy`, `cli-ai-coding`, `home-ai`, `local-models`, `meta-llm-wiki`";
+        let digest = mobile_digest(input, 1000, 5);
+
+        assert!(digest.truncated);
+        assert!(digest.text.contains("From the hub: 56 topics."));
+        assert!(digest.text.contains("First items:"));
+        assert!(digest.text.contains("- agent-visual-inspection"));
+        assert!(digest.text.contains("+2 more"));
+    }
+
+    #[test]
+    fn mobile_digest_truncates_long_text_at_line_boundary() {
+        let input = "Done.\n\nOne.\nTwo.\nThree.\nFour.";
+        let digest = mobile_digest(input, 18, 10);
+
+        assert!(digest.truncated);
+        assert_eq!(digest.text, "Done.\n\nOne....");
     }
 
     #[test]

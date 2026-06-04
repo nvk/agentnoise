@@ -24,6 +24,14 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.2.0 (Dark Matter alpha)** - **Marmot v2 transport plus mainline parity.**
+agentnoise now embeds the Dark Matter/Marmot v2 Rust stack instead of spawning
+`wn`/`wnd`, keeps transport and worker roles split, and has parity with the
+latest mainline phone UX: quiet progress mode, compact finals, active-job
+follow-up guards, full supported media ingest into workspace
+`.agentnoise/attachments/`, `/wiki` file-ingestion context, and automatic media
+uploads for agent-created workspace files.
+
 **v0.1.24** - **Mobile chat cleanup and opt-in local session watch.** White
 Noise replies are shorter and more phone-readable: compact startup hellos,
 queue/final job replies, progress pings, status, help, session lists, and local
@@ -557,17 +565,19 @@ plaintext burner identity and avoids Secret Service setup.
 - `/worktree remove <name> confirm`
 - `/help`
 
-Each White Noise chat is one agentnoise session. The first paired chat is the
+Each Dark Matter chat is one agentnoise session. The first paired chat is the
 inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
 open a fresh work chat; agentnoise names it from the machine hostname and a
 2-4 word prompt summary, sends an open link back to the inbox, and posts
-progress plus final output in the new chat. Follow-up jobs sent inside that
-work chat stay in that chat.
+quiet progress plus compact final output in the new chat. Follow-up plain text
+sent inside that work chat continues with the same agent/profile/wiki mode after
+the prior queued job has finished; if a job is still active, agentnoise replies
+with `/tail` and `/cancel` hints instead of silently starting a second job.
 
-`/new bugfix-ui` still creates a manual parallel White Noise chat with the
+`/new bugfix-ui` still creates a manual parallel Dark Matter chat with the
 paired phone identity and clones the current workspace into it. `/rename main`
 names the current chat, `/list` shows known sessions with short chat refs and
-`whitenoise://chat/...` open links, `/jump 2` or `/resume 2` resumes a session
+open links, `/jump 2` or `/resume 2` resumes a session
 from that list, and `/close` marks the current session closed locally.
 `/sessions` remains accepted as a readable alias for `/list`.
 
@@ -583,20 +593,22 @@ The reply points the user at `/help` and `/codex <prompt>` so a mistyped phone
 message does not look like a dead daemon.
 
 Codex and Claude JSON streams are converted into occasional live stream
-previews while a job runs. The default interval is conservative
-(`runner.progress_interval_seconds = 15`) so the phone preview does not become
-noisy; if the QUIC broker is unavailable, agentnoise falls back to chat progress.
-If a running job goes quiet, agentnoise sends a "still running" ping after
-`runner.silence_ping_seconds = 60` with `/tail <job>` and `/cancel <job>` hints.
+previews while a job runs. The default `runner.progress_mode = "quiet"` keeps
+raw tool calls, shell commands, and routine agent self-narration in `/tail`
+while still sending approvals, errors, retry notices, and quiet-job pings. If
+the QUIC broker is unavailable, agentnoise falls back to chat progress. If a
+running job goes quiet, agentnoise sends a "still working" ping after
+`runner.silence_ping_seconds = 60`; quiet mode clamps those pings to a
+five-minute minimum and includes `/tail <job>` plus `/cancel <job>` hints.
 If a new launch emits no output at all for
 `runner.startup_silence_timeout_seconds = 90`, agentnoise terminates that
 attempt and retries once by default. Final job output still arrives as one
-normal reply, with `/tail <job>` for logs.
+normal reply, compacted for phone when needed, with `/tail <job>` for logs.
 
 If a configured agent profile looks intentionally elevated, for example a
 profile or permission mode containing `unsafe`, agentnoise creates an approval
-object instead of launching immediately. Approvals are bound to the same White
-Noise chat that requested them and expire after
+object instead of launching immediately. Approvals are bound to the same chat
+that requested them and expire after
 `runner.approval_ttl_seconds`.
 
 For Homebrew service use, keep configured repos outside iCloud Drive/CloudDocs.
@@ -605,25 +617,31 @@ GUI-backed sync folders. `agentnoise doctor` warns about this; run
 `agentnoise up` from an interactive terminal if you must use an iCloud
 workspace.
 
-Images and files sent by the phone are saved as Marmot media metadata and can
-be decrypted on demand with `/download <attachment-id|number> [file-number]`.
-Downloaded files are written under the local agentnoise data dir. To send a
-workspace file back to the phone, use `/upload <workspace-path> [caption]`;
-paths are resolved inside the selected repo/worktree, not as arbitrary
-filesystem paths. `/attachments` and `/attach <id>` list saved media references
-and show local download paths after retrieval.
+Images and files sent by the phone are saved as Marmot media metadata. Supported
+media is copied into `.agentnoise/attachments/` inside the active
+repo/worktree, added to captioned agent prompts, and framed for the LLM Wiki
+file-ingestion workflow when the prompt is `/wiki`. Supported chat media
+mirrors mainline: JPEG/PNG/GIF/WebP images, MP4/WebM/MOV video,
+MP3/OGG/M4A/WAV audio, and PDF. `/download <attachment-id|number>
+[file-number]` is still available for manual retrieval. To send a workspace
+file back to the phone, use `/upload <workspace-path> [caption]`; paths are
+resolved inside the selected repo/worktree, not as arbitrary filesystem paths.
+When a completed agent job references a supported media file it created inside
+the selected workspace, agentnoise sends that file back through Dark Matter
+media upload automatically. `/attachments` and `/attach <id>` list saved media
+references and show local paths after retrieval.
 
 Git worktrees are opt-in per chat. `/worktree new fix-ui` creates a git
 worktree under the configured `runner.worktree_dir`, switches only that chat to
-the new path, and keeps other White Noise sessions on their existing
-workspaces. Removal requires the explicit `confirm` word.
+the new path, and keeps other Dark Matter sessions on their existing workspaces.
+Removal requires the explicit `confirm` word.
 
 ## Fake Phone Testing
 
-`agentnoise fake-phone` starts from a separate White Noise daemon data
-directory, keeps a throwaway phone `nsec` in the fake-phone test root, creates
-a chat with the desktop agentnoise identity, and sends test messages without
-touching the real phone identity or the normal agentnoise keychain.
+`agentnoise fake-phone` is a local Dark Matter/Marmot v2 smoke harness. It
+starts an in-process mock relay, creates throwaway desktop and phone accounts,
+creates a chat, sends test messages, and observes replies without touching the
+real phone identity or the normal agentnoise keychain.
 
 ```sh
 agentnoise fake-phone plan
@@ -637,12 +655,8 @@ agentnoise fake-phone roundtrip \
   /codex "Reply with exactly: agentnoise-e2e-ok"
 ```
 
-For first-pairing tests, pass the current desktop PIN. After pairing, omit
-`--pin`. The harness resends the test message for the timeout window because a
-running agentnoise service may need one discovery cycle before subscribing to
-the newly-created chat. With `--expect`, unrelated replies such as startup
-hellos or auth errors do not stop resends. Use `--require-job-final` for
-`/codex`, `/claude`, or `/hermes` tests; otherwise the first ack would be
+Use `--expect` for strings that must appear in observed replies. Use
+`--require-job-final` for agent-job flows; otherwise the first ack-like reply is
 enough to pass.
 
 ## Screenshots
@@ -656,17 +670,10 @@ before using a real phone or terminal capture.
 
 ## Transport Notes
 
-The default White Noise transport remains the tested `wn` CLI path. Setting
-`whitenoise.socket` points `wn` at a specific `wnd` daemon socket. The
-experimental direct socket adapter is exposed as a probe only:
-
-```sh
-agentnoise whitenoise socket-probe --method ping
-```
-
-This keeps production message send/subscribe behavior on the stable upstream
-CLI while giving us a tested JSON-line Unix socket client for future direct
-`wnd` work.
+v0.2.0 uses the embedded Dark Matter/Marmot v2 Rust stack. Historical White
+Noise `wn`/`wnd` subprocess integration was removed from the live daemon path;
+see [docs/darkmatter.md](docs/darkmatter.md) for the current transport
+architecture.
 
 ### Local Agent Session Visibility
 
