@@ -322,6 +322,7 @@ mod tests {
     fn doctor_warns_about_generic_agent_profiles() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.agents.codex.profile = "codex".to_string();
@@ -365,6 +366,7 @@ mod tests {
     fn doctor_warns_about_missing_bondage_profiles_with_manual_link() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();

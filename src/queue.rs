@@ -322,6 +322,36 @@ impl JobQueue {
         })
     }
 
+    pub fn latest_terminal_for_reply_group(
+        &self,
+        reply_group_id: &str,
+    ) -> Result<Option<QueuedJob>> {
+        self.with_connection(|conn| {
+            conn.query_row(
+                r#"
+                SELECT
+                    id, status, request_json, source_group_id, reply_group_id, source_event_id,
+                    created_at, claimed_by, claimed_at, started_at, finished_at, log_path, summary, error
+                FROM jobs
+                WHERE reply_group_id = ?1
+                  AND status IN (?2, ?3)
+                ORDER BY COALESCE(finished_at, created_at) DESC, created_at DESC
+                LIMIT 1
+                "#,
+                params![
+                    reply_group_id,
+                    QueueStatus::Succeeded.as_str(),
+                    QueueStatus::Failed.as_str(),
+                ],
+                row_to_job,
+            )
+            .optional()
+            .with_context(|| {
+                format!("reading latest finished job for reply group {reply_group_id}")
+            })
+        })
+    }
+
     fn mark_finished(
         &self,
         id: &str,
@@ -475,5 +505,41 @@ mod tests {
             .mark_succeeded(&job.id, "done", None)
             .expect("mark succeeded");
         assert!(queue.active_for_reply_group("reply").unwrap().is_none());
+    }
+
+    #[test]
+    fn finds_latest_terminal_job_for_reply_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = JobQueue::open(temp.path().join("queue.sqlite3")).unwrap();
+
+        let first = queue
+            .enqueue(&request(), "inbox", "reply", "event-1")
+            .unwrap();
+        queue.mark_running(&first.id).unwrap();
+        queue
+            .mark_succeeded(&first.id, "first answer", None)
+            .unwrap();
+
+        let second_request = AgentRequest::new(AgentKind::Codex, "sandbox", "follow-up");
+        let second = queue
+            .enqueue(&second_request, "inbox", "reply", "event-2")
+            .unwrap();
+        queue.mark_running(&second.id).unwrap();
+        queue
+            .mark_failed(&second.id, "second failed clearly", None)
+            .unwrap();
+
+        let latest = queue
+            .latest_terminal_for_reply_group("reply")
+            .unwrap()
+            .expect("latest terminal job");
+        assert_eq!(latest.id, second.id);
+        assert_eq!(latest.error.as_deref(), Some("second failed clearly"));
+        assert!(
+            queue
+                .latest_terminal_for_reply_group("other")
+                .unwrap()
+                .is_none()
+        );
     }
 }

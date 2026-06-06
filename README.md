@@ -13,7 +13,8 @@ Chat with local coding agents through White Noise.
 agentnoise exists because the available agent-chat bridges were too heavy,
 too slow-moving, or too awkward for the simple workflow this project needs: a
 native desktop helper, a phone chat UI, strong first-pairing, and local coding
-agents launched through a [local policy boundary](https://agentbondage.org/).
+agents that can either run directly or through an optional
+[local policy boundary](https://agentbondage.org/).
 
 The less polite design brief: I had to build it because everything else sucks
 and Jeff moves too slow.
@@ -24,6 +25,15 @@ such alpha, much wow.
 
 Detailed per-version notes live in [docs/release-notes.md](docs/release-notes.md).
 The README keeps the recent history grouped by product milestone.
+
+**v0.1.36** - **Simple install defaults.** New configs now default to direct
+raw Codex/Claude launch so public first-run setup does not require
+agentbondage. `agentnoise start` is the friendly setup/listen alias, while
+`agentnoise init --bondage`, `agentnoise up --bondage`, and `--secure` keep the
+hardened profile path explicit for operators who want it. Work-chat bare
+follow-ups now carry same-chat/latest-job context into queued agent prompts so
+ambiguous replies like "show me the write-up here" stay on topic, and runtime
+event logging now writes intact JSONL records across transport/worker processes.
 
 **v0.1.31-v0.1.35** - **Mobile chat UX stabilization.** agentnoise now
 defaults to phone-safe progress: raw command/tool progress and routine agent
@@ -190,23 +200,19 @@ included and should be treated as newer paths.
 
 - Rust toolchain for building from source
 - Codex CLI and/or Claude Code CLI installed and logged in locally
-- no `agentbondage` required for the simple path: use `agentnoise init --direct-agents`
-- recommended hardened path: `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles
+- no `agentbondage` required for the simple path; new configs use direct raw CLIs by default
+- optional hardened path: `bondage` with `codex-agentnoise` and `claude-agentnoise` profiles via `--bondage`
 - optional: Hermes Agent CLI plus a dedicated `bondage` profile, or direct Hermes mode
 - `wn` and `wnd` from `marmot-protocol/whitenoise-rs`, either packaged beside `agentnoise` or installed with `agentnoise whitenoise install`
 - OS keychain access if using automatic White Noise login repair with a real identity
 - a dedicated White Noise group for agent control
 
-For a normal public install without `agentbondage`, use direct mode:
+For a normal public install without `agentbondage`, use the default direct mode:
 
 ```sh
-agentnoise init --direct-agents
-```
-
-Or set it during first setup:
-
-```sh
-agentnoise up --direct-agents --no-listen
+agentnoise init
+# or just:
+agentnoise start
 ```
 
 That writes:
@@ -221,7 +227,15 @@ and the same White Noise pairing/allowlist, but local filesystem, network,
 secret, and approval behavior is whatever the raw agent CLI enforces. Use
 `agentnoise doctor` or `agentnoise agents` to confirm the active launcher.
 
-For the hardened local-agent-stack setup, use dedicated `bondage` profiles:
+For the hardened local-agent-stack setup, opt in and use dedicated `bondage` profiles:
+
+```sh
+agentnoise init --bondage
+# or during first setup:
+agentnoise up --bondage
+```
+
+Then use dedicated `bondage` profiles:
 `codex-agentnoise`, `claude-agentnoise`, and optional `hermes-agentnoise`. If an
 older config still says `profile = "codex"` or `profile = "claude"`,
 agentnoise uses the matching `*-agentnoise` profile for remote chat runs unless
@@ -272,15 +286,28 @@ brew install nvk/tap/agentnoise
 The simplest setup does not need `agentbondage`:
 
 ```sh
-# raw Codex/Claude mode
-agentnoise init --direct-agents
+agentnoise start
+```
+
+That creates the desktop identity, writes a direct-launch config, starts White
+Noise, and prints pairing instructions. For the service/worker split used by
+Homebrew installs:
+
+```sh
+agentnoise up --no-listen
+brew services start nvk/tap/agentnoise
+agentnoise worker start
+# or, if tmux is installed:
+agentnoise worker start --tmux
 ```
 
 Use the hardened policy-boundary setup only if you already have `bondage`
 profiles such as `codex-agentnoise` and `claude-agentnoise`:
 
 ```sh
-agentnoise init
+agentnoise init --bondage
+# or first-run setup/listen:
+agentnoise up --bondage
 ```
 
 For an existing config:
@@ -291,17 +318,7 @@ agentnoise config launcher direct
 agentnoise config launcher bondage
 ```
 
-Then start it. Homebrew services are the simple setup and boot path:
-
-```sh
-agentnoise up --direct-agents --no-listen
-brew services start nvk/tap/agentnoise
-agentnoise worker start
-# or, if tmux is installed:
-agentnoise worker start --tmux
-```
-
-The first command creates the desktop identity, writes config, stores the
+The first setup command creates the desktop identity, writes config, stores the
 desktop `nsec` in the OS keychain, and prints the desktop QR/setup hints. The
 Homebrew service then shows the pairing PIN when needed and keeps the White
 Noise transport alive after reboot. The worker
@@ -313,7 +330,7 @@ and worker split:
 
 ```sh
 brew services stop nvk/tap/agentnoise
-agentnoise up --direct-agents
+agentnoise start
 ```
 
 Over SSH, keep the worker alive with tmux:

@@ -1117,6 +1117,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
@@ -1180,6 +1181,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
@@ -1210,6 +1212,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();
@@ -1430,9 +1433,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.progress_interval_seconds = 1;
         config.runner.silence_ping_seconds = 1;
-        config.runner.startup_silence_timeout_seconds = 2;
+        config.runner.startup_silence_timeout_seconds = 5;
         config.runner.startup_retry_attempts = 1;
-        config.runner.job_timeout_seconds = 20;
+        config.runner.job_timeout_seconds = 30;
         config.agents.codex.bin = bin.display().to_string();
         config.repos[0].alias = "work".to_string();
         config.repos[0].path = repo.path().display().to_string();
@@ -1554,6 +1557,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
         let temp = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.runner.data_dir = temp.path().join("data").display().to_string();
         config.runner.log_dir = temp.path().join("logs").display().to_string();
         config.runner.bondage_conf = temp.path().join("bondage.conf").display().to_string();

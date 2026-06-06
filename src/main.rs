@@ -17,7 +17,7 @@ use agentnoise::events::EventJournal;
 use agentnoise::identity;
 use agentnoise::launchd;
 use agentnoise::local_sessions::{self, LocalAgentSession};
-use agentnoise::queue::{JobQueue, QueuedJob};
+use agentnoise::queue::{JobQueue, QueueStatus, QueuedJob};
 use agentnoise::runner::{AgentKind, AgentRequest};
 use agentnoise::runtime::{
     self, AcquireMode, EngineGuard, RuntimePairingInfo, RuntimePairingPin, RuntimeRole,
@@ -26,7 +26,7 @@ use agentnoise::secrets;
 use agentnoise::service::{self, ServiceTarget};
 use agentnoise::setup::{self, SetupOptions, SetupResult};
 use agentnoise::subscriptions::{self, SubscriptionRegistry};
-use agentnoise::text::{compact_timestamp, short_ref};
+use agentnoise::text::{compact_text, compact_timestamp, short_ref};
 use agentnoise::whitenoise_cli::{self, WhitenoiseInstall};
 use agentnoise::wn::{MessageEvent, WnClient};
 use agentnoise::workspace;
@@ -149,9 +149,15 @@ struct InitArgs {
     force: bool,
     #[arg(
         long,
-        help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
+        help = "Use raw Codex/Claude/Hermes CLIs directly. This is the default for new configs."
     )]
     direct_agents: bool,
+    #[arg(
+        long,
+        alias = "secure",
+        help = "Use bondage profiles instead of raw agent CLIs"
+    )]
+    bondage: bool,
 }
 
 #[derive(Debug, Args)]
@@ -176,9 +182,15 @@ struct SetupArgs {
     dev_burner_nsec: bool,
     #[arg(
         long,
-        help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
+        help = "Use raw Codex/Claude/Hermes CLIs directly. This is the default for new configs."
     )]
     direct_agents: bool,
+    #[arg(
+        long,
+        alias = "secure",
+        help = "Use bondage profiles instead of raw agent CLIs"
+    )]
+    bondage: bool,
 }
 
 #[derive(Debug, Args)]
@@ -207,9 +219,15 @@ struct UpArgs {
     dev_burner_nsec: bool,
     #[arg(
         long,
-        help = "Opt into launching raw Codex/Claude/Hermes CLIs directly instead of through bondage"
+        help = "Use raw Codex/Claude/Hermes CLIs directly. This is the default for new configs."
     )]
     direct_agents: bool,
+    #[arg(
+        long,
+        alias = "secure",
+        help = "Use bondage profiles instead of raw agent CLIs"
+    )]
+    bondage: bool,
     #[arg(
         long,
         help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
@@ -308,10 +326,39 @@ struct WorkerStartArgs {
 
 #[derive(Debug, Args)]
 struct StartArgs {
+    #[arg(
+        long,
+        help = "Phone White Noise npub; creates a control chat when provided"
+    )]
+    phone: Option<String>,
+    #[arg(long, help = "Unique White Noise/Nostr profile name for this machine")]
+    name: Option<String>,
+    #[arg(long, default_value = setup::DEFAULT_GROUP_NAME)]
+    group_name: String,
     #[arg(long, help = "Add a White Noise group id before starting")]
     group: Option<String>,
+    #[arg(long = "relay")]
+    relays: Vec<String>,
+    #[arg(long, help = "Stop after setup/group discovery instead of listening")]
+    no_listen: bool,
     #[arg(long, help = "Do not start wn daemon automatically")]
     no_daemon: bool,
+    #[arg(
+        long,
+        help = "Development only: use a plaintext throwaway nsec under the agentnoise data dir instead of the OS keychain"
+    )]
+    dev_burner_nsec: bool,
+    #[arg(
+        long,
+        help = "Use raw Codex/Claude/Hermes CLIs directly. This is the default for new configs."
+    )]
+    direct_agents: bool,
+    #[arg(
+        long,
+        alias = "secure",
+        help = "Use bondage profiles instead of raw agent CLIs"
+    )]
+    bondage: bool,
     #[arg(
         long,
         help = "SSH setup mode: show PIN only in this terminal, not a desktop alert"
@@ -581,16 +628,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => {
-            Config::write_template(
-                &config_path,
-                args.force,
-                if args.direct_agents {
-                    RunnerLauncher::Direct
-                } else {
-                    RunnerLauncher::Bondage
-                },
-            )?;
+            let launcher = launcher_from_flags(args.direct_agents, args.bondage)?
+                .unwrap_or(RunnerLauncher::Direct);
+            Config::write_template(&config_path, args.force, launcher)?;
             println!("wrote {}", config_path.display());
+            println!("agent launcher: {launcher}");
         }
         Command::Setup(args) => {
             let result = setup::setup(
@@ -602,7 +644,7 @@ fn main() -> Result<()> {
                     force_identity: args.force_identity,
                     relays: args.relays,
                     dev_burner_nsec: args.dev_burner_nsec,
-                    direct_agents: args.direct_agents,
+                    launcher: launcher_from_flags(args.direct_agents, args.bondage)?,
                     start_daemon: true,
                 },
             )?;
@@ -748,12 +790,7 @@ fn main() -> Result<()> {
             println!("{}", app.run_request(request)?);
         }
         Command::Start(args) => {
-            start_listener(
-                &config_path,
-                args,
-                ListenerMode::Try,
-                ListenerExecution::Inline,
-            )?;
+            start_command(&config_path, args)?;
         }
         Command::Transport(args) => {
             transport_command(&config_path, args)?;
@@ -966,6 +1003,38 @@ fn normalized_cli_args() -> Vec<String> {
     args
 }
 
+fn launcher_from_flags(direct_agents: bool, bondage: bool) -> Result<Option<RunnerLauncher>> {
+    if direct_agents && bondage {
+        bail!("--direct-agents and --bondage cannot be combined");
+    }
+    if bondage {
+        Ok(Some(RunnerLauncher::Bondage))
+    } else if direct_agents {
+        Ok(Some(RunnerLauncher::Direct))
+    } else {
+        Ok(None)
+    }
+}
+
+fn start_command(config_path: &Path, args: StartArgs) -> Result<()> {
+    up(
+        config_path,
+        UpArgs {
+            phone: args.phone,
+            name: args.name,
+            group_name: args.group_name,
+            group: args.group,
+            relays: args.relays,
+            no_listen: args.no_listen,
+            no_daemon: args.no_daemon,
+            dev_burner_nsec: args.dev_burner_nsec,
+            direct_agents: args.direct_agents,
+            bondage: args.bondage,
+            ssh: args.ssh,
+        },
+    )
+}
+
 fn print_setup_result(result: &SetupResult) {
     println!("agentnoise setup complete");
     println!("config: {}", result.config_path.display());
@@ -980,6 +1049,7 @@ fn print_setup_result(result: &SetupResult) {
     println!("npub: {}", result.npub);
     println!("nprofile: {}", result.nprofile);
     println!("profile: {}", result.profile_display_name);
+    println!("agent launcher: {}", result.launcher);
     if result.created_config {
         println!("config file: created");
     }
@@ -1258,7 +1328,7 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
             force_identity: false,
             relays: args.relays.clone(),
             dev_burner_nsec: args.dev_burner_nsec,
-            direct_agents: args.direct_agents,
+            launcher: launcher_from_flags(args.direct_agents, args.bondage)?,
             start_daemon: !args.no_daemon,
         },
     )?;
@@ -1330,9 +1400,17 @@ fn up(config_path: &Path, args: UpArgs) -> Result<()> {
     start_listener(
         config_path,
         StartArgs {
+            phone: None,
+            name: None,
+            group_name: setup::DEFAULT_GROUP_NAME.to_string(),
             group: None,
+            relays: Vec::new(),
+            no_listen: false,
             // setup() already performed daemon startup/login/profile repair for `up`.
             no_daemon: true,
+            dev_burner_nsec: false,
+            direct_agents: false,
+            bondage: false,
             ssh: args.ssh,
         },
         if args.ssh {
@@ -1353,6 +1431,7 @@ fn should_attach_before_setup(config_path: &Path, args: &UpArgs) -> Result<bool>
         || !args.relays.is_empty()
         || args.dev_burner_nsec
         || args.direct_agents
+        || args.bondage
         || args.ssh
         || !config_path.exists()
     {
@@ -2752,6 +2831,27 @@ struct AgentDispatch<'a> {
 }
 
 fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
+    let mut request = dispatch.request;
+    if is_bare_work_chat_followup(
+        dispatch.event,
+        dispatch.source_group_id,
+        &dispatch.app.config().whitenoise.group_id,
+    ) {
+        match contextualize_bare_followup_request(
+            &dispatch.app,
+            dispatch.job_queue,
+            dispatch.event,
+            dispatch.source_group_id,
+            request.clone(),
+        ) {
+            Ok(contextualized) => request = contextualized,
+            Err(error) => eprintln!(
+                "agentnoise: failed to add work-chat follow-up context for {}: {error:#}",
+                dispatch.source_group_id
+            ),
+        }
+    }
+
     match dispatch.execution {
         ListenerExecution::Inline => {
             run_inline_job(
@@ -2759,7 +2859,7 @@ fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
                 dispatch.wn,
                 dispatch.event_journal,
                 dispatch.reply_group_id,
-                dispatch.request,
+                request,
             );
         }
         ListenerExecution::Queue => {
@@ -2774,7 +2874,7 @@ fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
             };
             let source_event_id = queue_source_event_id(dispatch.event, dispatch.source_group_id);
             match queue.enqueue(
-                &dispatch.request,
+                &request,
                 dispatch.source_group_id,
                 &dispatch.reply_group_id,
                 &source_event_id,
@@ -2819,6 +2919,14 @@ fn is_bare_active_job_followup(
     group_id: &str,
     primary_group_id: &str,
 ) -> bool {
+    is_bare_work_chat_followup(event, group_id, primary_group_id)
+}
+
+fn is_bare_work_chat_followup(
+    event: &MessageEvent,
+    group_id: &str,
+    primary_group_id: &str,
+) -> bool {
     let text = event.text.trim();
     !text.is_empty()
         && !text.starts_with('/')
@@ -2849,6 +2957,130 @@ fn active_job_followup_text(job: &QueuedJob) -> String {
     format!(
         "Still working · {job_id}\nStatus: {status}\nReply after it finishes, or use /tail {job_id} /cancel {job_id}."
     )
+}
+
+fn contextualize_bare_followup_request(
+    app: &AgentApp,
+    queue: Option<&JobQueue>,
+    event: &MessageEvent,
+    group_id: &str,
+    mut request: AgentRequest,
+) -> Result<AgentRequest> {
+    if request.prompt.contains("AgentNoise follow-up context:") {
+        return Ok(request);
+    }
+
+    let mut context_sections = Vec::new();
+    if let Some(queue) = queue
+        && let Some(job) = queue.latest_terminal_for_reply_group(group_id)?
+    {
+        context_sections.push(render_latest_job_context(&job));
+    }
+    if let Some(session_context) = app.session_context_text_for_group(group_id)? {
+        context_sections.push(session_context);
+    }
+
+    if context_sections.is_empty() {
+        return Ok(request);
+    }
+
+    request.prompt = wrap_followup_prompt_with_context(
+        &request.prompt,
+        event.text.trim(),
+        &context_sections.join("\n"),
+    );
+    Ok(request)
+}
+
+fn render_latest_job_context(job: &QueuedJob) -> String {
+    let mut lines = vec![format!(
+        "latest same-chat job: {} ({})",
+        short_ref(&job.id),
+        queue_status_label(job.status)
+    )];
+    lines.push(format!(
+        "latest request: {}",
+        compact_text(user_request_from_prompt(&job.request.prompt), 320)
+    ));
+    if let Some(summary) = job
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    {
+        lines.push(format!("latest result: {}", compact_text(summary, 900)));
+    } else if let Some(error) = job
+        .error
+        .as_deref()
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+    {
+        lines.push(format!("latest failure: {}", compact_text(error, 900)));
+    }
+    lines.join("\n")
+}
+
+fn wrap_followup_prompt_with_context(prompt: &str, event_text: &str, context: &str) -> String {
+    let prompt = prompt.trim();
+    let (directive, prompt_body) = split_leading_prompt_directive(prompt);
+    let user_request = if event_text.trim().is_empty() {
+        prompt_body
+    } else {
+        event_text
+    }
+    .trim();
+
+    let mut output = String::new();
+    if let Some(directive) = directive {
+        output.push_str(directive);
+        output.push_str("\n\n");
+    }
+    output.push_str("AgentNoise follow-up context:\n");
+    output.push_str("- The user sent a bare follow-up in this existing White Noise work chat.\n");
+    output.push_str(
+        "- Resolve words like \"here\", \"this\", \"it\", \"results\", and \"write-up\" against this same chat and latest job unless the user says otherwise.\n",
+    );
+    output.push_str(context.trim());
+    output.push_str("\n\nUser request:\n");
+    output.push_str(user_request);
+    output
+}
+
+fn prompt_without_leading_directive(prompt: &str) -> &str {
+    split_leading_prompt_directive(prompt).1
+}
+
+fn user_request_from_prompt(prompt: &str) -> &str {
+    let prompt = prompt_without_leading_directive(prompt);
+    if let Some(index) = prompt.rfind("User request:") {
+        return prompt[index + "User request:".len()..].trim();
+    }
+    prompt
+}
+
+fn split_leading_prompt_directive(prompt: &str) -> (Option<&'static str>, &str) {
+    let prompt = prompt.trim();
+    for directive in ["@wiki", "wiki"] {
+        if prompt == directive {
+            return (Some(directive), "");
+        }
+        if let Some(rest) = prompt.strip_prefix(directive)
+            && rest.chars().next().is_some_and(char::is_whitespace)
+        {
+            return (Some(directive), rest.trim());
+        }
+    }
+    (None, prompt)
+}
+
+fn queue_status_label(status: QueueStatus) -> &'static str {
+    match status {
+        QueueStatus::Queued => "queued",
+        QueueStatus::Claimed => "claimed",
+        QueueStatus::Running => "running",
+        QueueStatus::Succeeded => "succeeded",
+        QueueStatus::Failed => "failed",
+    }
 }
 
 fn run_inline_job(
@@ -3952,6 +4184,35 @@ mod tests {
     }
 
     #[test]
+    fn launcher_flags_default_direct_or_bondage_override() {
+        assert_eq!(launcher_from_flags(false, false).unwrap(), None);
+        assert_eq!(
+            launcher_from_flags(true, false).unwrap(),
+            Some(RunnerLauncher::Direct)
+        );
+        assert_eq!(
+            launcher_from_flags(false, true).unwrap(),
+            Some(RunnerLauncher::Bondage)
+        );
+    }
+
+    #[test]
+    fn launcher_flags_reject_conflicting_modes() {
+        let error = launcher_from_flags(true, true).unwrap_err().to_string();
+        assert!(error.contains("--direct-agents and --bondage cannot be combined"));
+    }
+
+    #[test]
+    fn contextualized_prompt_latest_request_strips_prior_context() {
+        let prompt = "@wiki\n\nAgentNoise follow-up context:\nlatest result: previous\n\nUser request:\nShow me the write up here";
+
+        assert_eq!(
+            user_request_from_prompt(prompt),
+            "Show me the write up here"
+        );
+    }
+
+    #[test]
     fn subscription_reconciliation_baselines_before_replaying_messages() {
         let messages = vec![
             message_event("group-a", "m1", "/status"),
@@ -4026,6 +4287,77 @@ mod tests {
         assert!(text.contains("Reply after it finishes"));
         assert!(text.contains("/tail q-abcde"));
         assert!(text.contains("/cancel q-abcde"));
+    }
+
+    #[test]
+    fn bare_work_chat_followup_prompt_includes_latest_same_chat_job_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string(), "worker".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config.clone(), None).unwrap();
+
+        let mut state = agentnoise::session::SessionState::new(Some("work".to_string()));
+        state.name = Some("frontier - old topic label".to_string());
+        state.default_agent = Some(AgentKind::Codex);
+        state.default_prompt_prefix = Some("@wiki".to_string());
+        app.create_session_record("worker", state).unwrap();
+
+        let queue = JobQueue::open(config.resolved_queue_path()).unwrap();
+        let previous_request = AgentRequest::new(AgentKind::Codex, "work", "@wiki Try again");
+        let previous = queue
+            .enqueue(&previous_request, "worker", "worker", "event-1")
+            .unwrap();
+        queue.mark_running(&previous.id).unwrap();
+        queue
+            .mark_succeeded(
+                &previous.id,
+                "Saved the speed-test screenshot in home-networking and updated the dual-Starlink write-up.",
+                None,
+            )
+            .unwrap();
+
+        let event = message_event("worker", "event-2", "Show me the write up here");
+        let request = match app
+            .route_message(
+                event.group_id.as_deref(),
+                event.sender.as_deref(),
+                &event.text,
+            )
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+        let contextualized =
+            contextualize_bare_followup_request(&app, Some(&queue), &event, "worker", request)
+                .unwrap();
+
+        assert!(
+            contextualized
+                .prompt
+                .starts_with("@wiki\n\nAgentNoise follow-up context:")
+        );
+        assert!(contextualized.prompt.contains("latest same-chat job: q-"));
+        assert!(contextualized.prompt.contains("latest request: Try again"));
+        assert!(
+            contextualized
+                .prompt
+                .contains("latest result: Saved the speed-test screenshot")
+        );
+        assert!(
+            contextualized
+                .prompt
+                .contains("User request:\nShow me the write up here")
+        );
     }
 
     #[test]

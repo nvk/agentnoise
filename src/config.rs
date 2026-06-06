@@ -139,8 +139,8 @@ impl Default for LocalSessionsConfig {
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub enum RunnerLauncher {
-    #[default]
     Bondage,
+    #[default]
     Direct,
 }
 
@@ -303,7 +303,7 @@ impl Config {
                 profile_about: default_profile_about(),
             },
             runner: RunnerConfig {
-                launcher: RunnerLauncher::Bondage,
+                launcher: RunnerLauncher::Direct,
                 bondage_bin: default_bondage_bin(),
                 bondage_conf: default_bondage_conf(),
                 data_dir: default_data_dir_string(),
@@ -938,7 +938,7 @@ path = "/tmp"
         assert!(!config.agents.hermes.enabled);
         assert_eq!(config.agents.hermes.profile, "hermes-agentnoise");
         assert_eq!(config.agents.hermes.bin, "hermes");
-        assert_eq!(config.runner.launcher, RunnerLauncher::Bondage);
+        assert_eq!(config.runner.launcher, RunnerLauncher::Direct);
         assert!(!config.local_sessions.watch);
         assert_eq!(config.local_sessions.watch_interval_seconds, 60);
         assert_eq!(config.local_sessions.notify_limit, 5);
@@ -1013,6 +1013,7 @@ path = "/tmp"
     #[test]
     fn generic_agent_profiles_are_forced_to_agentnoise_profiles() {
         let mut config = Config::template();
+        config.runner.launcher = RunnerLauncher::Bondage;
         config.agents.codex.profile = "codex".to_string();
         assert_eq!(
             config.effective_agent_profile(AgentKind::Codex),

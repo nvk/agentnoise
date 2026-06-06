@@ -75,12 +75,12 @@ bin = "claude"
 permission_mode = "auto"
 ```
 
-Set it from the CLI:
+Direct is the default for new configs. Set or restore it from the CLI:
 
 ```sh
-agentnoise init --direct-agents
-# or during first setup
-agentnoise up --direct-agents
+agentnoise init
+# or during first setup/listen
+agentnoise start
 # or
 agentnoise config launcher direct
 ```
@@ -128,7 +128,8 @@ Your `bondage.conf` must contain matching profile sections:
 ```
 
 If a profile is missing, either add it to `bondage.conf` or switch to direct
-mode.
+mode. To create a new bondage-based config, use `agentnoise init --bondage` or
+`agentnoise up --bondage`.
 
 `job_timeout_seconds` keeps phone-triggered jobs from staying `running`
 forever if a launcher or agent process wedges before returning output. Set it

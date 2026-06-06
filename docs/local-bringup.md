@@ -14,16 +14,12 @@ export AGENTNOISE="$PWD/target/release/agentnoise"
 ## Agent Launcher
 
 The simplest path does not require `agentbondage`. If you have raw Codex or
-Claude installed and logged in, initialize direct mode before pairing:
+Claude installed and logged in, new configs use direct mode by default:
 
 ```sh
-"$AGENTNOISE" init --direct-agents
-```
-
-Or set it during the first setup run:
-
-```sh
-"$AGENTNOISE" up --direct-agents --no-listen
+"$AGENTNOISE" init
+# or setup/listen in one foreground process:
+"$AGENTNOISE" start
 ```
 
 This persists `runner.launcher = "direct"` in config. Direct mode skips
@@ -35,9 +31,15 @@ mode with:
 "$AGENTNOISE" agents
 ```
 
-For the hardened local-agent-stack setup, use `bondage` profiles named
-`codex-agentnoise` and `claude-agentnoise` so phone-triggered jobs run behind a
-local policy boundary.
+For the hardened local-agent-stack setup, initialize with `--bondage` and use
+profiles named `codex-agentnoise` and `claude-agentnoise` so phone-triggered
+jobs run behind a local policy boundary.
+
+```sh
+"$AGENTNOISE" init --bondage
+# or setup/listen in one foreground process:
+"$AGENTNOISE" up --bondage
+```
 
 Existing configs can switch without re-running setup:
 

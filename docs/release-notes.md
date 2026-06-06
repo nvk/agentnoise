@@ -1,5 +1,23 @@
 # Release Notes
 
+## 0.1.36 - 2026-06-06
+
+- Made direct raw Codex/Claude launching the default for newly generated
+  configs so public first-run setup no longer requires agentbondage.
+- Added `--bondage` / `--secure` setup flags for operators who want the
+  hardened `codex-agentnoise` / `claude-agentnoise` profile path.
+- Promoted `agentnoise start` to the friendly setup/listen alias; it now runs
+  the same first-run path as `agentnoise up` instead of requiring a preexisting
+  config.
+- Added same-chat/latest-job context to bare work-chat follow-up prompts before
+  they enter the transport queue, keeping ambiguous requests like "show me the
+  write-up here" tied to the current White Noise work chat instead of a random
+  matching wiki topic.
+- Made runtime event journal appends single-record writes so the transport and
+  worker processes do not interleave JSONL records and break post-mortems.
+- Updated Homebrew and configuration docs to show direct mode first while
+  keeping the bondage install path explicit.
+
 ## 0.1.35 - 2026-06-03
 
 - Fixed Claude Code launches with `--output-format stream-json` by adding the

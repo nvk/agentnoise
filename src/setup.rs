@@ -18,7 +18,7 @@ pub struct SetupOptions {
     pub force_identity: bool,
     pub relays: Vec<String>,
     pub dev_burner_nsec: bool,
-    pub direct_agents: bool,
+    pub launcher: Option<RunnerLauncher>,
     pub start_daemon: bool,
 }
 
@@ -41,6 +41,7 @@ pub struct SetupResult {
     pub warnings: Vec<String>,
     pub group_id: Option<String>,
     pub group_output: Option<String>,
+    pub launcher: RunnerLauncher,
     pub dev_burner_nsec_file: Option<PathBuf>,
 }
 
@@ -65,8 +66,8 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     } else if !config.whitenoise.dev_burner_nsec {
         config.whitenoise.use_keychain_nsec = true;
     }
-    if options.direct_agents {
-        config.runner.launcher = RunnerLauncher::Direct;
+    if let Some(launcher) = options.launcher {
+        config.runner.launcher = launcher;
     }
     if let Some(name) = options
         .profile_name
@@ -80,7 +81,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
     if whitenoise_cli::should_reset_wn_bin_to_default(&config.whitenoise.wn_bin) {
         config.whitenoise.wn_bin = "wn".to_string();
     }
-    if created_config {
+    if created_config || options.launcher.is_some() {
         config.save(config_path)?;
     }
 
@@ -177,6 +178,7 @@ pub fn setup(config_path: &Path, options: SetupOptions) -> Result<SetupResult> {
         warnings,
         group_id,
         group_output,
+        launcher: config.runner.launcher,
         dev_burner_nsec_file: config
             .whitenoise
             .dev_burner_nsec_file

@@ -405,6 +405,29 @@ impl AgentApp {
         Ok(key)
     }
 
+    pub fn session_context_text_for_group(&self, group_id: &str) -> Result<Option<String>> {
+        let group_id = group_id.trim();
+        if group_id.is_empty() || self.is_primary_group(group_id) {
+            return Ok(None);
+        }
+
+        let key = session_key(Some(group_id), None);
+        let session = self.session(&key)?;
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "chat label: {}",
+            session_display_name(&key, &session)
+        ));
+        lines.push(format!("workspace: {}", workspace_text(&session)));
+        if let Some(agent) = session.default_agent {
+            lines.push(format!("default agent: {agent}"));
+        }
+        if let Some(prefix) = session.default_prompt_prefix.as_deref() {
+            lines.push(format!("default prompt prefix: {prefix}"));
+        }
+        Ok(Some(lines.join("\n")))
+    }
+
     pub fn record_attachment_downloaded(
         &self,
         record_id: &str,

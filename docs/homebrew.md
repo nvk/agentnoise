@@ -18,7 +18,7 @@ Local tap install shape:
 
 ```sh
 brew install nvk/tap/agentnoise
-agentnoise up --direct-agents --no-listen
+agentnoise up --no-listen
 brew services start nvk/tap/agentnoise
 agentnoise worker start
 # or, if tmux is installed:
@@ -33,13 +33,13 @@ the login-shell side that claims queued jobs and runs Codex, Claude, or Hermes;
 add `--tmux` when tmux is installed and you want the worker detached. Homebrew
 owns restart and boot for the transport through `brew services`.
 
-The `--direct-agents` setup is the no-agentbondage path. It runs the raw
-`codex` and `claude` CLIs with structured argv, so the only local agent setup
-required is having those CLIs installed and logged in. Use `agentnoise init`
-without `--direct-agents` only when you want `bondage` profiles such as
-`codex-agentnoise` and `claude-agentnoise`.
+Direct raw Codex/Claude is the default no-agentbondage path for new configs,
+so the only local agent setup required is having those CLIs installed and
+logged in. Use `agentnoise init --bondage` or `agentnoise up --bondage` only
+when you want `bondage` profiles such as `codex-agentnoise` and
+`claude-agentnoise`.
 
-`agentnoise up` is still the all-in-one local console. If the Homebrew
+`agentnoise start` / `agentnoise up` are the all-in-one local console paths. If the Homebrew
 transport is already running, an interactive `agentnoise up` attaches and
 follows logs instead of starting a second listener. If the service is not
 running, it takes the foreground engine lock and runs transport plus jobs in

@@ -179,8 +179,9 @@ impl EventJournal {
             .append(true)
             .open(&self.path)
             .with_context(|| format!("opening {}", self.path.display()))?;
-        serde_json::to_writer(&mut file, event).context("serializing runtime event")?;
-        file.write_all(b"\n")
+        let mut line = serde_json::to_vec(event).context("serializing runtime event")?;
+        line.push(b'\n');
+        file.write_all(&line)
             .with_context(|| format!("writing {}", self.path.display()))
     }
 }
@@ -253,5 +254,41 @@ mod tests {
         assert_eq!(summary.outbound_enqueued, 1);
         assert_eq!(summary.outbound, 1);
         assert_eq!(summary.failed_outbound, 1);
+    }
+
+    #[test]
+    fn independent_journal_writers_keep_jsonl_records_intact() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("events.jsonl");
+        let mut handles = Vec::new();
+
+        for writer in 0..6 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut journal = EventJournal::open(&path).unwrap();
+                for index in 0..40 {
+                    journal
+                        .record_outbound(
+                            "group",
+                            &format!("writer {writer} event {index} {}", "x".repeat(512)),
+                            true,
+                            None,
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let text = fs::read_to_string(&path).unwrap();
+        let mut count = 0;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            serde_json::from_str::<RuntimeEvent>(line).unwrap();
+            count += 1;
+        }
+        assert_eq!(count, 240);
     }
 }
