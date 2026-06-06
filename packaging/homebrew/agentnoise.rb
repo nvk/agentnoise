@@ -1,8 +1,8 @@
 class Agentnoise < Formula
   desc "Chat with local coding agents through White Noise"
   homepage "https://agentnoise.org"
-  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.35.tar.gz"
-  sha256 "46c3bc75ecb6f2095da043012b59f0ca03b47cd149c51a97e78fea94c5896a8b"
+  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.36.tar.gz"
+  sha256 "a719bb743f621de0b136995edd4d50f2050455e2e4a29edcfb368c72b5949748"
   license "MIT"
   head "https://github.com/nvk/agentnoise.git", branch: "main"
 
@@ -40,12 +40,12 @@ class Agentnoise < Formula
   def caveats
     <<~EOS
       Quick start without agentbondage, using raw Codex/Claude:
-        agentnoise up --direct-agents --no-listen
+        agentnoise up --no-listen
         brew services start nvk/tap/agentnoise
         agentnoise worker start
 
       Or run foreground setup/listening from a terminal:
-        agentnoise up --direct-agents
+        agentnoise start
 
       Homebrew keeps the White Noise transport alive. Local Codex/Claude/Hermes
       jobs run from your login shell worker:
@@ -59,15 +59,19 @@ class Agentnoise < Formula
       Config:
         agentnoise config path
         agentnoise config launcher direct
+        agentnoise config launcher bondage
         agentnoise config print-template
         agentnoise doctor
 
-      If you use bondage profiles instead of raw CLIs, omit --direct-agents and
-      provide codex-agentnoise / claude-agentnoise profiles.
+      If you use bondage profiles instead of raw CLIs, initialize with:
+        agentnoise init --bondage
+      or set an existing config with:
+        agentnoise config launcher bondage
+      Provide codex-agentnoise / claude-agentnoise profiles.
     EOS
   end
 
   test do
-    assert_match "agentnoise 0.1.35", shell_output("#{bin}/agentnoise --version")
+    assert_match "agentnoise 0.1.36", shell_output("#{bin}/agentnoise --version")
   end
 end
