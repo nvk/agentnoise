@@ -130,7 +130,9 @@ fn platform_spawn_pairing_pin_alert(
 fn platform_show_pairing_success_alert() -> Result<()> {
     let script = format!(
         "display dialog {} buttons {{\"OK\"}} default button \"OK\" with title \"agentnoise pairing\"",
-        applescript_string("agentnoise paired.\n\nSend /help from White Noise.")
+        applescript_string(
+            "agentnoise paired.\n\nMain chat starts work chats with /codex, /claude, or /wiki. In work chats, just talk.\n\nSend /help from White Noise."
+        )
     );
     let mut handle = spawn_osascript(script)?;
     handle.child.wait().ok();

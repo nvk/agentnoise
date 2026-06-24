@@ -1013,7 +1013,7 @@ fn is_command_reply(text: &str, sent_message: &str) -> bool {
     !text.is_empty()
         && text != sent_message.trim()
         && text != "Paired. Send /help for commands."
-        && text != "paired\nsend /help"
+        && !text.starts_with("paired\n")
         && !text.starts_with("agentnoise up ")
         && !is_pairing_pin_message(text)
         && !text.starts_with("I saw this while catching up after startup,")
@@ -1188,13 +1188,16 @@ mod tests {
             " Paired. Send /help for commands. ",
             "/status"
         ));
-        assert!(!is_command_reply("paired\nsend /help", "/status"));
+        assert!(!is_command_reply(
+            "paired\nMain chat starts work threads: send /codex <task>, /claude <task>, or /wiki <task>. In the new work chat, just talk for follow-ups.\nsend /help",
+            "/status"
+        ));
         assert!(!is_command_reply(
             "I saw this while catching up after startup, so I did not run it:\n/status\nSend it again now, or send /help.",
             "/status"
         ));
         assert!(!is_command_reply(
-            "agentnoise up 19:31Z\nfrontier\nsandbox:/\n/status /help",
+            "agentnoise up 19:31Z\nfrontier\nsandbox:/\nmain: /codex /claude /wiki opens work chats\nwork chats: just talk\n/status /doctor /help",
             "/status"
         ));
         assert!(is_command_reply(

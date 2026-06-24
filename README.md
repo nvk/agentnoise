@@ -23,6 +23,8 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.38** - **Main-chat onboarding.** The first couple of replies in the primary paired chat now explain that the main chat is a launcher for new work threads. Work-chat handoff, ready, and startup messages now remind users that once a work chat exists, plain text continues the thread without needing slash commands.
+
 **v0.1.37** - **Remote diagnostics.** Added `/doctor` as a paired chat command so trusted phone clients can trigger the same diagnostics summary as `agentnoise doctor` remotely.
 
 Detailed per-version notes live in [docs/release-notes.md](docs/release-notes.md).
@@ -193,7 +195,7 @@ starting a second listener, and disposable development identities can use
 
 ## What It Does
 
-agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher: direct raw Codex/Claude CLIs for the simplest setup, or [`bondage`](https://agentbondage.org/) profiles when you want a hardened local policy boundary. It stores job state and logs locally, and posts results back through White Noise. The primary paired chat acts like an inbox: starting a new job there creates a new White Noise work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
+agentnoise listens to one or more White Noise chats and accepts a small command set from allowlisted senders. It launches local coding agents through the configured launcher: direct raw Codex/Claude CLIs for the simplest setup, or [`bondage`](https://agentbondage.org/) profiles when you want a hardened local policy boundary. It stores job state and logs locally, and posts results back through White Noise. The primary paired chat acts like an inbox/launcher: starting a new job there creates a new White Noise work session named `hostname - short prompt summary`, then progress and final output continue in that session. Each White Noise group id gets its own workspace state, so the same phone user can keep multiple independent agentnoise sessions open in separate chat windows.
 
 The most tested target is macOS. Linux and FreeBSD service templates are
 included and should be treated as newer paths.
@@ -706,14 +708,15 @@ Noise, keychain/secret-store, repo sandbox, and runtime-store findings visible
 to the paired chat.
 
 Each White Noise chat is one agentnoise session. The first paired chat is the
-inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
-open a fresh work chat; agentnoise names it from the machine hostname and a
-2-4 word prompt summary, sends an open link back to the inbox, and posts
-quiet status plus final output in the new chat. Follow-up plain text sent inside
-that work chat continues with the same agent/profile/wiki mode after the prior
-queued job has finished, while slash
-commands remain available when you want to change workspace, inspect jobs, or
-force a different agent.
+inbox/launcher. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...`
+there to open a fresh work chat; agentnoise names it from the machine hostname
+and a 2-4 word prompt summary, sends an open link back to the inbox, and posts
+quiet status plus final output in the new chat. The first couple main-chat
+replies include that reminder so new users do not mistake the inbox for the
+work thread. Follow-up plain text sent inside that work chat continues with the
+same agent/profile/wiki mode after the prior queued job has finished, while
+slash commands remain available when you want to change workspace, inspect jobs,
+or force a different agent.
 
 `/new bugfix-ui` still creates a manual parallel White Noise chat with the
 paired phone identity and clones the current workspace into it. `/rename main`

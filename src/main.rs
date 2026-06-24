@@ -3639,7 +3639,9 @@ fn render_startup_hello(config: &Config, timestamp: &str) -> String {
         lines.push(profile.to_string());
     }
     lines.push(workspace);
-    lines.push("/status /help".to_string());
+    lines.push("main: /codex /claude /wiki opens work chats".to_string());
+    lines.push("work chats: just talk".to_string());
+    lines.push("/status /doctor /help".to_string());
     lines.join("\n")
 }
 
@@ -4150,7 +4152,9 @@ mod tests {
             "agentnoise up 20:00Z\n\
              m5\n\
              sandbox:/\n\
-             /status /help"
+             main: /codex /claude /wiki opens work chats\n\
+             work chats: just talk\n\
+             /status /doctor /help"
         );
     }
 

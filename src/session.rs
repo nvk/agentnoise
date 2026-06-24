@@ -28,6 +28,8 @@ pub struct SessionState {
     pub default_profile: Option<String>,
     #[serde(default)]
     pub default_prompt_prefix: Option<String>,
+    #[serde(default)]
+    pub onboarding_hints_shown: u8,
 }
 
 impl SessionState {
@@ -42,6 +44,7 @@ impl SessionState {
             default_agent: None,
             default_profile: None,
             default_prompt_prefix: None,
+            onboarding_hints_shown: 0,
         }
     }
 

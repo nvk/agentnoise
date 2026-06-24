@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.38 - 2026-06-24
+
+- Added primary-chat onboarding for the first two main-chat replies, explaining
+  that the primary paired chat is the launcher for new work chats.
+- Updated pairing, startup hello, handoff, ready, help, and bare-text replies so
+  users learn that work chats accept plain-text follow-ups without slash
+  commands once an agent mode is established.
+
 ## 0.1.37 - 2026-06-24
 
 - Added `/doctor` as a paired chat command so trusted phone clients can trigger the same diagnostics summary as `agentnoise doctor` remotely.

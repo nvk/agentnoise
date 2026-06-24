@@ -40,6 +40,7 @@ pub struct NewSessionRequest {
     pub group_name: String,
     pub sender: String,
     pub state: SessionState,
+    pub main_chat_hint: Option<String>,
 }
 
 impl NewSessionRequest {
@@ -48,35 +49,52 @@ impl NewSessionRequest {
     }
 
     pub fn ready_text(&self) -> String {
-        format!(
-            "Ready: {}\nWorkspace: {}\nTry: /codex <prompt>",
+        let mut text = format!(
+            "Ready: {}\nWorkspace: {}",
             self.name,
             workspace_text(&self.state)
-        )
+        );
+        if self.state.default_agent.is_some() {
+            text.push_str("\nJust talk here for follow-ups. Slash commands still work.");
+        } else {
+            text.push_str("\nTry: /codex <prompt>");
+        }
+        text
     }
 
     pub fn created_text(&self) -> String {
-        format!("Created chat: {}\nUse /list to switch.", self.name)
+        self.with_main_chat_hint(format!("Created chat: {}\nUse /list to switch.", self.name))
     }
 
     pub fn created_text_for_group(&self, group_id: &str) -> String {
-        format!(
+        self.with_main_chat_hint(format!(
             "Created chat: {}\nOpen: {}",
             self.name,
             white_noise_chat_uri(group_id)
-        )
+        ))
     }
 
     pub fn job_started_text_for_group(&self, group_id: &str) -> String {
-        format!(
-            "Started work chat: {}\nOpen: {}",
+        self.with_main_chat_hint(format!(
+            "Started work chat: {}\nOpen: {}\nContinue there. In that thread, just talk for follow-ups.",
             self.name,
             white_noise_chat_uri(group_id)
-        )
+        ))
     }
 
     pub fn job_ready_text(&self, ack: &str) -> String {
-        ack.to_string()
+        if self.state.default_agent.is_some() {
+            format!("{ack}\n\nReply here in plain text to continue this thread.")
+        } else {
+            ack.to_string()
+        }
+    }
+
+    fn with_main_chat_hint(&self, text: String) -> String {
+        match self.main_chat_hint.as_deref() {
+            Some(hint) if !hint.trim().is_empty() => append_hint(text, hint),
+            _ => text,
+        }
     }
 }
 
@@ -99,6 +117,10 @@ pub struct MediaDownloadAction {
     pub original_file_hash: String,
     pub output_path: PathBuf,
 }
+
+const MAIN_CHAT_ONBOARDING_HINT_LIMIT: u8 = 2;
+const MAIN_CHAT_ONBOARDING_HINT: &str = "Tip: this main chat is a launcher. Send /codex <task>, /claude <task>, or /wiki <task> to open a work chat. In the work chat, reply in plain text; no slash command needed for follow-ups.";
+const PAIRING_ONBOARDING_HINT: &str = "Main chat starts work threads: send /codex <task>, /claude <task>, or /wiki <task>. In the new work chat, just talk for follow-ups.";
 
 #[derive(Clone)]
 pub struct AgentApp {
@@ -192,14 +214,15 @@ impl AgentApp {
                 if !text.trim_start().starts_with('/') {
                     return self.route_bare_text(group_id, &session_key, text);
                 }
-                return Ok(RouteAction::Reply(invalid_command_text(
-                    text,
-                    &format!("{error:#}"),
-                )));
+                return Ok(self.with_main_chat_onboarding(
+                    group_id,
+                    &session_key,
+                    RouteAction::Reply(invalid_command_text(text, &format!("{error:#}"))),
+                ));
             }
         };
 
-        match command {
+        let action = match command {
             ChatCommand::Help => Ok(RouteAction::Reply(help_text())),
             ChatCommand::Status => Ok(RouteAction::Reply(self.status_text(&session_key))),
             ChatCommand::Doctor => Ok(RouteAction::Reply(self.doctor_text())),
@@ -263,7 +286,9 @@ impl AgentApp {
                 self.worktree_text(&session_key, command),
             )),
             ChatCommand::Run(request) => self.route_run_request(group_id, &session_key, request),
-        }
+        }?;
+
+        Ok(self.with_main_chat_onboarding(group_id, &session_key, action))
     }
 
     pub fn route_unsupported_message(
@@ -505,7 +530,9 @@ impl AgentApp {
             }
         }
 
-        Ok(Some("paired\nsend /help".to_string()))
+        Ok(Some(format!(
+            "paired\n{PAIRING_ONBOARDING_HINT}\nsend /help"
+        )))
     }
 
     fn status_text(&self, sender_key: &str) -> String {
@@ -580,6 +607,7 @@ impl AgentApp {
             name,
             sender,
             state,
+            main_chat_hint: None,
         }))
     }
 
@@ -613,12 +641,15 @@ impl AgentApp {
         state.name = Some(name.clone());
         state.closed = false;
         set_session_default_request(&mut state, request);
+        let sender_key = session_key(Some(group_id), Some(&sender));
+        let main_chat_hint = self.take_main_chat_onboarding_hint(Some(group_id), &sender_key);
 
         Ok(Some(NewSessionRequest {
             name,
             group_name,
             sender,
             state,
+            main_chat_hint,
         }))
     }
 
@@ -941,18 +972,16 @@ impl AgentApp {
             )));
         };
         if self.is_primary_group(group_id) {
-            return Ok(RouteAction::Reply(invalid_command_text(
-                text,
-                "not a command",
-            )));
+            return Ok(self.reply_with_main_chat_onboarding(
+                Some(group_id),
+                session_key,
+                primary_chat_bare_text(text),
+            ));
         }
 
         let session = self.session(session_key)?;
         let Some(agent) = session.default_agent else {
-            return Ok(RouteAction::Reply(invalid_command_text(
-                text,
-                "not a command",
-            )));
+            return Ok(RouteAction::Reply(work_chat_needs_command_text(text)));
         };
         let mut request = AgentRequest::prompt(agent, apply_prompt_prefix(&session, prompt));
         if let Some(repo_alias) = session.repo_alias.clone() {
@@ -1008,6 +1037,60 @@ impl AgentApp {
     fn is_primary_group(&self, group_id: &str) -> bool {
         let primary_group = self.config.whitenoise.group_id.trim();
         !primary_group.is_empty() && group_id == primary_group
+    }
+
+    fn with_main_chat_onboarding(
+        &self,
+        group_id: Option<&str>,
+        sender_key: &str,
+        action: RouteAction,
+    ) -> RouteAction {
+        let Some(hint) = self.take_main_chat_onboarding_hint(group_id, sender_key) else {
+            return action;
+        };
+
+        match action {
+            RouteAction::Reply(reply) => RouteAction::Reply(append_hint(reply, &hint)),
+            RouteAction::NewSession(mut request) => {
+                request.main_chat_hint = Some(hint);
+                RouteAction::NewSession(request)
+            }
+            RouteAction::ResumeSession(mut request) => {
+                request.reply_text = append_hint(request.reply_text, &hint);
+                RouteAction::ResumeSession(request)
+            }
+            other => other,
+        }
+    }
+
+    fn reply_with_main_chat_onboarding(
+        &self,
+        group_id: Option<&str>,
+        sender_key: &str,
+        reply: String,
+    ) -> RouteAction {
+        self.with_main_chat_onboarding(group_id, sender_key, RouteAction::Reply(reply))
+    }
+
+    fn take_main_chat_onboarding_hint(
+        &self,
+        group_id: Option<&str>,
+        sender_key: &str,
+    ) -> Option<String> {
+        if !self.is_primary_group_opt(group_id) {
+            return None;
+        }
+
+        let mut session = self.session(sender_key).ok()?;
+        if session.onboarding_hints_shown >= MAIN_CHAT_ONBOARDING_HINT_LIMIT {
+            return None;
+        }
+
+        session.onboarding_hints_shown += 1;
+        self.sessions
+            .set(sender_key, session)
+            .ok()
+            .map(|_| MAIN_CHAT_ONBOARDING_HINT.to_string())
     }
 
     fn session(&self, sender_key: &str) -> Result<SessionState> {
@@ -1765,6 +1848,40 @@ fn split_first(input: &str) -> (&str, &str) {
     }
 }
 
+fn append_hint(text: String, hint: &str) -> String {
+    if hint.trim().is_empty() || text.contains(hint) {
+        text
+    } else {
+        format!("{text}\n\n{hint}")
+    }
+}
+
+fn primary_chat_bare_text(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "I received an empty message. Main chat starts work chats: send /codex <prompt>, /claude <prompt>, or /wiki <prompt>."
+            .to_string();
+    }
+
+    format!(
+        "I received: {}\nMain chat starts work chats. Send /codex <prompt>, /claude <prompt>, or /wiki <prompt>. In the new work chat, just talk for follow-ups.",
+        preview_text(text)
+    )
+}
+
+fn work_chat_needs_command_text(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "I received an empty message. Send /help for commands, or start with /codex <prompt>."
+            .to_string();
+    }
+
+    format!(
+        "I received: {}\nThis chat does not have an agent mode yet. Start with /codex <prompt>, /claude <prompt>, or /wiki <prompt>; after that, plain text continues the thread.",
+        preview_text(text)
+    )
+}
+
 fn invalid_command_text(text: &str, error: &str) -> String {
     let text = text.trim();
     if text.is_empty() {
@@ -1810,6 +1927,13 @@ fn preview_text(text: &str) -> String {
 fn help_text() -> String {
     [
         "commands",
+        "",
+        "main chat starts work chats",
+        "/codex <prompt>",
+        "/claude <prompt>",
+        "/wiki <prompt>",
+        "",
+        "inside a work chat, plain text continues the thread",
         "",
         "chat",
         "/new [name]",
@@ -2226,6 +2350,83 @@ mod tests {
             RouteAction::Reply(reply) if reply.contains("I received: do the thing")
                 && reply.contains("/codex <prompt>")
         ));
+    }
+
+    #[test]
+    fn primary_chat_onboarding_hint_is_limited_to_first_two_replies() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("inbox"), Some("phone"), "/status")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains(MAIN_CHAT_ONBOARDING_HINT)
+        ));
+        assert!(matches!(
+            app.route_message(Some("inbox"), Some("phone"), "/doctor")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.contains(MAIN_CHAT_ONBOARDING_HINT)
+        ));
+        assert!(matches!(
+            app.route_message(Some("inbox"), Some("phone"), "/status")
+                .unwrap(),
+            RouteAction::Reply(reply) if !reply.contains(MAIN_CHAT_ONBOARDING_HINT)
+        ));
+    }
+
+    #[test]
+    fn primary_job_handoff_explains_plain_text_work_chats() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.whitenoise.group_id = "inbox".to_string();
+        config.whitenoise.group_ids = vec!["inbox".to_string()];
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].alias = "work".to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        let request = match app
+            .route_message(Some("inbox"), Some("phone"), "/codex fix the docs")
+            .unwrap()
+        {
+            RouteAction::Run(request) => request,
+            other => panic!("expected run action, got {other:?}"),
+        };
+        let session = app
+            .job_session_request(Some("inbox"), Some("phone"), &request)
+            .unwrap()
+            .expect("session request");
+
+        assert!(
+            session
+                .job_started_text_for_group("worker")
+                .contains(MAIN_CHAT_ONBOARDING_HINT)
+        );
+        assert!(
+            session
+                .job_started_text_for_group("worker")
+                .contains("just talk for follow-ups")
+        );
+        assert!(
+            session
+                .job_ready_text("Queued.\ncodex · work:/\nI'll post the answer here.")
+                .contains("Reply here in plain text")
+        );
     }
 
     #[test]
