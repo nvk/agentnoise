@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `/doctor` as a paired chat command so trusted phone clients can trigger
+  the same diagnostics summary as `agentnoise doctor` remotely.
 - Dark Matter transport now runs a relay-health watchdog. If the embedded
   relay plane drops below the minimum healthy relay count, the transport exits
   so launchd/Homebrew can restart it instead of sitting in a running-but-deaf
