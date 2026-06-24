@@ -202,6 +202,7 @@ impl AgentApp {
         match command {
             ChatCommand::Help => Ok(RouteAction::Reply(help_text())),
             ChatCommand::Status => Ok(RouteAction::Reply(self.status_text(&session_key))),
+            ChatCommand::Doctor => Ok(RouteAction::Reply(self.doctor_text())),
             ChatCommand::Agents => Ok(RouteAction::Reply(capabilities::render_capabilities(
                 &self.config,
             ))),
@@ -543,6 +544,14 @@ impl AgentApp {
             workspace,
             self.config.repos.len()
         ) + &subscription_status
+    }
+
+    fn doctor_text(&self) -> String {
+        let config_path = self
+            .config_path
+            .clone()
+            .unwrap_or_else(crate::paths::default_config_path);
+        crate::doctor::render_doctor(&config_path, &self.config)
     }
 
     fn new_session_action(
@@ -1812,6 +1821,7 @@ fn help_text() -> String {
         "",
         "workspace",
         "/status",
+        "/doctor",
         "/repos",
         "/use <repo>",
         "/pwd",
@@ -1997,6 +2007,29 @@ mod tests {
             app.route_message(Some("group-a"), Some(&phone_hex), "/help")
                 .unwrap(),
             RouteAction::Reply(reply) if reply.contains("commands")
+        ));
+    }
+
+    #[test]
+    fn doctor_command_replies_with_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let mut config = Config::template();
+        config.runner.launcher = crate::config::RunnerLauncher::Direct;
+        config.whitenoise.allowed_senders = vec!["phone".to_string()];
+        config.runner.data_dir = temp.path().join("data").display().to_string();
+        config.runner.log_dir = temp.path().join("logs").display().to_string();
+        config.repos[0].path = repo.path().display().to_string();
+        config.save(&config_path).unwrap();
+        let app = AgentApp::new_with_auth(config_path, config, None).unwrap();
+
+        assert!(matches!(
+            app.route_message(Some("group-a"), Some("phone"), "/doctor")
+                .unwrap(),
+            RouteAction::Reply(reply) if reply.starts_with("agentnoise doctor")
+                && reply.contains("[warn] agent launcher: direct")
+                && reply.contains("OS keychain nsec")
         ));
     }
 

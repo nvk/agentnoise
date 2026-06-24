@@ -1,5 +1,9 @@
 # Release Notes
 
+## 0.1.37 - 2026-06-24
+
+- Added `/doctor` as a paired chat command so trusted phone clients can trigger the same diagnostics summary as `agentnoise doctor` remotely.
+
 ## 0.1.36 - 2026-06-06
 
 - Made direct raw Codex/Claude launching the default for newly generated

@@ -6,6 +6,7 @@ use crate::runner::{AgentKind, AgentRequest};
 pub enum ChatCommand {
     Help,
     Status,
+    Doctor,
     Agents,
     AgentSessions {
         limit: Option<usize>,
@@ -78,6 +79,7 @@ pub fn parse_chat_command(message: &str) -> Result<ChatCommand> {
     match command.as_str() {
         "help" => Ok(ChatCommand::Help),
         "status" => Ok(ChatCommand::Status),
+        "doctor" => Ok(ChatCommand::Doctor),
         "agents" => Ok(ChatCommand::Agents),
         "agent-sessions" | "local-sessions" => Ok(ChatCommand::AgentSessions {
             limit: optional_limit(rest)?,
@@ -307,6 +309,7 @@ mod tests {
     #[test]
     fn parses_status() {
         assert_eq!(parse_chat_command("/status").unwrap(), ChatCommand::Status);
+        assert_eq!(parse_chat_command("/doctor").unwrap(), ChatCommand::Doctor);
         assert_eq!(parse_chat_command("/agents").unwrap(), ChatCommand::Agents);
         assert_eq!(
             parse_chat_command("/agent-sessions 12").unwrap(),

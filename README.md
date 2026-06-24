@@ -23,6 +23,8 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.37** - **Remote diagnostics.** Added `/doctor` as a paired chat command so trusted phone clients can trigger the same diagnostics summary as `agentnoise doctor` remotely.
+
 Detailed per-version notes live in [docs/release-notes.md](docs/release-notes.md).
 The README keeps the recent history grouped by product milestone.
 
