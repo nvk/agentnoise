@@ -365,7 +365,7 @@ Pair the phone:
 2. Scan the QR from White Noise on the phone.
 3. Create a White Noise chat/group with the agentnoise desktop identity.
 4. Type the 6-digit PIN shown on the desktop as the first phone message.
-5. Send `/status`, then `/help`.
+5. Send `/status`, `/doctor`, then `/help`.
 
 If the pairing window is hidden or blocked, the same QR/PIN is in the service
 logs:
@@ -388,6 +388,11 @@ agentnoise identity status
 agentnoise identity rename agentnoise-mbp
 agentnoise fake-phone plan
 ```
+
+From the paired phone, `/status` is the quick liveness check and `/doctor`
+returns the same diagnostics report as `agentnoise doctor` so you can inspect
+config, launcher, White Noise, keychain, repo-path, and store warnings without
+SSHing into the host first.
 
 Remote SSH pairing:
 
@@ -653,6 +658,7 @@ plaintext burner identity and avoids Secret Service setup.
 ## Chat Commands
 
 - `/status`
+- `/doctor`
 - `/agents`
 - `/agent-sessions [limit]`
 - `/new [name]`
@@ -692,6 +698,12 @@ plaintext burner identity and avoids Secret Service setup.
 - `/worktree use <name>`
 - `/worktree remove <name> confirm`
 - `/help`
+
+`/status` reports live transport, worker, queue, subscription, and identity
+state. `/doctor` is the remote troubleshooting snapshot: it runs the same
+checks as `agentnoise doctor` and replies with the config, launcher, White
+Noise, keychain/secret-store, repo sandbox, and runtime-store findings visible
+to the paired chat.
 
 Each White Noise chat is one agentnoise session. The first paired chat is the
 inbox. Send `/codex ...`, `/claude ...`, `/hermes ...`, or `/wiki ...` there to
