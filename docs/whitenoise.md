@@ -23,7 +23,7 @@ agentnoise discovers `wn` in this order:
 4. repo-local development build under `.local-whitenoise/bin`
 5. `wn` on `PATH`
 
-On Homebrew upgrades, `agentnoise transport run` resets legacy managed paths such as `~/bin/agentnoise-whitenoise/wn` to the packaged `wn` beside `agentnoise`, disables the old macOS `local.agentnoise.wnd` LaunchAgent when present, and restarts the White Noise daemon so an old `wnd` process does not keep owning the socket. If sends fail later with closed-socket, broken-pipe, or too-many-open-files errors, agentnoise restarts `wnd` before retrying delivery.
+On Homebrew upgrades, `agentnoise transport run` resets legacy managed paths such as `~/bin/agentnoise-whitenoise/wn` to the packaged `wn` beside `agentnoise`, kickstarts the old macOS `local.agentnoise.wnd` LaunchAgent when present so its existing Keychain authorization is preserved, and restarts the White Noise daemon so stale `wnd` processes are refreshed. If sends fail later with closed-socket, broken-pipe, or too-many-open-files errors, agentnoise restarts `wnd` before retrying delivery.
 
 ## Manual Build
 

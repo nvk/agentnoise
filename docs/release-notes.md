@@ -1,5 +1,10 @@
 # Release Notes
 
+## 0.1.42 - 2026-06-27
+
+- Changes macOS legacy daemon recovery to kickstart `local.agentnoise.wnd` instead of disabling it, preserving existing Keychain authorization for hosts where the old LaunchAgent is the only White Noise daemon allowed to unlock its database non-interactively.
+- Falls back to direct daemon startup only when no legacy agentnoise-owned LaunchAgent is present or it cannot become ready.
+
 ## 0.1.41 - 2026-06-27
 
 - Disables the legacy macOS `local.agentnoise.wnd` LaunchAgent during White Noise daemon restart/recovery when that old agentnoise-owned plist is present.

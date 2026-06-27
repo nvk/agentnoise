@@ -308,7 +308,10 @@ pub fn stop_daemon(config: &WhitenoiseConfig) -> Result<()> {
 }
 
 pub fn restart_daemon(config: &WhitenoiseConfig) -> Result<()> {
-    disable_legacy_agentnoise_wnd_launch_agent();
+    if restart_legacy_agentnoise_wnd_launch_agent(config)? {
+        return Ok(());
+    }
+
     if let Err(error) = stop_daemon(config) {
         eprintln!("agentnoise: White Noise daemon stop failed during restart: {error:#}");
     }
@@ -326,44 +329,87 @@ pub fn restart_daemon(config: &WhitenoiseConfig) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn disable_legacy_agentnoise_wnd_launch_agent() {
+fn restart_legacy_agentnoise_wnd_launch_agent(config: &WhitenoiseConfig) -> Result<bool> {
     const LABEL: &str = "local.agentnoise.wnd";
     let Some(home) = dirs::home_dir() else {
-        return;
+        return Ok(false);
     };
     let plist = home.join("Library/LaunchAgents/local.agentnoise.wnd.plist");
-    let should_disable = fs::read_to_string(&plist)
+    let should_restart = fs::read_to_string(&plist)
         .map(|text| text.contains(LABEL))
         .unwrap_or(false);
-    if !should_disable {
-        return;
+    if !should_restart {
+        return Ok(false);
     }
 
-    let _ = Command::new("launchctl").arg("remove").arg(LABEL).status();
-    let disabled = plist.with_extension("plist.disabled");
-    if disabled.exists()
-        && let Err(error) = fs::remove_file(&disabled)
-    {
+    let Some(uid) = current_uid() else {
         eprintln!(
-            "agentnoise: failed to replace disabled legacy wnd LaunchAgent {}: {error:#}",
-            disabled.display()
+            "agentnoise: found legacy White Noise LaunchAgent {}, but could not determine uid for kickstart",
+            plist.display()
         );
-        return;
+        return Ok(false);
+    };
+    let service = format!("gui/{uid}/{LABEL}");
+    match Command::new("launchctl")
+        .arg("kickstart")
+        .arg("-k")
+        .arg(&service)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            eprintln!("agentnoise: restarted legacy White Noise LaunchAgent {service}");
+        }
+        Ok(status) => {
+            eprintln!(
+                "agentnoise: legacy White Noise LaunchAgent kickstart exited with {status}; falling back to bootstrap"
+            );
+            let _ = Command::new("launchctl")
+                .arg("bootstrap")
+                .arg(format!("gui/{uid}"))
+                .arg(&plist)
+                .status();
+            let _ = Command::new("launchctl")
+                .arg("kickstart")
+                .arg("-k")
+                .arg(&service)
+                .status();
+        }
+        Err(error) => {
+            eprintln!(
+                "agentnoise: failed to kickstart legacy White Noise LaunchAgent {service}: {error:#}"
+            );
+            return Ok(false);
+        }
     }
-    match fs::rename(&plist, &disabled) {
-        Ok(()) => eprintln!(
-            "agentnoise: disabled legacy White Noise LaunchAgent {}",
-            plist.display()
-        ),
-        Err(error) => eprintln!(
-            "agentnoise: failed to disable legacy White Noise LaunchAgent {}: {error:#}",
-            plist.display()
-        ),
+
+    let started = Instant::now();
+    while started.elapsed() < DAEMON_START_TIMEOUT {
+        if daemon_running(config)? {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(250));
     }
+    eprintln!(
+        "agentnoise: legacy White Noise LaunchAgent did not become ready within {} seconds; falling back",
+        DAEMON_START_TIMEOUT.as_secs()
+    );
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn current_uid() -> Option<String> {
+    let output = Command::new("id").arg("-u").output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|uid| !uid.is_empty())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn disable_legacy_agentnoise_wnd_launch_agent() {}
+fn restart_legacy_agentnoise_wnd_launch_agent(_config: &WhitenoiseConfig) -> Result<bool> {
+    Ok(false)
+}
 
 pub fn daemon_status_with_socket(wn_path: &Path, socket: Option<&Path>) -> Result<String> {
     let mut command = Command::new(wn_path);

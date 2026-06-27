@@ -23,6 +23,8 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.42** - **Restart legacy `wnd`, do not remove it.** Recovery now kickstarts the old `local.agentnoise.wnd` LaunchAgent when it exists, preserving its Keychain authorization while still refreshing stale White Noise daemons.
+
 **v0.1.41** - **Legacy `wnd` LaunchAgent cleanup.** Transport recovery now disables the old `local.agentnoise.wnd` LaunchAgent before restarting White Noise, so Homebrew installs stop reviving stale `/Users/.../bin/wnd` daemons after an upgrade.
 
 **v0.1.40** - **White Noise daemon self-recovery.** AgentNoise now migrates legacy managed `wn` paths to the packaged Homebrew CLI on transport startup, restarts the White Noise daemon after that migration, and restarts a wedged daemon when sends fail with closed-socket/broken-pipe errors. This fixes Frontier-style cases where jobs run but phone replies never deliver because an old `wnd` stayed alive.
