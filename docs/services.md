@@ -18,7 +18,7 @@ one worker for `/codex`, `/claude`, `/wiki`, or `/hermes` jobs:
 
 ```sh
 agentnoise worker start
-# or, if tmux is installed:
+# or, if tmux is installed, run the supervised restart loop:
 agentnoise worker start --tmux
 ```
 
@@ -58,7 +58,8 @@ Those write separate LaunchAgents:
 Current Codex CLI releases do not run reliably when `codex exec` is launched
 directly by launchd. They can start and then produce no output forever. The
 macOS service therefore runs only `agentnoise transport run`; Codex jobs should
-be claimed by a login-shell worker:
+be claimed by a login-shell worker. On remote hosts, prefer the supervised
+tmux worker so transient worker exits do not leave queued jobs stranded:
 
 ```sh
 agentnoise worker start

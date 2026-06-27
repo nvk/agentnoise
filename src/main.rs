@@ -1636,7 +1636,7 @@ fn worker_command(config_path: &Path, args: WorkerArgs) -> Result<()> {
 fn worker_start(config_path: &Path, args: WorkerStartArgs) -> Result<()> {
     let config = Config::load(config_path)?;
     if args.tmux {
-        return start_worker_tmux(config_path, &config);
+        return start_worker_tmux(config_path, &config, args.poll_seconds);
     }
 
     let guard = runtime::acquire_role(config_path, &config, RuntimeRole::Worker, AcquireMode::Try)?;
@@ -1662,19 +1662,37 @@ fn worker_start(config_path: &Path, args: WorkerStartArgs) -> Result<()> {
 
     println!("agentnoise worker running");
     loop {
-        match queue.claim_next(&worker_id)? {
-            Some(job) => run_queued_job(
-                &queue,
-                Arc::clone(&app),
-                Arc::clone(&wn),
-                Arc::clone(&event_journal),
-                job,
-            )?,
-            None if args.once => {
+        match queue.claim_next(&worker_id) {
+            Err(error) => {
+                eprintln!("agentnoise worker: queue claim failed: {error:#}");
+                if args.once {
+                    return Err(error);
+                }
+                thread::sleep(idle_delay);
+            }
+            Ok(Some(job)) => {
+                let job_id = job.id.clone();
+                if let Err(error) = run_queued_job(
+                    &queue,
+                    Arc::clone(&app),
+                    Arc::clone(&wn),
+                    Arc::clone(&event_journal),
+                    job,
+                ) {
+                    eprintln!("agentnoise worker: job {job_id} failed: {error:#}");
+                    let failure = format!("worker error: {error:#}");
+                    if let Err(mark_error) = queue.mark_failed(&job_id, &failure, None) {
+                        eprintln!(
+                            "agentnoise worker: failed to mark {job_id} failed: {mark_error:#}"
+                        );
+                    }
+                }
+            }
+            Ok(None) if args.once => {
                 println!("agentnoise worker: no queued jobs");
                 return Ok(());
             }
-            None => thread::sleep(idle_delay),
+            Ok(None) => thread::sleep(idle_delay),
         }
         if args.once {
             return Ok(());
@@ -1682,7 +1700,7 @@ fn worker_start(config_path: &Path, args: WorkerStartArgs) -> Result<()> {
     }
 }
 
-fn start_worker_tmux(config_path: &Path, config: &Config) -> Result<()> {
+fn start_worker_tmux(config_path: &Path, config: &Config, poll_seconds: u64) -> Result<()> {
     if runtime::role_is_running(config, RuntimeRole::Worker)? {
         match runtime::role_lock_owner(config, RuntimeRole::Worker)? {
             Some(pid) => println!("agentnoise worker already running as pid {pid}"),
@@ -1693,28 +1711,60 @@ fn start_worker_tmux(config_path: &Path, config: &Config) -> Result<()> {
     ensure_tmux_available()?;
 
     let exe = std::env::current_exe().context("resolving current executable")?;
-    let session = config
-        .instance
-        .as_deref()
-        .map(|instance| format!("agentnoise-worker-{instance}"))
-        .unwrap_or_else(|| "agentnoise-worker".to_string());
+    let session = worker_tmux_session_name(config);
+    if tmux_session_exists(&session)? {
+        println!("agentnoise worker tmux session: {session}");
+        return Ok(());
+    }
+    let command = supervised_worker_shell_command(&exe, config_path, poll_seconds.max(1));
     let status = ProcessCommand::new("tmux")
         .arg("new-session")
         .arg("-d")
         .arg("-s")
         .arg(&session)
-        .arg(exe)
-        .arg("--config")
-        .arg(config_path)
-        .arg("worker")
-        .arg("start")
+        .arg("/bin/sh")
+        .arg("-lc")
+        .arg(command)
         .status()
-        .context("starting tmux worker session")?;
+        .context("starting supervised tmux worker session")?;
     if !status.success() {
         bail!("tmux new-session exited with {status}");
     }
-    println!("agentnoise worker tmux session: {session}");
+    println!("agentnoise worker tmux session: {session} (supervised)");
     Ok(())
+}
+
+fn worker_tmux_session_name(config: &Config) -> String {
+    config
+        .instance
+        .as_deref()
+        .map(|instance| format!("agentnoise-worker-{instance}"))
+        .unwrap_or_else(|| "agentnoise-worker".to_string())
+}
+
+fn tmux_session_exists(session: &str) -> Result<bool> {
+    let status = ProcessCommand::new("tmux")
+        .arg("has-session")
+        .arg("-t")
+        .arg(session)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("checking tmux worker session")?;
+    Ok(status.success())
+}
+
+fn supervised_worker_shell_command(exe: &Path, config_path: &Path, poll_seconds: u64) -> String {
+    format!(
+        "while true; do {exe} --config {config} worker start --poll-seconds {poll}; status=$?; echo \"agentnoise worker exited with status $status; restarting in 5s\" >&2; sleep 5; done",
+        exe = shell_quote(&exe.display().to_string()),
+        config = shell_quote(&config_path.display().to_string()),
+        poll = poll_seconds.max(1),
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn ensure_tmux_available() -> Result<()> {
@@ -1770,15 +1820,17 @@ fn run_queued_job(
                     queue.mark_failed(&job.id, summary, Some(&record.log_path))?;
                 }
             }
-            send_reply_recorded(&wn, &event_journal, &group_id, &reply)
-                .context("sending queued job reply")?;
+            if let Err(error) = send_reply_recorded(&wn, &event_journal, &group_id, &reply) {
+                eprintln!("agentnoise worker: failed to send queued job reply: {error:#}");
+            }
             upload_referenced_job_media(&app, &wn, &event_journal, &group_id, &request, &record);
         }
         Err(error) => {
             let text = format!("Error: job failed to start: {error:#}");
             queue.mark_failed(&job.id, &text, None)?;
-            send_reply_recorded(&wn, &event_journal, &group_id, &text)
-                .context("sending queued job failure")?;
+            if let Err(send_error) = send_reply_recorded(&wn, &event_journal, &group_id, &text) {
+                eprintln!("agentnoise worker: failed to send queued job failure: {send_error:#}");
+            }
         }
     }
     Ok(())
@@ -2897,7 +2949,7 @@ fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
                             &dispatch.wn,
                             &dispatch.event_journal,
                             &dispatch.reply_group_id,
-                            "queued\nworker: offline\nstart: agentnoise worker start --tmux",
+                            "queued\nworker: offline\nstart: agentnoise worker start --tmux\nThis now starts a supervised tmux worker that restarts itself if the worker exits.",
                         );
                     }
                 }
@@ -4204,6 +4256,38 @@ mod tests {
     fn launcher_flags_reject_conflicting_modes() {
         let error = launcher_from_flags(true, true).unwrap_err().to_string();
         assert!(error.contains("--direct-agents and --bondage cannot be combined"));
+    }
+
+    #[test]
+    fn worker_tmux_supervisor_restarts_worker_process() {
+        let command = supervised_worker_shell_command(
+            Path::new("/opt/homebrew/bin/agentnoise"),
+            Path::new("/Users/me/Library/Application Support/agentnoise/config.toml"),
+            3,
+        );
+
+        assert!(command.starts_with("while true; do "));
+        assert!(!command.contains("' /opt/homebrew/bin/agentnoise'"));
+        assert!(command.contains("'/opt/homebrew/bin/agentnoise'"));
+        assert!(
+            command.contains(
+                "--config '/Users/me/Library/Application Support/agentnoise/config.toml'"
+            )
+        );
+        assert!(command.contains("worker start --poll-seconds 3"));
+        assert!(command.contains("restarting in 5s"));
+    }
+
+    #[test]
+    fn worker_tmux_session_name_is_instance_scoped() {
+        assert_eq!(
+            worker_tmux_session_name(&Config::template()),
+            "agentnoise-worker"
+        );
+        assert_eq!(
+            worker_tmux_session_name(&Config::template_for_instance("darkmatter")),
+            "agentnoise-worker-darkmatter"
+        );
     }
 
     #[test]

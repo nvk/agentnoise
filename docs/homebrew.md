@@ -30,7 +30,7 @@ Homebrew prefix. The service uses `agentnoise transport run`: it starts White
 Noise, repairs login when needed, subscribes to paired chats, handles pairing,
 and writes agent jobs into the local SQLite queue. `agentnoise worker start` is
 the login-shell side that claims queued jobs and runs Codex, Claude, or Hermes;
-add `--tmux` when tmux is installed and you want the worker detached. Homebrew
+add `--tmux` when tmux is installed and you want the worker detached. The tmux worker is supervised and restarts itself if the worker process exits after a transient job or send error. Homebrew
 owns restart and boot for the transport through `brew services`.
 
 Direct raw Codex/Claude is the default no-agentbondage path for new configs,
@@ -48,11 +48,12 @@ one process until the terminal exits.
 Current macOS Codex CLI builds can hang before producing output when launched
 directly by launchd. The split transport/worker path avoids that by keeping the
 Homebrew service responsible for White Noise only and running jobs from tmux or
-your login shell.
+your login shell. Prefer `--tmux` on remote hosts so the supervised session
+restarts the worker if it exits.
 
 ```sh
 agentnoise worker start
-# or, if tmux is installed:
+# or, if tmux is installed, with restart supervision:
 agentnoise worker start --tmux
 ```
 

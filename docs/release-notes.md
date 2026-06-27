@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.1.39 - 2026-06-27
+
+- Changed `agentnoise worker start --tmux` to run a supervised tmux loop that
+  restarts the worker if the worker process exits. This avoids the recurring
+  failure mode where the transport stays healthy but remote jobs pile up queued
+  because the tmux worker disappeared.
+- Kept queued-job send/reply failures from bubbling out of the worker loop after
+  the job has already been marked succeeded or failed; the worker logs those
+  reply errors and continues claiming future jobs.
+- Updated the offline-worker chat hint to point users at the supervised tmux
+  worker path.
+
 ## 0.1.38 - 2026-06-24
 
 - Added primary-chat onboarding for the first two main-chat replies, explaining

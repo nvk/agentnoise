@@ -23,6 +23,8 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.39** - **Supervised worker tmux.** `agentnoise worker start --tmux` now starts a supervised tmux loop that restarts the worker if it exits, and queued-job reply/send errors no longer kill the worker process. This keeps Frontier-style remote installs from silently piling up queued jobs when a worker dies after a transient White Noise or job error.
+
 **v0.1.38** - **Main-chat onboarding.** The first couple of replies in the primary paired chat now explain that the main chat is a launcher for new work threads. Work-chat handoff, ready, and startup messages now remind users that once a work chat exists, plain text continues the thread without needing slash commands.
 
 **v0.1.37** - **Remote diagnostics.** Added `/doctor` as a paired chat command so trusted phone clients can trigger the same diagnostics summary as `agentnoise doctor` remotely.

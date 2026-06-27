@@ -70,6 +70,6 @@ agentnoise service uninstall --target launchd --unload
   identity QR, current PIN, and live countdown, and also prints the PIN to the
   launchd log.
 - `launchd install` runs `agentnoise transport run`, which starts `wnd`, repairs login from the configured bootstrap nsec when needed, enforces first-pairing PIN auth, waits for the first control chat when needed, then listens and queues jobs.
-- `agentnoise worker start` claims queued jobs and runs local agent CLIs outside launchd; add `--tmux` when tmux is installed and you want it detached.
+- `agentnoise worker start` claims queued jobs and runs local agent CLIs outside launchd; add `--tmux` when tmux is installed and you want it detached. The tmux worker runs under a restart supervisor so one job/send failure does not permanently stop job processing.
 - Restart the service after changing config.
 - If the process restarts, active jobs are marked `interrupted` in the local job store.
