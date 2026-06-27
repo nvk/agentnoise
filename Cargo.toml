@@ -1,6 +1,6 @@
 [package]
 name = "agentnoise"
-version = "0.1.42"
+version = "0.1.43"
 edition = "2024"
 description = "Chat with local coding agents through White Noise"
 homepage = "https://agentnoise.com"

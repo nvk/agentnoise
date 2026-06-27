@@ -1812,6 +1812,7 @@ fn run_queued_job(
 ) -> Result<()> {
     queue.mark_running(&job.id)?;
     let group_id = job.reply_group_id.clone();
+    let source_group_id = job.source_group_id.clone();
     let request = job.request.clone();
     let progress_wn = Arc::clone(&wn);
     let progress_journal = Arc::clone(&event_journal);
@@ -1840,20 +1841,97 @@ fn run_queued_job(
                     queue.mark_failed(&job.id, summary, Some(&record.log_path))?;
                 }
             }
-            if let Err(error) = send_reply_recorded(&wn, &event_journal, &group_id, &reply) {
-                eprintln!("agentnoise worker: failed to send queued job reply: {error:#}");
-            }
+            let delivered_to_reply =
+                match send_reply_recorded(&wn, &event_journal, &group_id, &reply) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!("agentnoise worker: failed to send queued job reply: {error:#}");
+                        false
+                    }
+                };
+            mirror_job_reply_to_source_if_needed(
+                &wn,
+                &event_journal,
+                &source_group_id,
+                &group_id,
+                &reply,
+                delivered_to_reply,
+            );
             upload_referenced_job_media(&app, &wn, &event_journal, &group_id, &request, &record);
         }
         Err(error) => {
             let text = format!("Error: job failed to start: {error:#}");
             queue.mark_failed(&job.id, &text, None)?;
-            if let Err(send_error) = send_reply_recorded(&wn, &event_journal, &group_id, &text) {
-                eprintln!("agentnoise worker: failed to send queued job failure: {send_error:#}");
-            }
+            let delivered_to_reply =
+                match send_reply_recorded(&wn, &event_journal, &group_id, &text) {
+                    Ok(()) => true,
+                    Err(send_error) => {
+                        eprintln!(
+                            "agentnoise worker: failed to send queued job failure: {send_error:#}"
+                        );
+                        false
+                    }
+                };
+            mirror_job_reply_to_source_if_needed(
+                &wn,
+                &event_journal,
+                &source_group_id,
+                &group_id,
+                &text,
+                delivered_to_reply,
+            );
         }
     }
     Ok(())
+}
+
+fn mirror_job_reply_to_source_if_needed(
+    wn: &WnClient,
+    event_journal: &Arc<Mutex<EventJournal>>,
+    source_group_id: &str,
+    reply_group_id: &str,
+    reply: &str,
+    delivered_to_reply_group: bool,
+) {
+    if !should_mirror_job_reply_to_source(source_group_id, reply_group_id) {
+        return;
+    }
+
+    let text = mirrored_job_reply_text(reply_group_id, reply, delivered_to_reply_group);
+    if let Err(error) = send_reply_recorded(wn, event_journal, source_group_id, &text) {
+        eprintln!(
+            "agentnoise: failed to mirror queued job reply to source chat {source_group_id}: {error:#}"
+        );
+    }
+}
+
+fn should_mirror_job_reply_to_source(source_group_id: &str, reply_group_id: &str) -> bool {
+    let source_group_id = source_group_id.trim();
+    let reply_group_id = reply_group_id.trim();
+    !source_group_id.is_empty() && !reply_group_id.is_empty() && source_group_id != reply_group_id
+}
+
+fn mirrored_job_reply_text(
+    reply_group_id: &str,
+    reply: &str,
+    delivered_to_reply_group: bool,
+) -> String {
+    let chat_ref = short_ref(reply_group_id);
+    let link = white_noise_chat_uri(reply_group_id);
+    let header = if delivered_to_reply_group {
+        format!(
+            "Done in work chat {chat_ref}\nOpen: {link}\nMirrored here so the answer is visible even if White Noise does not surface the new chat immediately."
+        )
+    } else {
+        format!(
+            "Done.\nI could not post to work chat {chat_ref}, so I am posting the answer here instead.\nOpen: {link}"
+        )
+    };
+    format!("{header}\n\n{}", reply.trim())
+}
+
+fn white_noise_chat_uri(group_id: &str) -> String {
+    format!("whitenoise://chat/{}", group_id.trim())
 }
 
 fn acquire_role_guard(
@@ -2930,6 +3008,7 @@ fn dispatch_agent_request(dispatch: AgentDispatch<'_>) {
                 dispatch.app,
                 dispatch.wn,
                 dispatch.event_journal,
+                dispatch.source_group_id.to_string(),
                 dispatch.reply_group_id,
                 request,
             );
@@ -3159,14 +3238,15 @@ fn run_inline_job(
     app: Arc<AgentApp>,
     wn: Arc<WnClient>,
     event_journal: Arc<Mutex<EventJournal>>,
-    group_id: String,
+    source_group_id: String,
+    reply_group_id: String,
     request: AgentRequest,
 ) {
     std::thread::spawn(move || {
         let request_for_media = request.clone();
         let progress_wn = Arc::clone(&wn);
         let progress_journal = Arc::clone(&event_journal);
-        let progress_group = group_id.clone();
+        let progress_group = reply_group_id.clone();
         let result = app.run_request_record_with_progress(request, move |text| {
             if let Err(error) =
                 send_reply_recorded(&progress_wn, &progress_journal, &progress_group, &text)
@@ -3180,15 +3260,28 @@ fn run_inline_job(
                 format!("Error: job failed to start: {error:#}")
             }
         };
-        if let Err(error) = send_reply_recorded(&wn, &event_journal, &group_id, &reply) {
-            eprintln!("agentnoise: failed to send job reply: {error:#}");
-        }
+        let delivered_to_reply =
+            match send_reply_recorded(&wn, &event_journal, &reply_group_id, &reply) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("agentnoise: failed to send job reply: {error:#}");
+                    false
+                }
+            };
+        mirror_job_reply_to_source_if_needed(
+            &wn,
+            &event_journal,
+            &source_group_id,
+            &reply_group_id,
+            &reply,
+            delivered_to_reply,
+        );
         if let Ok(record) = result {
             upload_referenced_job_media(
                 &app,
                 &wn,
                 &event_journal,
-                &group_id,
+                &reply_group_id,
                 &request_for_media,
                 &record,
             );
@@ -4395,6 +4488,29 @@ mod tests {
         assert!(text.contains("Reply after it finishes"));
         assert!(text.contains("/tail q-abcde"));
         assert!(text.contains("/cancel q-abcde"));
+    }
+
+    #[test]
+    fn terminal_reply_from_work_chat_is_mirrored_to_source_chat() {
+        assert!(should_mirror_job_reply_to_source("inbox", "worker"));
+        assert!(!should_mirror_job_reply_to_source("worker", "worker"));
+        assert!(!should_mirror_job_reply_to_source("", "worker"));
+
+        let text = mirrored_job_reply_text("abcdef0123456789", "Done · an-123\nFinal answer", true);
+
+        assert!(text.contains("Done in work chat abcdef"));
+        assert!(text.contains("whitenoise://chat/abcdef0123456789"));
+        assert!(text.contains("Mirrored here"));
+        assert!(text.contains("Done · an-123\nFinal answer"));
+    }
+
+    #[test]
+    fn failed_work_chat_delivery_mirror_says_answer_is_posted_here() {
+        let text = mirrored_job_reply_text("abcdef0123456789", "Error: nope", false);
+
+        assert!(text.contains("could not post to work chat abcdef"));
+        assert!(text.contains("posting the answer here"));
+        assert!(text.contains("Error: nope"));
     }
 
     #[test]

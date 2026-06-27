@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.43 - 2026-06-27
+
+- Mirrored final queued and inline job replies back to the source chat whenever a primary-chat command created a separate work chat.
+- Keeps the work chat and `whitenoise://chat/...` handoff behavior, but prevents answers from being hidden when White Noise mobile clients do not surface new chats immediately.
+- If posting to the work chat fails, the source-chat mirror clearly says the answer is being posted there instead.
+
 ## 0.1.42 - 2026-06-27
 
 - Changes macOS legacy daemon recovery to kickstart `local.agentnoise.wnd` instead of disabling it, preserving existing Keychain authorization for hosts where the old LaunchAgent is the only White Noise daemon allowed to unlock its database non-interactively.
