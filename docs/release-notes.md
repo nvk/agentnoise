@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.40 - 2026-06-27
+
+- Migrates legacy managed White Noise CLI paths such as `/Users/.../bin/agentnoise-whitenoise/wn` back to the packaged `wn` next to the installed `agentnoise` binary.
+- Restarts the White Noise daemon on transport startup after that migration so stale old `wnd` processes do not keep owning the socket.
+- Restarts the White Noise daemon before retrying sends that fail with closed-connection, not-connected socket, broken-pipe, connection-refused/reset, or too-many-open-files errors.
+- Keeps the v0.1.39 supervised tmux worker behavior, so daemon/send failures no longer strand the worker or the queue.
+
 ## 0.1.39 - 2026-06-27
 
 - Changed `agentnoise worker start --tmux` to run a supervised tmux loop that

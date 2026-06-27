@@ -17,11 +17,13 @@ This installs the upstream `whitenoise-cli` package under:
 
 agentnoise discovers `wn` in this order:
 
-1. explicit `whitenoise.wn_bin` path in `config.toml`
+1. explicit `whitenoise.wn_bin` path in `config.toml`, except known old agentnoise-managed paths are migrated back to the packaged default
 2. `wn` beside the running `agentnoise` executable
 3. agentnoise-managed install under Application Support
 4. repo-local development build under `.local-whitenoise/bin`
 5. `wn` on `PATH`
+
+On Homebrew upgrades, `agentnoise transport run` resets legacy managed paths such as `~/bin/agentnoise-whitenoise/wn` to the packaged `wn` beside `agentnoise` and restarts the White Noise daemon so an old `wnd` process does not keep owning the socket. If sends fail later with closed-socket, broken-pipe, or too-many-open-files errors, agentnoise restarts `wnd` before retrying delivery.
 
 ## Manual Build
 

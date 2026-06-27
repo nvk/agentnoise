@@ -1555,6 +1555,7 @@ fn transport_run(config_path: &Path, args: TransportRunArgs) -> Result<()> {
         config.whitenoise.add_control_group_id(group);
         config.save(config_path)?;
     }
+    let reset_wn_bin = reset_managed_wn_bin_if_needed(config_path, &mut config)?;
     wait_for_inline_listener_before_transport(config_path, &config)?;
 
     let mode = if runtime::stdio_is_interactive() {
@@ -1572,6 +1573,12 @@ fn transport_run(config_path: &Path, args: TransportRunArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("inline listener started while transport was starting"))?;
 
     let _daemon = if args.no_daemon {
+        None
+    } else if reset_wn_bin {
+        eprintln!(
+            "agentnoise: migrated managed White Noise CLI path; restarting White Noise daemon"
+        );
+        whitenoise_cli::restart_daemon(&config.whitenoise)?;
         None
     } else {
         let daemon = whitenoise_cli::ensure_daemon(&config.whitenoise)?;
@@ -1592,6 +1599,19 @@ fn transport_run(config_path: &Path, args: TransportRunArgs) -> Result<()> {
     }
     let _engine_guard = engine_guard;
     run_listener(config_path, config, pairing, ListenerExecution::Queue)
+}
+
+fn reset_managed_wn_bin_if_needed(config_path: &Path, config: &mut Config) -> Result<bool> {
+    if !whitenoise_cli::should_reset_wn_bin_to_default(&config.whitenoise.wn_bin) {
+        return Ok(false);
+    }
+    let previous = std::mem::replace(&mut config.whitenoise.wn_bin, "wn".to_string());
+    config.save(config_path)?;
+    eprintln!(
+        "agentnoise: reset managed White Noise CLI path from {} to packaged default",
+        previous
+    );
+    Ok(true)
 }
 
 fn wait_for_inline_listener_before_transport(config_path: &Path, config: &Config) -> Result<()> {

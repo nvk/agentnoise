@@ -133,6 +133,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 fn is_agentnoise_managed_wn_path(path: &Path) -> bool {
     path == managed_wn_path()
         || path_components_end_with(path, &[".local-whitenoise", "bin", "wn"])
+        || path_components_end_with(path, &["bin", "agentnoise-whitenoise", "wn"])
         || path_components_contain(path, &["Cellar", "agentnoise", "*", "bin", "wn"])
 }
 
@@ -279,6 +280,47 @@ pub fn ensure_daemon(config: &WhitenoiseConfig) -> Result<Option<Child>> {
         "wn daemon did not become ready within {} seconds",
         DAEMON_START_TIMEOUT.as_secs()
     );
+}
+
+pub fn stop_daemon(config: &WhitenoiseConfig) -> Result<()> {
+    let wn = resolve_wn(&config.wn_bin);
+    let mut command = Command::new(&wn);
+    add_socket_arg(&mut command, config.resolved_socket().as_deref());
+    command.arg("daemon").arg("stop");
+    let output = output_with_timeout(
+        &mut command,
+        DAEMON_STATUS_TIMEOUT,
+        &format!("{} daemon stop", wn.display()),
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let text = if stdout.is_empty() { stderr } else { stdout };
+    if output.status.success() || text.to_ascii_lowercase().contains("not running") {
+        return Ok(());
+    }
+    bail!(
+        "{} daemon stop exited with {}: {}",
+        wn.display(),
+        output.status,
+        text
+    );
+}
+
+pub fn restart_daemon(config: &WhitenoiseConfig) -> Result<()> {
+    if let Err(error) = stop_daemon(config) {
+        eprintln!("agentnoise: White Noise daemon stop failed during restart: {error:#}");
+    }
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if !daemon_running(config)? {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    ensure_daemon(config)?;
+    Ok(())
 }
 
 pub fn daemon_status_with_socket(wn_path: &Path, socket: Option<&Path>) -> Result<String> {
@@ -1194,6 +1236,9 @@ mod tests {
         )));
         assert!(is_agentnoise_managed_wn_path(&PathBuf::from(
             "/opt/homebrew/Cellar/agentnoise/0.1.2/bin/wn"
+        )));
+        assert!(is_agentnoise_managed_wn_path(&PathBuf::from(
+            "/Users/me/bin/agentnoise-whitenoise/wn"
         )));
         assert!(!is_agentnoise_managed_wn_path(&PathBuf::from(
             "/tmp/custom/bin/wn"

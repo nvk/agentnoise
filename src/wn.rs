@@ -155,6 +155,14 @@ impl WnClient {
                     "agentnoise: failed to refresh pending White Noise proposals before retry: {error:#}"
                 );
             }
+            if is_recoverable_daemon_failure(&detail) {
+                eprintln!(
+                    "agentnoise: White Noise daemon connection failed; restarting daemon before retry: {detail}"
+                );
+                if let Err(error) = whitenoise_cli::restart_daemon(&self.config) {
+                    eprintln!("agentnoise: White Noise daemon restart failed: {error:#}");
+                }
+            }
             if detail.is_empty() {
                 bail!("wn messages send exited with {}", output.status);
             }
@@ -324,6 +332,20 @@ impl WnClient {
             command.arg("--socket").arg(socket);
         }
     }
+}
+
+fn is_recoverable_daemon_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "daemon closed connection",
+        "socket is not connected",
+        "broken pipe",
+        "connection reset",
+        "connection refused",
+        "too many open files",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
 }
 
 fn run_json_command(mut command: Command, context: &str) -> Result<Value> {
@@ -855,5 +877,19 @@ esac
         let chunks = chunk_text("abcdef", 2);
         assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 2));
         assert_eq!(chunks.concat(), "abcdef");
+    }
+
+    #[test]
+    fn detects_recoverable_daemon_failures() {
+        assert!(is_recoverable_daemon_failure(
+            r#"Error: Message("daemon closed connection without responding")"#
+        ));
+        assert!(is_recoverable_daemon_failure(
+            r#"Error: Io(Os { code: 57, kind: NotConnected, message: "Socket is not connected" })"#
+        ));
+        assert!(is_recoverable_daemon_failure("Broken pipe"));
+        assert!(!is_recoverable_daemon_failure(
+            "MDK error: Can't create message because a pending proposal exists."
+        ));
     }
 }

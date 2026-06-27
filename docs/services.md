@@ -62,8 +62,10 @@ be claimed by a login-shell worker. On remote hosts, prefer the supervised
 tmux worker so transient worker exits do not leave queued jobs stranded:
 
 ```sh
-agentnoise worker start
+agentnoise worker start --tmux
 ```
+
+The transport also restarts a wedged White Noise daemon when delivery fails with closed-socket or broken-pipe errors, and Homebrew upgrades migrate old managed `wn` paths back to the packaged CLI.
 
 If you intentionally want to test launchd-launched Codex anyway, set
 `AGENTNOISE_ALLOW_LAUNCHD_CODEX=1` in that service environment.
