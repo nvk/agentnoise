@@ -23,6 +23,8 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.41** - **Legacy `wnd` LaunchAgent cleanup.** Transport recovery now disables the old `local.agentnoise.wnd` LaunchAgent before restarting White Noise, so Homebrew installs stop reviving stale `/Users/.../bin/wnd` daemons after an upgrade.
+
 **v0.1.40** - **White Noise daemon self-recovery.** AgentNoise now migrates legacy managed `wn` paths to the packaged Homebrew CLI on transport startup, restarts the White Noise daemon after that migration, and restarts a wedged daemon when sends fail with closed-socket/broken-pipe errors. This fixes Frontier-style cases where jobs run but phone replies never deliver because an old `wnd` stayed alive.
 
 **v0.1.39** - **Supervised worker tmux.** `agentnoise worker start --tmux` now starts a supervised tmux loop that restarts the worker if it exits, and queued-job reply/send errors no longer kill the worker process. This keeps Frontier-style remote installs from silently piling up queued jobs when a worker dies after a transient White Noise or job error.

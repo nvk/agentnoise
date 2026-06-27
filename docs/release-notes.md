@@ -1,5 +1,10 @@
 # Release Notes
 
+## 0.1.41 - 2026-06-27
+
+- Disables the legacy macOS `local.agentnoise.wnd` LaunchAgent during White Noise daemon restart/recovery when that old agentnoise-owned plist is present.
+- Prevents Homebrew transports from repeatedly reviving stale `/Users/.../bin/wnd` daemons after v0.1.40 migrates `wn_bin` back to the packaged CLI.
+
 ## 0.1.40 - 2026-06-27
 
 - Migrates legacy managed White Noise CLI paths such as `/Users/.../bin/agentnoise-whitenoise/wn` back to the packaged `wn` next to the installed `agentnoise` binary.

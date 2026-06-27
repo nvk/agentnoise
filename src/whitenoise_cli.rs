@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -307,6 +308,7 @@ pub fn stop_daemon(config: &WhitenoiseConfig) -> Result<()> {
 }
 
 pub fn restart_daemon(config: &WhitenoiseConfig) -> Result<()> {
+    disable_legacy_agentnoise_wnd_launch_agent();
     if let Err(error) = stop_daemon(config) {
         eprintln!("agentnoise: White Noise daemon stop failed during restart: {error:#}");
     }
@@ -322,6 +324,46 @@ pub fn restart_daemon(config: &WhitenoiseConfig) -> Result<()> {
     ensure_daemon(config)?;
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+fn disable_legacy_agentnoise_wnd_launch_agent() {
+    const LABEL: &str = "local.agentnoise.wnd";
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let plist = home.join("Library/LaunchAgents/local.agentnoise.wnd.plist");
+    let should_disable = fs::read_to_string(&plist)
+        .map(|text| text.contains(LABEL))
+        .unwrap_or(false);
+    if !should_disable {
+        return;
+    }
+
+    let _ = Command::new("launchctl").arg("remove").arg(LABEL).status();
+    let disabled = plist.with_extension("plist.disabled");
+    if disabled.exists()
+        && let Err(error) = fs::remove_file(&disabled)
+    {
+        eprintln!(
+            "agentnoise: failed to replace disabled legacy wnd LaunchAgent {}: {error:#}",
+            disabled.display()
+        );
+        return;
+    }
+    match fs::rename(&plist, &disabled) {
+        Ok(()) => eprintln!(
+            "agentnoise: disabled legacy White Noise LaunchAgent {}",
+            plist.display()
+        ),
+        Err(error) => eprintln!(
+            "agentnoise: failed to disable legacy White Noise LaunchAgent {}: {error:#}",
+            plist.display()
+        ),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_legacy_agentnoise_wnd_launch_agent() {}
 
 pub fn daemon_status_with_socket(wn_path: &Path, socket: Option<&Path>) -> Result<String> {
     let mut command = Command::new(wn_path);

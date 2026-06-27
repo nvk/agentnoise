@@ -27,7 +27,7 @@ agentnoise worker start --tmux
 
 The formula builds and installs `agentnoise`, `wn`, and `wnd` under the same
 Homebrew prefix. The service uses `agentnoise transport run`: it starts White
-Noise, migrates old agentnoise-managed `wn` paths back to the packaged CLI, restarts a stale `wnd` after that migration, repairs login when needed, subscribes to paired chats, handles pairing,
+Noise, migrates old agentnoise-managed `wn` paths back to the packaged CLI, disables the old `local.agentnoise.wnd` LaunchAgent when present, restarts a stale `wnd` after that migration, repairs login when needed, subscribes to paired chats, handles pairing,
 and writes agent jobs into the local SQLite queue. `agentnoise worker start` is
 the login-shell side that claims queued jobs and runs Codex, Claude, or Hermes;
 add `--tmux` when tmux is installed and you want the worker detached. The tmux worker is supervised and restarts itself if the worker process exits after a transient job or send error. Homebrew
