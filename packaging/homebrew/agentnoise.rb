@@ -1,8 +1,8 @@
 class Agentnoise < Formula
   desc "Chat with local coding agents through White Noise"
   homepage "https://agentnoise.org"
-  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.38.tar.gz"
-  sha256 "6cd071041652e2072831e47db26d95dc581368c11d9b0a5c000e158cd13375bf"
+  url "https://github.com/nvk/agentnoise/archive/refs/tags/v0.1.39.tar.gz"
+  sha256 "2b7e7dac79ebabffcdd1a46098abbe11cc840fd0b2842ad79441c020ac9b9ca7"
   license "MIT"
   head "https://github.com/nvk/agentnoise.git", branch: "main"
 
@@ -72,6 +72,6 @@ class Agentnoise < Formula
   end
 
   test do
-    assert_match "agentnoise 0.1.38", shell_output("#{bin}/agentnoise --version")
+    assert_match "agentnoise 0.1.39", shell_output("#{bin}/agentnoise --version")
   end
 end
