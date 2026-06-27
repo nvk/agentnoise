@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.44 - 2026-06-27
+
+- Worker startup now treats non-interactive OS-keychain nsec restore failures as warnings instead of fatal errors, so supervised tmux workers keep claiming queued jobs when the White Noise daemon is already logged in.
+- Transport discovery, reconciliation, and repeated subscription exits now trigger rate-limited White Noise daemon restarts for broken-pipe, closed-socket, connection-refused/reset, and too-many-open-files failures.
+- This covers Frontier-style cases where jobs are queued but the subscription layer wedges before the send path has a chance to trigger daemon recovery.
+
 ## 0.1.43 - 2026-06-27
 
 - Mirrored final queued and inline job replies back to the source chat whenever a primary-chat command created a separate work chat.

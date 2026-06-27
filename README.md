@@ -23,6 +23,8 @@ such alpha, much wow.
 
 ## Changelog
 
+**v0.1.44** - **Remote worker and subscription recovery.** Login-shell workers now keep running when a non-interactive keychain restore fails, and the transport restarts wedged White Noise daemons when discovery, reconciliation, or repeated subscription exits show broken-pipe/closed-socket symptoms.
+
 **v0.1.43** - **Mirror work-chat answers back to the launcher.** When a primary-chat command starts a new White Noise work chat, terminal job replies are also mirrored back into the primary chat so the answer remains visible even if the mobile client does not surface the newly-created chat immediately.
 
 **v0.1.42** - **Restart legacy `wnd`, do not remove it.** Recovery now kickstarts the old `local.agentnoise.wnd` LaunchAgent when it exists, preserving its Keychain authorization while still refreshing stale White Noise daemons.

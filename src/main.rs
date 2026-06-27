@@ -1668,8 +1668,14 @@ fn worker_start(config_path: &Path, args: WorkerStartArgs) -> Result<()> {
         return Ok(());
     };
 
-    if whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise)? {
-        eprintln!("agentnoise: restored White Noise login from configured nsec");
+    match whitenoise_cli::ensure_login_from_configured_nsec(&config.whitenoise) {
+        Ok(true) => eprintln!("agentnoise: restored White Noise login from configured nsec"),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!(
+                "agentnoise worker: could not restore White Noise login from configured nsec; continuing because the transport may already be logged in: {error:#}"
+            );
+        }
     }
     let queue = JobQueue::open(config.resolved_queue_path())?;
     let app = Arc::new(AgentApp::from_config_path(config_path)?);
@@ -2430,6 +2436,7 @@ fn listen(
     println!("agentnoise listening");
 
     let ignore_initial = app.config().whitenoise.ignore_initial_messages;
+    let mut last_daemon_recovery = None;
 
     for item in rx {
         match item {
@@ -2461,6 +2468,11 @@ fn listen(
             }
             StreamItem::DiscoveryError(message) => {
                 eprintln!("agentnoise: group discovery failed: {message}");
+                maybe_restart_daemon_for_transport_error(
+                    app.config(),
+                    &message,
+                    &mut last_daemon_recovery,
+                );
             }
             StreamItem::LocalSessionsChanged(sessions) => {
                 match local_session_notification_group(config_path, app.config()) {
@@ -2495,6 +2507,11 @@ fn listen(
                     save_subscriptions_snapshot(&subscriptions, &registry);
                 }
                 eprintln!("agentnoise: wn stream error for {group_id}: {message}");
+                maybe_restart_daemon_for_transport_error(
+                    app.config(),
+                    &message,
+                    &mut last_daemon_recovery,
+                );
             }
             StreamItem::Reconcile { group_id } => {
                 let should_poll = {
@@ -2567,6 +2584,11 @@ fn listen(
                     save_subscriptions_snapshot(&subscriptions, &registry);
                 }
                 eprintln!("agentnoise: wn reconciliation failed for {group_id}: {message}");
+                maybe_restart_daemon_for_transport_error(
+                    app.config(),
+                    &message,
+                    &mut last_daemon_recovery,
+                );
             }
             StreamItem::RestartSubscription { group_id } => {
                 if let Err(error) = subscribe_group_if_needed(
@@ -2583,6 +2605,11 @@ fn listen(
                     eprintln!(
                         "agentnoise: failed to restart subscription for {group_id}: {error:#}"
                     );
+                    maybe_restart_daemon_for_transport_error(
+                        app.config(),
+                        &format!("{error:#}"),
+                        &mut last_daemon_recovery,
+                    );
                     schedule_subscription_restart(tx.clone(), group_id, 2);
                 }
             }
@@ -2598,6 +2625,12 @@ fn listen(
                 };
                 if !status.success() {
                     eprintln!("agentnoise: wn subscribe for {group_id} exited with {status}");
+                    maybe_restart_daemon_after_repeated_subscription_exit(
+                        app.config(),
+                        &group_id,
+                        restart_count,
+                        &mut last_daemon_recovery,
+                    );
                 }
                 schedule_subscription_restart(tx.clone(), group_id, restart_count);
             }
@@ -4137,6 +4170,60 @@ fn subscription_restart_delay(restart_count: u32) -> Duration {
     Duration::from_secs(seconds.min(30))
 }
 
+fn maybe_restart_daemon_for_transport_error(
+    config: &Config,
+    detail: &str,
+    last_restart: &mut Option<Instant>,
+) {
+    if !is_recoverable_wn_daemon_failure(detail) {
+        return;
+    }
+    restart_wn_daemon_rate_limited(config, detail, last_restart);
+}
+
+fn maybe_restart_daemon_after_repeated_subscription_exit(
+    config: &Config,
+    group_id: &str,
+    restart_count: u32,
+    last_restart: &mut Option<Instant>,
+) {
+    if restart_count < 3 {
+        return;
+    }
+    let detail = format!("wn subscribe for {group_id} exited repeatedly ({restart_count})");
+    restart_wn_daemon_rate_limited(config, &detail, last_restart);
+}
+
+fn restart_wn_daemon_rate_limited(
+    config: &Config,
+    detail: &str,
+    last_restart: &mut Option<Instant>,
+) {
+    const MIN_INTERVAL: Duration = Duration::from_secs(30);
+    if last_restart.is_some_and(|instant| instant.elapsed() < MIN_INTERVAL) {
+        return;
+    }
+    *last_restart = Some(Instant::now());
+    eprintln!("agentnoise: White Noise daemon looks wedged; restarting daemon: {detail}");
+    if let Err(error) = whitenoise_cli::restart_daemon(&config.whitenoise) {
+        eprintln!("agentnoise: White Noise daemon restart failed: {error:#}");
+    }
+}
+
+fn is_recoverable_wn_daemon_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "daemon closed connection",
+        "socket is not connected",
+        "broken pipe",
+        "connection reset",
+        "connection refused",
+        "too many open files",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
 #[cfg(unix)]
 fn terminate_subscription_process(pid: u32) {
     match std::process::Command::new("kill")
@@ -4350,6 +4437,18 @@ mod tests {
                 2
             ) > send_retry_delay("temporary transport failure", 2)
         );
+    }
+
+    #[test]
+    fn transport_recovery_detects_subscription_daemon_failures() {
+        assert!(is_recoverable_wn_daemon_failure("Broken pipe"));
+        assert!(is_recoverable_wn_daemon_failure(
+            "daemon closed connection without responding"
+        ));
+        assert!(is_recoverable_wn_daemon_failure(
+            "failed to create log file: Too many open files"
+        ));
+        assert!(!is_recoverable_wn_daemon_failure("permission denied"));
     }
 
     #[test]
