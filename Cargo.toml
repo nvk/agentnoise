@@ -2,6 +2,7 @@
 name = "agentnoise"
 version = "0.1.44"
 edition = "2024"
+rust-version = "1.89"
 description = "Chat with local coding agents through White Noise"
 homepage = "https://agentnoise.com"
 repository = "https://github.com/nvk/agentnoise"

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -85,21 +85,11 @@ impl JobStore {
         }
         fs::create_dir_all(log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
 
-        let jobs = if path.exists() {
-            let text =
-                fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-            serde_json::from_str::<JobDatabase>(&text)
-                .with_context(|| format!("parsing {}", path.display()))?
-                .jobs
-        } else {
-            Vec::new()
-        };
-
         let store = Self {
             inner: Arc::new(JobStoreInner {
                 path: path.to_path_buf(),
                 log_dir: log_dir.to_path_buf(),
-                jobs: Mutex::new(jobs),
+                jobs: Mutex::new(Vec::new()),
             }),
         };
         store.with_jobs(|_| ())?;
@@ -194,23 +184,18 @@ impl JobStore {
     }
 
     pub fn recent(&self, count: usize) -> Vec<JobRecord> {
-        let Ok(jobs) = self.inner.jobs.lock() else {
-            return Vec::new();
-        };
-        jobs.iter().rev().take(count).cloned().collect()
+        self.with_fresh_jobs(false, |jobs| {
+            jobs.iter().rev().take(count).cloned().collect()
+        })
+        .unwrap_or_default()
     }
 
     pub fn tail(&self, id: &str, max_bytes: usize) -> Result<Option<String>> {
-        let job = {
-            let jobs = self
-                .inner
-                .jobs
-                .lock()
-                .map_err(|_| anyhow::anyhow!("job store lock poisoned"))?;
-            let Some(index) = matching_job_index(&jobs, id)? else {
-                return Ok(None);
-            };
-            jobs[index].clone()
+        let job = self.with_fresh_jobs(false, |jobs| -> Result<Option<JobRecord>> {
+            Ok(matching_job_index(jobs, id)?.map(|index| jobs[index].clone()))
+        })??;
+        let Some(job) = job else {
+            return Ok(None);
         };
         let bytes = fs::read(&job.log_path)
             .with_context(|| format!("reading {}", job.log_path.display()))?;
@@ -219,13 +204,14 @@ impl JobStore {
     }
 
     pub fn get(&self, id: &str) -> Option<JobRecord> {
-        let Ok(jobs) = self.inner.jobs.lock() else {
-            return None;
-        };
-        let Ok(Some(index)) = matching_job_index(&jobs, id) else {
-            return None;
-        };
-        Some(jobs[index].clone())
+        self.with_fresh_jobs(false, |jobs| {
+            matching_job_index(jobs, id)
+                .ok()
+                .flatten()
+                .map(|index| jobs[index].clone())
+        })
+        .ok()
+        .flatten()
     }
 
     fn update(&self, id: &str, update: impl FnOnce(&mut JobRecord)) -> Result<()> {
@@ -240,13 +226,44 @@ impl JobStore {
     }
 
     fn with_jobs<T>(&self, action: impl FnOnce(&mut Vec<JobRecord>) -> T) -> Result<T> {
+        self.with_fresh_jobs(true, action)
+    }
+
+    fn with_fresh_jobs<T>(
+        &self,
+        persist: bool,
+        action: impl FnOnce(&mut Vec<JobRecord>) -> T,
+    ) -> Result<T> {
         let mut jobs = self
             .inner
             .jobs
             .lock()
             .map_err(|_| anyhow::anyhow!("job store lock poisoned"))?;
+        // Lock a stable sidecar, not jobs.json: saving atomically replaces its inode.
+        // Every instance must reload *after* acquiring this cross-process lock.
+        let lock_path = self.inner.path.with_extension("json.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("opening {}", lock_path.display()))?;
+        lock.lock().context("locking job store")?;
+        *jobs = match fs::read_to_string(&self.inner.path) {
+            Ok(text) => {
+                serde_json::from_str::<JobDatabase>(&text)
+                    .context("parsing job store")?
+                    .jobs
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error).context("reading job store"),
+        };
         let result = action(&mut jobs);
-        self.save_locked(&jobs)?;
+        if persist {
+            self.save_locked(&jobs)?;
+        }
+        // Dropping the File releases the OS lock, including on error paths.
         Ok(result)
     }
 
