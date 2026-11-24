@@ -739,12 +739,13 @@ fn terminate_child(child: &mut Child) -> Result<()> {
         .arg(format!("-{pgid}"))
         .status();
     thread::sleep(Duration::from_secs(2));
-    if child.try_wait()?.is_none() {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{pgid}"))
-            .status();
-    }
+    // The group leader may already have exited while a descendant ignored TERM.
+    // Escalate for the whole group regardless of the leader's status. ESRCH is
+    // expected when all group members have already exited.
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{pgid}"))
+        .status();
     Ok(())
 }
 
@@ -1682,5 +1683,66 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
 
         buffer.extend_from_slice(b"ijklmnop");
         assert_eq!(buffer.to_lossy_string(), "lmnop");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod descendant_cleanup_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    struct GroupCleanup(u32);
+    impl Drop for GroupCleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{}", self.0))
+                .status();
+        }
+    }
+
+    #[test]
+    fn termination_kills_descendants_after_leader_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("child.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "/bin/sh -c 'trap \"\" TERM; echo $$ > \"$1\"; exec sleep 30' child \"$1\" & wait",
+                "parent",
+            ])
+            .arg(&ready)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let _cleanup = GroupCleanup(child.id());
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let descendant = fs::read_to_string(&ready).unwrap();
+        terminate_child(&mut child).unwrap();
+        child.wait().unwrap();
+        let mut still_running = true;
+        for _ in 0..100 {
+            let output = Command::new("ps")
+                .args(["-p", descendant.trim(), "-o", "stat="])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            still_running = !state.trim().is_empty() && !state.trim().starts_with('Z');
+            if !still_running {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !still_running,
+            "TERM-resistant descendant survived timeout cleanup"
+        );
     }
 }
