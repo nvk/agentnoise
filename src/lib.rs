@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod launchd;
 pub mod local_sessions;
 pub mod paths;
+mod private_files;
 pub mod progress;
 pub mod queue;
 pub mod runner;

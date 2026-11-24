@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::private_files;
 use crate::runner::{AgentKind, AgentRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,9 +82,11 @@ struct JobStoreInner {
 impl JobStore {
     pub fn open(path: &Path, log_dir: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            private_files::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
-        fs::create_dir_all(log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+        private_files::create_dir_all(log_dir)
+            .with_context(|| format!("creating {}", log_dir.display()))?;
 
         let jobs = if path.exists() {
             let text =
@@ -259,7 +262,8 @@ impl JobStore {
             .inner
             .path
             .with_extension(format!("json.{}.tmp", Uuid::new_v4().simple()));
-        fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        private_files::write_new(&tmp, text.as_bytes())
+            .with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, &self.inner.path).with_context(|| {
             format!(
                 "renaming {} to {}",

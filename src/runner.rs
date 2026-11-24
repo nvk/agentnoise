@@ -21,6 +21,7 @@ use serde_json::Value;
 use crate::config::{Config, ProgressMode, RunnerLauncher};
 use crate::jobs::{JobRecord, JobStore};
 use crate::paths::is_gui_backed_workspace_path;
+use crate::private_files;
 use crate::progress::{self, ProgressEvent};
 use crate::text::format_chat_text;
 use crate::workspace;
@@ -547,9 +548,10 @@ impl Runner {
 
     fn create_log(&self, job: &JobRecord, plan: &CommandPlan) -> Result<Arc<Mutex<File>>> {
         if let Some(parent) = job.log_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            private_files::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let mut file = File::create(&job.log_path)
+        let mut file = private_files::create_new(&job.log_path)
             .with_context(|| format!("creating {}", job.log_path.display()))?;
         writeln!(file, "job: {}", job.id)?;
         writeln!(file, "agent: {}", job.agent)?;
